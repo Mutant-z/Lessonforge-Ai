@@ -57,9 +57,13 @@ dist-ssr
 # Database & Uploads
 *.sqlite3
 *.db
+*.db-shm
+*.db-wal
+storage/
 uploads/
 exports/
 temp/
+.superpowers/
 
 # IDE & Editors
 .vscode/
@@ -72,3 +76,4 @@ temp/
 # Log files
 *.log
 logs/
+.runtime/

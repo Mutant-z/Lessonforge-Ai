@@ -1,0 +1,88 @@
+from sqlalchemy import event, inspect, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from app.core.config import get_settings
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+settings = get_settings()
+engine = create_async_engine(settings.database_url, future=True)
+SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def configure_sqlite(dbapi_connection, _):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.close()
+
+
+async def create_schema() -> None:
+    from app.models import entities  # noqa: F401
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+        
+        # 兼容性迁移：检查 model_configs 表结构并动态补全缺失列
+        def migrate_sqlite_tables(sync_conn):
+            inspector = inspect(sync_conn)
+            if "model_configs" in inspector.get_table_names():
+                columns = [c["name"] for c in inspector.get_columns("model_configs")]
+                if "name" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN name VARCHAR(100) DEFAULT 'LLM 配置'"))
+                if "preferences_json" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN preferences_json JSON DEFAULT '{}'"))
+                if "is_active" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+                if "context_window_tokens" not in columns:
+                    sync_conn.execute(text(
+                        "ALTER TABLE model_configs ADD COLUMN context_window_tokens INTEGER NOT NULL DEFAULT 1000000"
+                    ))
+                if "supports_multimodal" not in columns:
+                    sync_conn.execute(text(
+                        "ALTER TABLE model_configs ADD COLUMN supports_multimodal BOOLEAN NOT NULL DEFAULT 0"
+                    ))
+
+            for table_name in ("course_projects", "course_intake_sessions"):
+                if table_name in inspector.get_table_names():
+                    table_columns = [c["name"] for c in inspector.get_columns(table_name)]
+                    if "model_config_id" not in table_columns:
+                        sync_conn.execute(text(
+                            f"ALTER TABLE {table_name} ADD COLUMN model_config_id VARCHAR(36)"
+                        ))
+
+            compatibility_columns = {
+                "generation_runs": {
+                    "course_task_id": "VARCHAR(36)",
+                    "trigger_type": "VARCHAR(30) NOT NULL DEFAULT 'initial'",
+                },
+                "artifacts": {
+                    "source_versions_json": "JSON NOT NULL DEFAULT '{}'",
+                },
+                "agent_messages": {
+                    "task_id": "VARCHAR(36)",
+                    "run_id": "VARCHAR(36)",
+                    "status": "VARCHAR(20) NOT NULL DEFAULT 'completed'",
+                },
+            }
+            for table_name, definitions in compatibility_columns.items():
+                if table_name not in inspector.get_table_names():
+                    continue
+                table_columns = {c["name"] for c in inspector.get_columns(table_name)}
+                for column_name, definition in definitions.items():
+                    if column_name not in table_columns:
+                        sync_conn.execute(text(
+                            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+                        ))
+
+        await connection.run_sync(migrate_sqlite_tables)
+
+
+async def get_db():
+    async with SessionLocal() as session:
+        yield session

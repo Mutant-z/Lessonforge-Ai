@@ -1,0 +1,90 @@
+@import './design-system.css';
+@import './animations.css';
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
+}
+
+button, input, textarea, select {
+  font-family: inherit;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+.page-container {
+  padding: 32px 36px 60px;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+}
+
+/* Page Header Utility - Clearer & Bold */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border-default);
+  padding-bottom: 22px;
+  margin-bottom: 28px;
+}
+
+.page-header-eyebrow {
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.page-header-title {
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  margin: 6px 0 0;
+  color: var(--text-primary);
+}
+
+.page-header-subtitle {
+  color: var(--text-secondary);
+  font-size: 15.5px;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* Common Card & Panel Utility */
+.lf-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 26px;
+}
+
+.lf-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.lf-card-title {
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text-primary);
+}

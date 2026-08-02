@@ -1,0 +1,217 @@
+:root {
+  /* Core Primary Palette - Modern Indigo & Deep Violet */
+  --primary-50: #eef2ff;
+  --primary-100: #e0e7ff;
+  --primary-200: #c7d2fe;
+  --primary-500: #6366f1;
+  --primary-600: #4f46e5;
+  --primary-700: #4338ca;
+
+  /* Vivid Educational Accent Palette */
+  --accent-blue: #2563eb;
+  --accent-cyan: #0284c7;
+  --accent-violet: #7c3aed;
+  --accent-mint: #059669;
+  --accent-amber: #d97706;
+  --accent-rose: #e11d48;
+
+  /* Soft Accent Aliases */
+  --color-primary: var(--primary-600);
+  --color-primary-hover: var(--primary-700);
+  --color-primary-soft: var(--primary-50);
+  --color-primary-border: #c7d2fe;
+
+  --accent-blue-soft: #eff6ff;
+  --accent-cyan-soft: #f0f9ff;
+  --accent-violet-soft: #f5f3ff;
+  --accent-mint-soft: #ecfdf5;
+  --accent-amber-soft: #fffbeb;
+  --accent-rose-soft: #fff1f2;
+
+  /* Surface & Layered Backgrounds */
+  --page-bg: #f5f7fa;
+  --bg-page: var(--page-bg);
+  --surface-primary: #ffffff;
+  --bg-surface: var(--surface-primary);
+  --surface-secondary: #f8fafc;
+  --bg-subtle: var(--surface-secondary);
+  --surface-tertiary: #f1f5f9;
+  --surface-emphasis: #eef2ff;
+  --surface-dark: #0f172a;
+  --surface-dark-card: rgba(15, 23, 42, 0.85);
+
+  --bg-hover: #f1f5f9;
+  --bg-glass: rgba(255, 255, 255, 0.92);
+  --bg-glass-dark: rgba(15, 23, 42, 0.92);
+
+  /* Typography Colors - High Contrast & Readability */
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-inverse: #ffffff;
+  --text-link: var(--primary-600);
+  --text-on-dark: #f8fafc;
+  --text-on-dark-muted: #cbd5e1;
+
+  /* Borders & Dividers */
+  --border-default: #e2e8f0;
+  --border-soft: #f1f5f9;
+  --border-light: var(--border-soft);
+  --border-strong: #cbd5e1;
+  --border-active: #818cf8;
+  --border-glass: rgba(255, 255, 255, 0.25);
+
+  /* Semantic Feedback Colors */
+  --success: #16a34a;
+  --warning: #d97706;
+  --danger: #dc2626;
+  --info: #2563eb;
+
+  --color-success: var(--success);
+  --color-success-soft: #f0fdf4;
+  --color-warning: var(--warning);
+  --color-warning-soft: #fffbeb;
+  --color-danger: var(--danger);
+  --color-danger-soft: #fef2f2;
+  --color-info: var(--info);
+  --color-info-soft: #eff6ff;
+
+  /* Radii Hierarchies */
+  --radius-control: 12px;
+  --radius-card: 18px;
+  --radius-panel: 24px;
+  --radius-hero: 32px;
+  --radius-pill: 999px;
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: var(--radius-control);
+  --radius-lg: var(--radius-card);
+  --radius-xl: var(--radius-hero);
+  --radius-full: var(--radius-pill);
+
+  /* Depth Shadows & Glows */
+  --shadow-xs: 0 1px 3px rgba(15, 23, 42, 0.05);
+  --shadow-sm: 0 4px 14px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 10px 28px rgba(15, 23, 42, 0.08);
+  --shadow-floating: 0 20px 48px rgba(15, 23, 42, 0.12);
+  --shadow-lg: var(--shadow-floating);
+  --shadow-glow-primary: 0 8px 32px rgba(79, 70, 229, 0.25);
+  --shadow-glow-cyan: 0 8px 32px rgba(2, 132, 199, 0.22);
+  --shadow-glow-agent: 0 8px 32px rgba(124, 58, 237, 0.22);
+
+  /* Spacing & Layout */
+  --sidebar-width: 270px;
+  --sidebar-collapsed-width: 80px;
+  --header-height: 72px;
+  --content-max-width: 1560px;
+
+  /* Motion Timing */
+  --motion-fast: 150ms;
+  --motion-normal: 240ms;
+  --motion-slow: 360ms;
+  --ease-out-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Global Reset & Base Typography */
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15.5px;
+  color: var(--text-primary);
+  background-color: var(--bg-page);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  padding: 0;
+}
+
+/* Utility Classes */
+.bg-glass {
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.text-gradient {
+  background: linear-gradient(135deg, var(--primary-600) 0%, var(--accent-violet) 50%, var(--accent-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-gradient-cyan {
+  background: linear-gradient(135deg, var(--accent-cyan) 0%, var(--accent-blue) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.card-hover {
+  transition: transform var(--motion-normal) var(--ease-out-smooth), box-shadow var(--motion-normal) var(--ease-out-smooth), border-color var(--motion-normal);
+}
+
+.card-hover:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-active);
+}
+
+/* Element Plus Custom Overrides */
+.el-button--primary {
+  background-color: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  border-radius: var(--radius-control) !important;
+  font-weight: 700 !important;
+  font-size: 14.5px !important;
+  box-shadow: var(--shadow-xs);
+  transition: all var(--motion-normal) var(--ease-out-smooth) !important;
+}
+
+.el-button--primary:hover {
+  background-color: var(--color-primary-hover) !important;
+  border-color: var(--color-primary-hover) !important;
+  box-shadow: var(--shadow-glow-primary) !important;
+  transform: translateY(-1px);
+}
+
+.el-button--large {
+  padding: 12px 24px !important;
+  height: 44px !important;
+  font-size: 15.5px !important;
+}
+
+.el-button--default {
+  border-radius: var(--radius-control) !important;
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  border-color: var(--border-default) !important;
+}
+
+.el-input__wrapper {
+  border-radius: var(--radius-control) !important;
+  box-shadow: 0 0 0 1px var(--border-default) inset !important;
+  padding: 6px 14px !important;
+  transition: all var(--motion-fast) !important;
+}
+
+.el-input__inner {
+  font-size: 14.5px !important;
+}
+
+.el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 2px var(--color-primary) inset !important;
+}
+
+.el-tag {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  border-radius: var(--radius-pill) !important;
+  padding: 3px 10px !important;
+}
+
+.el-tag--primary {
+  background-color: var(--color-primary-soft) !important;
+  color: var(--color-primary) !important;
+  border-color: var(--color-primary-border) !important;
+}
+

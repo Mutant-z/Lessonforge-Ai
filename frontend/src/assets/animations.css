@@ -1,0 +1,110 @@
+/* Animation Utilities */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes modalPop {
+  0% { opacity: 0; transform: scale(0.95) translateY(12px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+  50% { opacity: 0.85; transform: scale(1.03); box-shadow: 0 0 12px 4px rgba(99, 102, 241, 0.25); }
+}
+
+@keyframes statusPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.6; }
+}
+
+@keyframes typingBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes nodeActiveBorder {
+  0% { border-color: var(--color-primary); box-shadow: 0 0 0 0 rgba(91, 92, 240, 0.4); }
+  70% { border-color: var(--color-primary-hover); box-shadow: 0 0 0 8px rgba(91, 92, 240, 0); }
+  100% { border-color: var(--color-primary); box-shadow: 0 0 0 0 rgba(91, 92, 240, 0); }
+}
+
+@keyframes flowDash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+@keyframes subtleFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes glowPulse {
+  0%, 100% { opacity: 0.45; transform: scale(1); }
+  50% { opacity: 0.75; transform: scale(1.08); }
+}
+
+.animate-fade-in {
+  animation: fadeIn var(--motion-normal) var(--ease-out-smooth) forwards;
+}
+
+.animate-modal-pop {
+  animation: modalPop 280ms var(--ease-out-smooth) forwards;
+}
+
+.animate-pulse {
+  animation: pulseGlow 2.5s infinite ease-in-out;
+}
+
+.animate-status-dot {
+  animation: statusPulse 2s infinite ease-in-out;
+}
+
+.animate-float {
+  animation: subtleFloat 6s ease-in-out infinite;
+}
+
+.animate-float-delayed {
+  animation: subtleFloat 7s ease-in-out 1.5s infinite;
+}
+
+.shimmer-effect {
+  background: linear-gradient(90deg, var(--bg-subtle) 25%, var(--bg-hover) 50%, var(--bg-subtle) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.8s infinite;
+}
+
+.streaming-cursor-dot {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  margin-left: 4px;
+  background-color: var(--color-primary);
+  border-radius: 2px;
+  vertical-align: middle;
+  animation: typingBlink 0.9s infinite;
+}
+
+/* Reduced Motion Mode Support */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .streaming-cursor-dot {
+    animation: none !important;
+    opacity: 0.8 !important;
+  }
+}
+
+

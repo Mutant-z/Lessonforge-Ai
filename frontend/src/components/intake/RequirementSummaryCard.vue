@@ -204,17 +204,22 @@ function promptForField(label: string) {
 
 <style scoped>
 .requirement-card {
-  background: var(--surface-primary);
+  background: var(--surface-primary, #ffffff);
   border: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  transition: all 300ms var(--ease-out-smooth);
+  transition: all 300ms var(--ease-out-smooth, ease);
 }
 
 .requirement-card.flash-update {
-  box-shadow: inset 3px 0 0 #002fa7;
+  animation: cardFlash 1.2s ease-in-out;
+}
+
+@keyframes cardFlash {
+  0% { box-shadow: inset 0 0 0 2px var(--primary-500, #6366f1); }
+  100% { box-shadow: inset 0 0 0 0 transparent; }
 }
 
 .card-header {
@@ -222,9 +227,9 @@ function promptForField(label: string) {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  padding: 14px 18px;
-  border-bottom: 1px solid #d9dce3;
-  background: #ffffff;
+  padding: 16px 20px;
+  border-bottom: 1px solid #f1f5f9;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
 }
 
 .header-main {
@@ -235,30 +240,30 @@ function promptForField(label: string) {
 .title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .revision-tag {
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 800;
-  color: #002fa7;
-  background: #ffffff;
-  border: 1px solid #002fa7;
-  padding: 1px 6px;
-  border-radius: 0;
+  color: var(--primary-700, #4338ca);
+  background: var(--primary-50, #eef2ff);
+  border: 1px solid var(--primary-200, #c7d2fe);
+  padding: 1px 8px;
+  border-radius: var(--radius-pill, 999px);
 }
 
 .card-title {
   margin: 0;
   font-size: 15px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: var(--text-primary, #0f172a);
   letter-spacing: -0.01em;
 }
 
 .header-sub-note {
-  font-size: 11px;
-  color: var(--text-muted);
+  font-size: 11.5px;
+  color: var(--text-muted, #64748b);
   margin-top: 2px;
 }
 
@@ -272,38 +277,38 @@ function promptForField(label: string) {
 .completion-pill span {
   font-size: 11.5px;
   font-weight: 800;
-  color: #002fa7;
+  color: var(--primary-600, #4f46e5);
 }
 
 .mini-progress-bar {
-  width: 84px;
+  width: 90px;
   height: 6px;
   background: #e2e8f0;
-  border-radius: 0;
+  border-radius: 999px;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
-  background: #002fa7;
-  border-radius: 0;
-  transition: width 400ms var(--ease-out-smooth);
+  background: linear-gradient(90deg, #6366f1 0%, #4338ca 100%);
+  border-radius: 999px;
+  transition: width 400ms var(--ease-out-smooth, ease);
 }
 
 .field-groups-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 
 .group-block {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .group-title-strip {
@@ -312,37 +317,38 @@ function promptForField(label: string) {
 }
 
 .group-name {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 800;
-  color: #64748b;
-  letter-spacing: 0.05em;
+  color: #475569;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  background: transparent;
-  padding: 2px 8px;
-  border-radius: 0;
+  background: #f1f5f9;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill, 999px);
 }
 
 .group-fields-grid {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .field-cell {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 0;
-  padding: 10px 14px;
-  transition: all 180ms var(--ease-out-smooth);
+  border-radius: 12px;
+  padding: 12px 16px;
+  transition: all 200ms var(--ease-out-smooth, ease);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
 }
 
 .field-cell:hover {
   border-color: #cbd5e1;
-  box-shadow: none;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
 }
 
 .field-cell.confirmed {
-  border-left: 3px solid #002fa7;
+  border-left: 3.5px solid var(--primary-600, #4f46e5);
   background: #ffffff;
 }
 
@@ -359,8 +365,8 @@ function promptForField(label: string) {
 }
 
 .field-cell.missing:hover {
-  border-color: #002fa7;
-  background: #f7f7f8;
+  border-color: var(--primary-500, #6366f1);
+  background: #f1f5f9;
 }
 
 .field-cell.optional {
@@ -387,7 +393,7 @@ function promptForField(label: string) {
 }
 
 .req-star {
-  color: #002fa7;
+  color: var(--primary-600, #4f46e5);
   font-size: 13px;
   font-weight: 900;
 }
@@ -402,15 +408,15 @@ function promptForField(label: string) {
   font-size: 11px;
   font-weight: 700;
   padding: 2px 8px;
-  border-radius: 0;
+  border-radius: var(--radius-pill, 999px);
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
 .status-chip.confirmed {
-  background: #f2f5ff;
-  color: #002fa7;
+  background: var(--primary-50, #eef2ff);
+  color: var(--primary-700, #4338ca);
 }
 
 .status-chip.assumption {
@@ -422,12 +428,12 @@ function promptForField(label: string) {
   background: #e2e8f0;
   color: #475569;
   cursor: pointer;
-  transition: all var(--motion-fast);
+  transition: all var(--motion-fast, 150ms);
 }
 
 .status-chip.missing:hover {
-  background: #f2f5ff;
-  color: #002fa7;
+  background: var(--primary-50, #eef2ff);
+  color: var(--primary-600, #4f46e5);
 }
 
 .status-chip.optional {
@@ -440,16 +446,16 @@ function promptForField(label: string) {
   background: transparent;
   color: #94a3b8;
   cursor: pointer;
-  padding: 3px 5px;
-  border-radius: 0;
-  transition: all var(--motion-fast);
+  padding: 4px;
+  border-radius: 6px;
+  transition: all var(--motion-fast, 150ms);
   display: grid;
   place-items: center;
 }
 
 .edit-btn:hover {
-  color: #002fa7;
-  background: #f2f5ff;
+  color: var(--primary-600, #4f46e5);
+  background: var(--primary-50, #eef2ff);
 }
 
 .field-value-body {
@@ -487,10 +493,10 @@ function promptForField(label: string) {
   align-items: center;
   gap: 6px;
   margin-top: 6px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   background: #fffbeb;
   border: 1px solid #fde68a;
-  border-radius: 6px;
+  border-radius: 8px;
   color: #b45309;
   font-size: 11.5px;
   font-weight: 600;

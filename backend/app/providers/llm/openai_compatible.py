@@ -204,7 +204,17 @@ class OpenAICompatibleProvider(LLMProvider):
         except LLMProviderError as exc:
             if exc.code not in CONTENT_ERROR_CODES:
                 raise
-        return await self._structured_request(system, prompt, schema, json_mode=False)
+        try:
+            return await self._structured_request(system, prompt, schema, json_mode=False)
+        except LLMProviderError as exc:
+            if exc.code not in CONTENT_ERROR_CODES:
+                raise
+            recovery_prompt = (
+                prompt
+                + "\n\n上一次返回为空或不符合结构。请直接输出一个紧凑的 JSON 对象，"
+                "不要输出分析、Markdown 代码围栏或额外说明。"
+            )
+            return await self._structured_request(system, recovery_prompt, schema, json_mode=False)
 
     async def stream_text(self, system: str, prompt: str):
         if not self.api_key:

@@ -1,16 +1,17 @@
-import { ref, onMounted, onBeforeUnmount, type Ref } from 'vue';
+import { ref, onMounted, onBeforeUnmount, watch, type Ref } from 'vue';
 
 export function useAutoScroll(containerRef: Ref<HTMLElement | null>) {
   const isAutoScrollActive = ref(true);
   const unreadCount = ref(0);
+  let boundContainer: HTMLElement | null = null;
+  let frameId: number | null = null;
 
   function handleScroll() {
     if (!containerRef.value) return;
     const { scrollTop, scrollHeight, clientHeight } = containerRef.value;
     const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
 
-    // If user scrolled up by more than 40px, pause auto-scroll
-    if (distanceToBottom > 40) {
+    if (distanceToBottom > 80) {
       if (isAutoScrollActive.value) {
         isAutoScrollActive.value = false;
       }
@@ -23,32 +24,42 @@ export function useAutoScroll(containerRef: Ref<HTMLElement | null>) {
 
   function scrollToBottom(smooth = true) {
     if (!containerRef.value) return;
-    containerRef.value.scrollTo({
-      top: containerRef.value.scrollHeight,
-      behavior: smooth ? 'smooth' : 'auto'
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = requestAnimationFrame(() => {
+      frameId = null;
+      containerRef.value?.scrollTo({
+        top: containerRef.value.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto'
+      });
     });
     isAutoScrollActive.value = true;
     unreadCount.value = 0;
   }
 
-  function notifyNewContent() {
+  function notifyNewContent(smooth = false) {
     if (isAutoScrollActive.value) {
-      scrollToBottom();
+      scrollToBottom(smooth);
     } else {
       unreadCount.value++;
     }
   }
 
+  function bindContainer(container: HTMLElement | null) {
+    if (boundContainer === container) return;
+    boundContainer?.removeEventListener('scroll', handleScroll);
+    boundContainer = container;
+    boundContainer?.addEventListener('scroll', handleScroll, { passive: true });
+  }
+
+  watch(containerRef, bindContainer, { flush: 'post' });
+
   onMounted(() => {
-    if (containerRef.value) {
-      containerRef.value.addEventListener('scroll', handleScroll, { passive: true });
-    }
+    bindContainer(containerRef.value);
   });
 
   onBeforeUnmount(() => {
-    if (containerRef.value) {
-      containerRef.value.removeEventListener('scroll', handleScroll);
-    }
+    bindContainer(null);
+    if (frameId !== null) cancelAnimationFrame(frameId);
   });
 
   return {

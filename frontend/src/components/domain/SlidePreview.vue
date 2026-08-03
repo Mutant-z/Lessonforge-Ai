@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { PPTSlide } from '../../types';
 import { Refresh, Microphone } from '@element-plus/icons-vue';
 
@@ -13,32 +13,54 @@ const emit = defineEmits<{
   (e: 'regenerateSlide', slideIndex: number): void;
 }>();
 
-const showNotes = ref(true);
+const PPT_CANVAS_WIDTH = 960;
+const canvasFrame = ref<HTMLElement | null>(null);
+const canvasScale = ref(1);
+let resizeObserver: ResizeObserver | null = null;
+
 const bullets = computed(() => props.slide.bullet_points || (props.slide as unknown as { body?: string[] }).body || []);
 const layoutName = computed(() => props.slide.layout_type || (props.slide as unknown as { layout?: string }).layout || '标准演示页');
+
+function syncCanvasScale(width: number) {
+  if (width > 0) canvasScale.value = width / PPT_CANVAS_WIDTH;
+}
+
+onMounted(() => {
+  if (!canvasFrame.value) return;
+
+  syncCanvasScale(canvasFrame.value.clientWidth);
+  resizeObserver = new ResizeObserver(([entry]) => {
+    if (entry) syncCanvasScale(entry.contentRect.width);
+  });
+  resizeObserver.observe(canvasFrame.value);
+});
+
+onBeforeUnmount(() => resizeObserver?.disconnect());
 </script>
 
 <template>
   <div class="slide-preview-container animate-fade-in">
     <!-- 16:9 Presentation Canvas -->
-    <div class="ppt-canvas-aspect">
-      <div class="ppt-header">
-        <span class="slide-num-badge">PAGE {{ slide.slide_number || slideIndex + 1 }} / {{ totalSlides }}</span>
-        <span class="layout-badge">{{ layoutName }}</span>
-      </div>
+    <div ref="canvasFrame" class="ppt-canvas-frame">
+      <div class="ppt-canvas" :style="{ transform: `scale(${canvasScale})` }">
+        <div class="ppt-header">
+          <span class="slide-num-badge">PAGE {{ slide.slide_number || slideIndex + 1 }} / {{ totalSlides }}</span>
+          <span class="layout-badge">{{ layoutName }}</span>
+        </div>
 
-      <h2 class="slide-title">{{ slide.title || '无标题幻灯片' }}</h2>
+        <h2 class="slide-title">{{ slide.title || '无标题幻灯片' }}</h2>
 
-      <div class="slide-bullets-area">
-        <ul>
-          <li v-for="(bullet, bIdx) in bullets" :key="bIdx">
-            {{ bullet }}
-          </li>
-        </ul>
-      </div>
+        <div class="slide-bullets-area">
+          <ul>
+            <li v-for="(bullet, bIdx) in bullets" :key="bIdx">
+              {{ bullet }}
+            </li>
+          </ul>
+        </div>
 
-      <div v-if="slide.visual_suggestion" class="slide-visual-hint">
-        <strong>视觉展示建议：</strong> {{ slide.visual_suggestion }}
+        <div v-if="slide.visual_suggestion" class="slide-visual-hint">
+          <strong>视觉展示建议：</strong> {{ slide.visual_suggestion }}
+        </div>
       </div>
     </div>
 
@@ -62,14 +84,25 @@ const layoutName = computed(() => props.slide.layout_type || (props.slide as unk
 
 <style scoped>
 .slide-preview-container {
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.ppt-canvas-aspect {
+.ppt-canvas-frame {
   width: 100%;
   aspect-ratio: 16 / 9;
+  position: relative;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.ppt-canvas {
+  width: 960px;
+  height: 540px;
+  box-sizing: border-box;
   background: #ffffff;
   color: #18191d;
   border: 1px solid #cfd2d9;
@@ -79,8 +112,11 @@ const layoutName = computed(() => props.slide.layout_type || (props.slide as unk
   box-shadow: none;
   display: flex;
   flex-direction: column;
-  position: relative;
+  position: absolute;
+  inset: 0 auto auto 0;
   overflow: hidden;
+  transform-origin: top left;
+  will-change: transform;
 }
 
 .ppt-header {
@@ -151,6 +187,8 @@ const layoutName = computed(() => props.slide.layout_type || (props.slide as unk
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 10px;
 }
 

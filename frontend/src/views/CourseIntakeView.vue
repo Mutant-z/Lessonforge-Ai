@@ -356,11 +356,11 @@ async function confirmAndGenerate() {
 
 <style scoped>
 .intake-page {
-  height: calc(100vh - var(--header-height));
-  padding: 12px 16px;
+  height: calc(100vh - var(--header-height, 72px));
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  background: #f7f7f8;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
   box-sizing: border-box;
   overflow: hidden;
 }
@@ -371,26 +371,33 @@ async function confirmAndGenerate() {
   display: flex;
   align-items: stretch;
   overflow: hidden;
+  gap: 8px;
 }
 
 .chat-panel,
 .summary-panel {
   min-height: 0;
-  background: var(--surface-primary);
-  border: 1px solid #cfd2d9;
-  border-radius: 0;
-  box-shadow: none;
+  background: var(--surface-primary, #ffffff);
+  border: 1px solid var(--border-default, #e2e8f0);
+  border-radius: var(--radius-card, 18px);
+  box-shadow: var(--shadow-sm, 0 4px 14px rgba(15, 23, 42, 0.04));
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  transition: box-shadow 200ms ease;
+}
+
+.chat-panel:focus-within,
+.summary-panel:hover {
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(15, 23, 42, 0.06));
 }
 
 .chat-top-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid #cfd2d9;
+  padding: 12px 20px;
+  border-bottom: 1px solid #f1f5f9;
   background: #ffffff;
   flex-shrink: 0;
 }
@@ -399,40 +406,40 @@ async function confirmAndGenerate() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--border-default, #e2e8f0);
   background: #ffffff;
-  color: #475569;
-  border-radius: 0;
-  padding: 5px 12px;
+  color: var(--text-secondary, #334155);
+  border-radius: var(--radius-pill, 999px);
+  padding: 6px 14px;
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
-  transition: all var(--motion-fast) var(--ease-out-smooth);
+  transition: all var(--motion-fast, 150ms) var(--ease-out-smooth, ease);
 }
 
 .back-link:hover {
-  background: #f2f5ff;
-  color: #002fa7;
-  border-color: #002fa7;
+  background: var(--primary-50, #eef2ff);
+  color: var(--primary-700, #4338ca);
+  border-color: var(--primary-200, #c7d2fe);
 }
 
 .chat-top-status {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  color: #002fa7;
-  background: #f2f5ff;
-  border: 1px solid #c5d1f0;
-  padding: 4px 12px;
-  border-radius: 0;
-  font-weight: 800;
+  gap: 8px;
+  color: var(--primary-700, #4338ca);
+  background: var(--primary-50, #eef2ff);
+  border: 1px solid var(--primary-200, #c7d2fe);
+  padding: 5px 14px;
+  border-radius: var(--radius-pill, 999px);
+  font-weight: 700;
   font-size: 12px;
 }
 
 .chat-top-status.processing {
-  color: #002fa7;
-  background: #f2f5ff;
-  border-color: #c5d1f0;
+  color: var(--primary-700, #4338ca);
+  background: var(--primary-50, #eef2ff);
+  border-color: var(--primary-200, #c7d2fe);
 }
 
 .chat-top-status.failed {
@@ -446,8 +453,8 @@ async function confirmAndGenerate() {
 }
 
 .status-pulse-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: currentColor;
   box-shadow: none;
@@ -457,7 +464,7 @@ async function confirmAndGenerate() {
 /* Pane Resizer / Divider */
 .pane-resizer {
   width: 10px;
-  margin: 0 4px;
+  margin: 0 2px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -469,8 +476,8 @@ async function confirmAndGenerate() {
 
 .pane-resizer:hover,
 .pane-resizer.dragging {
-  background: #f2f5ff;
-  border-radius: 4px;
+  background: #eef2ff;
+  border-radius: 6px;
 }
 
 .resizer-line {
@@ -483,7 +490,7 @@ async function confirmAndGenerate() {
 
 .pane-resizer:hover .resizer-line,
 .pane-resizer.dragging .resizer-line {
-  background: #002fa7;
+  background: var(--primary-600, #4f46e5);
   height: 48px;
 }
 
@@ -496,9 +503,9 @@ async function confirmAndGenerate() {
 .composer-dock {
   display: grid;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 16px 20px;
   border-top: 1px solid #f1f5f9;
-  background: #f7f7f8;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
   flex-shrink: 0;
 }
 
@@ -512,7 +519,7 @@ async function confirmAndGenerate() {
 .confirm-dock {
   display: grid;
   gap: 8px;
-  padding: 14px 16px;
+  padding: 16px 20px;
   border-top: 1px solid #f1f5f9;
   background: #ffffff;
   flex-shrink: 0;
@@ -520,23 +527,29 @@ async function confirmAndGenerate() {
 
 .confirm-dock .el-button {
   width: 100%;
-  border-radius: 0;
+  border-radius: var(--radius-pill, 999px);
   font-weight: 800;
-  height: 44px;
+  height: 46px;
   font-size: 15px;
 }
 
 .confirm-dock .el-button--primary:not(:disabled) {
-  background: #002fa7 !important;
-  border-color: #002fa7 !important;
-  box-shadow: none !important;
+  background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--accent-violet, #7c3aed) 100%) !important;
+  border: 0 !important;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.25) !important;
+  transition: all 200ms ease !important;
+}
+
+.confirm-dock .el-button--primary:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35) !important;
 }
 
 .confirm-note {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--text-muted);
+  color: var(--text-muted, #64748b);
   font-size: 12px;
   font-weight: 600;
 }

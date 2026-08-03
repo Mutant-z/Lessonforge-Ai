@@ -8,6 +8,9 @@
 - `/course-intakes/turns/{id}/events`：需求 Agent 的真实流式回复与需求快照事件
 - `/courses/{id}/materials`：上传与解析参考材料
 - `/courses/{id}/blueprint/generate`、`/blueprints/{id}/approve`：蓝图生成与审核
+- `POST /courses/{id}/agent-initialization/runs`：幂等创建或重试六个项目专属 Agent 初始化运行
+- `POST /courses/{id}/tasks/{task_type}/runs`：支持首稿、重试、依赖同步和 `sync_context` 上下文同步
+- `POST /courses/{id}/task-events/token`、`GET /courses/{id}/task-events`：项目任务进度、过程摘要、Artifact 版本和对话回复的可续传 SSE
 - `/courses/{id}/generations`、`/generations/{id}/events`：启动工作流与 SSE
 - `/courses/{id}/artifacts`、`/artifacts/{id}`：资源、版本、锁定、局部重生成与审核
 - `/courses/{id}/quality/latest`：质量报告
@@ -30,3 +33,5 @@
 消息、字段修正和确认均需携带当前 `expected_revision`。确认还需提供客户端持久化的 `idempotency_key`。
 
 模块 Agent 的历史接口返回 `{ messages, model_config_id }`。模型选择按课程模块独立保存；真实模型输出必须通过对应产物 Schema、锁定路径和报告事实约束后才创建新版本。
+
+项目任务 SSE 使用全局事件 ID 支持 `Last-Event-ID` 或 `after` 续传。任务生成过程通过 `task_activity_updated` 返回 `phase`、`phase_label`、`detail`、`phase_status`、`progress` 和 `elapsed_ms`；对话回复依次发送 `agent_message_started`、一个或多个 `agent_message_delta`，最后发送 `agent_message_completed` 或 `agent_message_failed`。客户端必须按 `event_id` 去重，并按 `message_id` 合并增量。

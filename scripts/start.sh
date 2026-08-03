@@ -30,6 +30,7 @@ fi
 if is_running "$BACKEND_PID_FILE"; then
   echo "后端已在运行（PID $(read_pid "$BACKEND_PID_FILE")）"
 else
+  assert_port_available "后端" 8000
   echo "正在启动后端…"
   (
     cd "$PROJECT_DIR/backend"
@@ -41,6 +42,7 @@ fi
 if is_running "$FRONTEND_PID_FILE"; then
   echo "前端已在运行（PID $(read_pid "$FRONTEND_PID_FILE")）"
 else
+  assert_port_available "前端" 5173
   echo "正在启动前端…"
   (
     cd "$PROJECT_DIR/frontend"
@@ -64,4 +66,3 @@ echo "LessonForge AI 已启动"
 echo "前端：http://localhost:5173"
 echo "API：http://localhost:8000/docs"
 echo "日志：./scripts/logs.sh"
-

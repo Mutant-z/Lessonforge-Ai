@@ -10,6 +10,8 @@ from app.models.entities import CourseBlueprint, Material, User
 from app.schemas.blueprint import BlueprintUpdate, CourseBlueprintSchema
 from app.services.quality_service import validate_blueprint
 from app.workflows.course_graph import build_blueprint_graph
+from app.services.agent_initialization_service import create_initialization_run, start_initialization_run
+from app.services.course_task_service import ensure_course_tasks
 
 router = APIRouter(tags=["课程蓝图"])
 
@@ -93,7 +95,11 @@ async def approve_blueprint(blueprint_id: str, user: User = Depends(current_user
     item.approved_at = datetime.now(timezone.utc)
     course.current_blueprint_version = item.version
     course.status = "resource_generating"
+    await ensure_course_tasks(db, course.id)
+    run, created = await create_initialization_run(db, course, "blueprint_updated")
     await db.commit()
+    if created:
+        start_initialization_run(run.id)
     return output(item)
 
 

@@ -12,17 +12,19 @@ from app.core.database import create_schema
 from app.services.generation_service import tasks as generation_tasks
 from app.services.intake_service import intake_tasks
 from app.services.course_task_service import resume_incomplete_task_runs, task_jobs
+from app.services.agent_initialization_service import initialization_jobs, resume_incomplete_initialization_runs
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_settings().prepare_storage()
     await create_schema()
+    await resume_incomplete_initialization_runs()
     await resume_incomplete_task_runs()
     try:
         yield
     finally:
-        pending = list(generation_tasks.values()) + list(intake_tasks.values()) + list(task_jobs.values())
+        pending = list(generation_tasks.values()) + list(intake_tasks.values()) + list(task_jobs.values()) + list(initialization_jobs.values())
         for task in pending:
             task.cancel()
         if pending:

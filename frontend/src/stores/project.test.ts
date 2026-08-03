@@ -21,6 +21,12 @@ const task: CourseTask = {
   progress: 35,
   dependency_types: [],
   stale_dependencies: [],
+  agent_profile_status: 'ready',
+  agent_profile_version: 1,
+  agent_profile_template_version: 'v1',
+  agent_profile_summary: null,
+  stale_agent_profile: false,
+  agent_profile_error: null,
   current_artifact: null,
   active_run_id: 'run-1',
   error: null,
@@ -42,6 +48,7 @@ const project: CourseProjectWorkspace = {
     teaching_method: '', style_requirements: '', assumptions: [], deliverables: [],
   },
   planning: { status: 'ready', progress: 100, error: null },
+  agent_initialization: { status: 'ready', version: 1, progress: 100, error: null },
   tasks: [{ ...task }],
   quality: { score: null, summary: '', open_issues: 0, issues: [] },
 };
@@ -93,5 +100,76 @@ describe('project task store', () => {
 
     expect(store.currentTask.messages).toHaveLength(1);
     expect(store.currentTask.messages?.[0].status).toBe('failed');
+  });
+
+  it('applies project-wide Agent initialization events without requiring a task id', () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+
+    store.applyEvent('agent_initialization_progress', {
+      event_id: 10,
+      course_id: 'course-1',
+      status: 'running',
+      progress: 65,
+    });
+    expect(store.project.agent_initialization.status).toBe('running');
+    expect(store.project.agent_initialization.progress).toBe(65);
+
+    store.applyEvent('agent_initialization_completed', {
+      event_id: 11,
+      course_id: 'course-1',
+      status: 'ready',
+      progress: 100,
+      version: 2,
+    });
+    expect(store.project.agent_initialization).toMatchObject({ status: 'ready', progress: 100, version: 2 });
+  });
+
+  it('builds a streamed assistant message and ignores duplicate deltas', () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+
+    store.applyEvent('agent_message_started', {
+      event_id: 20, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1',
+      message: { id: 'reply-1', role: 'assistant', content: '', status: 'streaming', run_id: 'run-1' },
+    });
+    store.applyEvent('agent_message_delta', {
+      event_id: 21, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1',
+      message_id: 'reply-1', delta: '正在更新',
+    });
+    store.applyEvent('agent_message_delta', {
+      event_id: 21, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1',
+      message_id: 'reply-1', delta: '正在更新',
+    });
+    store.applyEvent('agent_message_completed', {
+      event_id: 22, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1',
+      message: { id: 'reply-1', role: 'assistant', content: '正在更新完成。', status: 'completed', run_id: 'run-1' },
+    });
+
+    expect(store.currentTask.messages).toEqual([
+      expect.objectContaining({ id: 'reply-1', content: '正在更新完成。', status: 'completed' }),
+    ]);
+  });
+
+  it('tracks safe task activity by phase and resets it for a new run', () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+
+    store.applyEvent('task_activity_updated', {
+      event_id: 30, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1',
+      phase: 'generating', phase_label: '生成结构化新版本', detail: '正在生成。',
+      phase_status: 'running', progress: 42, elapsed_ms: 4000,
+    });
+    store.applyEvent('task_activity_updated', {
+      event_id: 31, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-2',
+      phase: 'preparing', phase_label: '读取配置', detail: '正在加载。',
+      phase_status: 'running', progress: 10,
+    });
+
+    expect(store.currentTask.activity_run_id).toBe('run-2');
+    expect(store.currentTask.activities).toHaveLength(1);
+    expect(store.currentTask.current_activity).toMatchObject({ phase: 'preparing', progress: 10 });
   });
 });

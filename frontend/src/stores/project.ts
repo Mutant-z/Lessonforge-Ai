@@ -7,11 +7,20 @@ const TASK_EVENTS = [
   'project_planning_updated',
   'task_status_changed',
   'task_progress_updated',
+  'task_activity_updated',
   'agent_message_created',
+  'agent_message_started',
+  'agent_message_delta',
+  'agent_message_completed',
+  'agent_message_failed',
   'artifact_version_created',
   'task_dependency_stale',
   'task_failed',
   'quality_updated',
+  'agent_initialization_started',
+  'agent_initialization_progress',
+  'agent_initialization_completed',
+  'agent_initialization_failed',
 ];
 
 export const useProjectStore = defineStore('project', {
@@ -22,9 +31,12 @@ export const useProjectStore = defineStore('project', {
     connectionError: '',
     lastEventId: 0,
     connectedCourseId: null as string | null,
+    connectingCourseId: null as string | null,
     eventSource: null as EventSource | null,
     reconnectTimer: null as number | null,
     reconnectAttempt: 0,
+    activeTaskPollTimer: null as number | null,
+    activeTaskPollInFlight: false,
   }),
   getters: {
     tasks: state => state.project?.tasks || [],
@@ -45,6 +57,14 @@ export const useProjectStore = defineStore('project', {
         if (existing >= 0) courses.items[existing] = { ...courses.items[existing], ...data.course } as any;
         else courses.items.unshift(data.course as any);
         this.connect(courseId);
+        if (data.agent_initialization?.status === 'not_initialized' && data.planning.status === 'ready') {
+          try {
+            await this.initializeAgents(courseId);
+          } catch (cause) {
+            data.agent_initialization.status = 'failed';
+            data.agent_initialization.error = { code: 'agent_initialization_start_failed', message: errorMessage(cause), retryable: true };
+          }
+        }
         return data;
       } finally {
         this.loading = false;
@@ -55,6 +75,8 @@ export const useProjectStore = defineStore('project', {
       const { data } = await api.get<CourseTask>(`/courses/${courseId}/tasks/${taskType}`);
       this.currentTask = data;
       this.replaceTask(data);
+      if (['queued', 'running'].includes(data.status)) this.startActiveTaskPolling(courseId, taskType);
+      else this.stopActiveTaskPolling();
       return data;
     },
     replaceTask(task: CourseTask) {
@@ -78,15 +100,25 @@ export const useProjectStore = defineStore('project', {
           this.currentTask.active_run_id = data.run_id;
           this.replaceTask(this.currentTask);
         }
+        this.startActiveTaskPolling(courseId, taskType);
         return data;
       } catch (cause) {
         local.status = 'failed';
         throw cause;
       }
     },
-    async runTask(courseId: string, taskType: string, action: 'initial' | 'retry' | 'sync_dependencies') {
+    async runTask(courseId: string, taskType: string, action: 'initial' | 'retry' | 'sync_dependencies' | 'sync_context') {
       const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/runs`, { action });
       await this.openTask(courseId, taskType);
+      this.startActiveTaskPolling(courseId, taskType);
+      return data;
+    },
+    async initializeAgents(courseId: string) {
+      const { data } = await api.post(`/courses/${courseId}/agent-initialization/runs`);
+      if (this.project) {
+        this.project.agent_initialization.status = data.status === 'completed' ? 'ready' : 'queued';
+        this.project.agent_initialization.error = null;
+      }
       return data;
     },
     async retryPlanning(courseId: string) {
@@ -110,6 +142,7 @@ export const useProjectStore = defineStore('project', {
       return data;
     },
     applyEvent(type: string, event: ProjectTaskEvent) {
+      if (event.event_id && event.event_id <= this.lastEventId) return;
       this.lastEventId = Math.max(this.lastEventId, event.event_id || 0);
       if (type === 'project_planning_updated' && this.project) {
         this.project.planning.status = event.status || 'ready';
@@ -117,9 +150,44 @@ export const useProjectStore = defineStore('project', {
         if (event.status === 'ready') this.refreshTasks();
         return;
       }
+      if (type.startsWith('agent_initialization_') && this.project) {
+        const status = type === 'agent_initialization_completed'
+          ? 'ready'
+          : type === 'agent_initialization_failed'
+            ? 'failed'
+            : event.status === 'queued' ? 'queued' : 'running';
+        this.project.agent_initialization.status = status;
+        this.project.agent_initialization.progress = event.progress || 0;
+        this.project.agent_initialization.error = event.error || null;
+        if (event.version) this.project.agent_initialization.version = event.version;
+        if (type === 'agent_initialization_completed') this.refreshTasks();
+        return;
+      }
       if (!event.task_id || !this.project) return;
       const task = this.project.tasks.find(item => item.id === event.task_id);
       if (!task) return;
+
+      if (type === 'task_activity_updated' && event.phase) {
+        if (task.activity_run_id !== event.run_id) {
+          task.activity_run_id = event.run_id || null;
+          task.activities = [];
+        }
+        const activity = {
+          phase: event.phase,
+          label: event.phase_label || event.phase,
+          detail: event.detail || '',
+          status: event.phase_status || 'running',
+          progress: event.progress ?? task.progress,
+          elapsed_ms: event.elapsed_ms || 0,
+        } as NonNullable<CourseTask['current_activity']>;
+        const activities = task.activities || [];
+        const index = activities.findIndex(item => item.phase === activity.phase);
+        if (index >= 0) activities[index] = activity;
+        else activities.push(activity);
+        task.activities = [...activities];
+        task.current_activity = activity;
+      }
+
       if (event.status && !['ready', 'planning'].includes(event.status)) task.status = event.status as CourseTask['status'];
       if (typeof event.progress === 'number') task.progress = event.progress;
       if (event.run_id) task.active_run_id = ['review', 'failed', 'cancelled'].includes(event.status || '') ? null : event.run_id;
@@ -131,8 +199,37 @@ export const useProjectStore = defineStore('project', {
       }
       if (this.currentTask?.id === task.id) {
         Object.assign(this.currentTask, task);
-        if (event.message) {
-          const messages = this.currentTask.messages || [];
+        const messages = this.currentTask.messages || [];
+        if (type === 'agent_message_started' && event.message) {
+          const existing = messages.find(message => message.id === event.message?.id);
+          if (existing) Object.assign(existing, event.message, { content: '', status: 'streaming' });
+          else this.currentTask.messages = [...messages, { ...event.message, content: '', status: 'streaming' }];
+        } else if (type === 'agent_message_delta' && event.message_id) {
+          let streaming = messages.find(message => message.id === event.message_id);
+          if (!streaming) {
+            streaming = {
+              id: event.message_id,
+              role: 'assistant',
+              content: '',
+              status: 'streaming',
+              run_id: event.run_id,
+            };
+            this.currentTask.messages = [...messages, streaming];
+          }
+          streaming.content = event.reset ? (event.delta || '') : streaming.content + (event.delta || '');
+          streaming.status = 'streaming';
+        } else if (type === 'agent_message_completed' && event.message) {
+          const existing = messages.find(message => message.id === event.message?.id);
+          if (existing) Object.assign(existing, event.message, { status: 'completed' });
+          else this.currentTask.messages = [...messages, event.message];
+          const pending = (this.currentTask.messages || []).find(
+            message => message.run_id === event.message?.run_id && message.role === 'user',
+          );
+          if (pending) pending.status = 'completed';
+        } else if (type === 'agent_message_failed' && event.message_id) {
+          const existing = messages.find(message => message.id === event.message_id);
+          if (existing) existing.status = 'failed';
+        } else if (event.message) {
           const pending = messages.find(message => message.run_id === event.message?.run_id && message.role === 'user');
           if (pending) pending.status = 'completed';
           if (!messages.some(message => message.id === event.message?.id || (message.role === event.message?.role && message.content === event.message?.content))) {
@@ -144,6 +241,37 @@ export const useProjectStore = defineStore('project', {
         this.refreshTasks();
         if (type === 'artifact_version_created' && this.currentTask?.id === task.id) this.refreshCurrentTask();
       }
+      if (this.currentTask?.id === task.id && !['queued', 'running'].includes(task.status)) {
+        this.stopActiveTaskPolling();
+      }
+    },
+    startActiveTaskPolling(courseId: string, taskType: string) {
+      this.stopActiveTaskPolling();
+      const poll = async () => {
+        if (this.activeTaskPollInFlight) return;
+        if (!this.currentTask || this.currentTask.course_id !== courseId || this.currentTask.task_type !== taskType) {
+          this.stopActiveTaskPolling();
+          return;
+        }
+        this.activeTaskPollInFlight = true;
+        try {
+          const { data } = await api.get<CourseTask>(`/courses/${courseId}/tasks/${taskType}`);
+          if (!this.currentTask || this.currentTask.id !== data.id) return;
+          this.currentTask = data;
+          this.replaceTask(data);
+          if (!['queued', 'running'].includes(data.status)) this.stopActiveTaskPolling();
+        } catch {
+          // The event stream remains primary; retry transient polling failures.
+        } finally {
+          this.activeTaskPollInFlight = false;
+        }
+      };
+      void poll();
+      this.activeTaskPollTimer = window.setInterval(() => void poll(), 600);
+    },
+    stopActiveTaskPolling() {
+      if (this.activeTaskPollTimer) window.clearInterval(this.activeTaskPollTimer);
+      this.activeTaskPollTimer = null;
     },
     async refreshTasks() {
       if (!this.project) return;
@@ -162,10 +290,14 @@ export const useProjectStore = defineStore('project', {
     },
     async connect(courseId: string) {
       if (this.connectedCourseId === courseId && this.eventSource) return;
+      if (this.connectingCourseId === courseId) return;
+      if (this.connectedCourseId && this.connectedCourseId !== courseId) this.lastEventId = 0;
       this.disconnect();
       this.connectedCourseId = courseId;
+      this.connectingCourseId = courseId;
       try {
         const { data } = await api.post(`/courses/${courseId}/task-events/token`);
+        if (this.connectedCourseId !== courseId) return;
         const source = new EventSource(`/api/v1/courses/${courseId}/task-events?token=${encodeURIComponent(data.token)}&after=${this.lastEventId}`);
         this.eventSource = source;
         source.onopen = () => {
@@ -190,6 +322,8 @@ export const useProjectStore = defineStore('project', {
       } catch (cause) {
         this.connectionError = errorMessage(cause);
         this.scheduleReconnect(courseId);
+      } finally {
+        if (this.connectingCourseId === courseId) this.connectingCourseId = null;
       }
     },
     scheduleReconnect(courseId: string) {
@@ -205,6 +339,7 @@ export const useProjectStore = defineStore('project', {
       this.eventSource = null;
       if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+      this.connectingCourseId = null;
       this.connectedCourseId = null;
     },
   },

@@ -49,7 +49,7 @@ function handleSearch() {
           <span class="bc-home">{{ auth.user ? '教师工作台' : 'LessonForge AI' }}</span>
         </el-breadcrumb-item>
         <el-breadcrumb-item v-if="currentCourseTitle">
-          <span class="bc-course">{{ currentCourseTitle }}</span>
+          <span class="bc-course">课程编辑工作台</span>
         </el-breadcrumb-item>
         <el-breadcrumb-item v-else-if="route.path === '/courses/new'">
           <span class="bc-curr">新建微课项目</span>
@@ -68,12 +68,12 @@ function handleSearch() {
           placeholder="搜索课程、学科、知识点或资源..."
           :prefix-icon="Search"
           clearable
-          size="large"
+          size="default"
           @keyup.enter="handleSearch"
         />
       </div>
 
-      <div class="save-status-indicator">
+      <div v-if="!currentCourseTitle" class="save-status-indicator">
         <el-icon class="save-ic"><Check /></el-icon>
         <span>已实时云同步</span>
       </div>
@@ -98,12 +98,12 @@ function handleSearch() {
         @click="taskCenter.toggleDrawer()"
       >
         <span class="task-ping-dot animate-pulse"></span>
-        <span class="task-count-text">{{ taskCenter.runningCount }} 个 Agent 任务运行中</span>
+        <span class="task-count-text">{{ taskCenter.runningCount }} 个 Agent 运行中</span>
       </div>
 
       <!-- User Logged In Actions -->
       <template v-if="auth.user">
-        <el-button type="primary" size="large" :icon="Plus" @click="router.push('/courses/new')">
+        <el-button type="primary" size="default" :icon="Plus" @click="router.push('/courses/new')">
           新建微课
         </el-button>
 
@@ -123,8 +123,8 @@ function handleSearch() {
 
       <!-- Guest Actions -->
       <template v-else>
-        <el-button size="large" @click="router.push('/login')">登录</el-button>
-        <el-button size="large" type="primary" @click="router.push({ path: '/login', query: { mode: 'register' } })">
+        <el-button size="default" @click="router.push('/login')">登录</el-button>
+        <el-button size="default" type="primary" @click="router.push({ path: '/login', query: { mode: 'register' } })">
           免费注册
         </el-button>
       </template>

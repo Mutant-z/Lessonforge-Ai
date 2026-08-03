@@ -60,14 +60,21 @@ async def create_schema() -> None:
                 "generation_runs": {
                     "course_task_id": "VARCHAR(36)",
                     "trigger_type": "VARCHAR(30) NOT NULL DEFAULT 'initial'",
+                    "agent_profile_id": "VARCHAR(36)",
                 },
                 "artifacts": {
                     "source_versions_json": "JSON NOT NULL DEFAULT '{}'",
+                    "agent_profile_id": "VARCHAR(36)",
                 },
                 "agent_messages": {
                     "task_id": "VARCHAR(36)",
                     "run_id": "VARCHAR(36)",
                     "status": "VARCHAR(20) NOT NULL DEFAULT 'completed'",
+                },
+                "course_tasks": {
+                    "current_agent_profile_id": "VARCHAR(36)",
+                    "agent_profile_status": "VARCHAR(30) NOT NULL DEFAULT 'pending'",
+                    "agent_profile_error_json": "JSON",
                 },
             }
             for table_name, definitions in compatibility_columns.items():

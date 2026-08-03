@@ -50,6 +50,24 @@ async def test_structured_falls_back_without_json_mode_on_empty_response(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_structured_recovers_after_two_empty_content_responses(monkeypatch):
+    payloads = []
+
+    def handler(request: httpx.Request):
+        payloads.append(json.loads(request.content))
+        if len(payloads) < 3:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    provider = provider_with_handler(monkeypatch, handler)
+    result = await provider.structured("system", "probe", Probe)
+
+    assert result.ok is True
+    assert len(payloads) == 3
+    assert "上一次返回为空或不符合结构" in payloads[2]["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response_factory", "code"),
     [

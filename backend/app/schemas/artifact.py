@@ -134,6 +134,13 @@ class AgentArtifactRevision(BaseModel):
     assistant_reply: str = Field(min_length=1, max_length=1000)
 
 
+class AgentArtifactRevisionPayload(BaseModel):
+    """Compact model response; Markdown is rendered after content validation."""
+
+    content_json: dict
+    assistant_reply: str = Field(min_length=1, max_length=1000)
+
+
 class QualityReportContent(BaseModel):
     score: int = Field(ge=0, le=100)
     summary: str

@@ -154,23 +154,88 @@ def to_markdown(kind: str, content) -> str:
     title = {"lesson_plan":"教学设计", "ppt":"PPT 页面规划", "task_sheet":"学习任务单", "exercise":"课后练习", "video_script":"微课视频脚本", "verbatim":"教师逐字稿"}[kind]
     lines = [f"# {title}", ""]
     if kind == "ppt":
+        lines += [f"**主题模板：** {data['theme']}", ""]
         for slide in data["slides"]:
-            lines += [f"## {slide['id']} · {slide['title']}", *[f"- {x}" for x in slide["body"]], f"> 教师备注：{slide['speaker_notes']}", ""]
+            lines += [
+                f"## {slide['id']} · {slide['title']}",
+                f"- 页面类型：{slide['page_type']}",
+                f"- 页面目的：{slide['purpose']}",
+                f"- 版式：{slide['layout']}",
+                f"- 视觉建议：{slide['visual_suggestion']}",
+                f"- 建议时长：{slide['duration_seconds']} 秒",
+                *[f"- {x}" for x in slide["body"]],
+                f"> 教师备注：{slide['speaker_notes']}",
+                "",
+            ]
     elif kind == "exercise":
         for item in data["items"]:
-            lines += [f"## {item['id']} · {item['stem']}", *item["options"], f"**答案：** {'、'.join(item['correct_answers'])}", f"**解析：** {item['explanation']}", ""]
+            lines += [
+                f"## {item['id']} · {item['stem']}",
+                f"- 题型：{item['question_type']}",
+                f"- 难度：{item['difficulty']}",
+                f"- 预计用时：{item['estimated_minutes']} 分钟",
+                *[f"- {option}" for option in item["options"]],
+                f"**答案：** {'、'.join(item['correct_answers'])}",
+                f"**解析：** {item['explanation']}",
+                f"**目标覆盖：** {'、'.join(item['objective_ids'])}",
+                f"**知识点：** {'、'.join(item['knowledge_point_ids'])}",
+                f"**来源：** {'、'.join(item['source_refs']) or '无外部来源'}",
+                "",
+            ]
     elif kind == "video_script":
         for item in data["segments"]:
-            lines += [f"## {item['time_range']} · {item['stage']}", f"- 画面：{item['visual']}", f"- 旁白：{item['narration']}", f"- 动作：{item['action']}", ""]
+            lines += [
+                f"## {item['id']} · {item['time_range']} · {item['stage']}",
+                f"- PPT 页面：{'、'.join(item['slide_ids'])}",
+                f"- 画面：{item['visual']}",
+                f"- 旁白：{item['narration']}",
+                f"- 动作：{item['action']}",
+                f"- 屏幕文字：{item['on_screen_text']}",
+                f"- 停顿：{item['pause']}",
+                f"- 制作备注：{item['production_notes']}",
+                "",
+            ]
     elif kind == "verbatim":
+        lines += [f"**建议语速：** {data['speaking_rate']}", ""]
         for item in data["sections"]:
-            lines += [f"## {item['time_range']} · {','.join(item['slide_ids'])}", item["required_text"], f"> 可选补充：{item['optional_text']}", f"**互动：** {item['interaction']}", ""]
+            lines += [f"## {item['id']} · {item['time_range']} · {','.join(item['slide_ids'])}", item["required_text"], f"> 可选补充：{item['optional_text']}", f"**互动：** {item['interaction']}", ""]
     elif kind == "task_sheet":
-        lines += ["## 学习目标", *[f"- {x}" for x in data["learning_objectives"]], "", "## 学习任务"]
+        lines += [
+            "## 学习目标", *[f"- {x}" for x in data["learning_objectives"]], "",
+            "## 课前准备", *[f"- {x}" for x in data["preparation"]], "",
+            "## 学习任务",
+        ]
         for task in data["tasks"]:
-            lines += [f"### {task['id']}", f"- 动作：{task['action']}", f"- 对象：{task['object']}", f"- 输出：{task['output']}", f"- 完成标准：{task['completion_criterion']}"]
+            lines += [f"### {task['id']}", f"- 动作：{task['action']}", f"- 对象：{task['object']}", f"- 输出：{task['output']}", f"- 完成标准：{task['completion_criterion']}", ""]
+        lines += [
+            "## 观察提示", *[f"- {x}" for x in data["observation_prompts"]], "",
+            "## 学习疑问", *[f"- {x}" for x in data["learning_questions"]], "",
+            "## 自我评价", *[f"- {x}" for x in data["self_assessment"]], "",
+            "## 拓展任务", *[f"- {x}" for x in data["extension"]], "",
+        ]
     else:
-        lines += [f"## 内容分析\n{data['content_analysis']}", f"## 学情分析\n{data['learner_analysis']}", "## 教学目标", *[f"- {x}" for x in data["objectives"]], "", "## 教学过程"]
+        lines += [
+            "## 内容分析", data["content_analysis"], "",
+            "## 学情分析", data["learner_analysis"], "",
+            "## 教学目标", *[f"- {x}" for x in data["objectives"]], "",
+            "## 教学重点", *[f"- {x}" for x in data["key_points"]], "",
+            "## 教学难点", *[f"- {x}" for x in data["difficulty_points"]], "",
+            "## 教学方法与策略", *[f"- {x}" for x in data["methods"]], "",
+            "## 教学资源", *[f"- {x}" for x in data["resources"]], "",
+            "## 教学过程",
+        ]
         for stage in data["stages"]:
-            lines += [f"### {stage['id']} · {stage['title']}（{stage['duration_minutes']} 分钟）", f"- 教师活动：{stage['teacher_activity']}", f"- 学生活动：{stage['learner_activity']}", f"- 设计意图：{stage['design_intent']}"]
+            lines += [
+                f"### {stage['id']} · {stage['title']}（{stage['duration_minutes']} 分钟）",
+                f"- 教师活动：{stage['teacher_activity']}",
+                f"- 学生活动：{stage['learner_activity']}",
+                f"- 设计意图：{stage['design_intent']}",
+                f"- 学习评价：{stage['assessment']}",
+                "",
+            ]
+        lines += [
+            "## 板书设计", data["board_design"], "",
+            "## 作业布置", data["homework"], "",
+            "## 教学反思", data["reflection_placeholder"], "",
+        ]
     return "\n".join(lines)

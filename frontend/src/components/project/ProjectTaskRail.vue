@@ -24,80 +24,175 @@ function openTask(type: string) {
 </script>
 
 <template>
-  <nav class="task-rail" aria-label="课程交付任务">
-    <button
-      v-for="task in tasks"
+  <nav class="pipeline-track" aria-label="课程交付流程">
+    <div
+      v-for="(task, idx) in tasks"
       :key="task.id"
-      type="button"
-      class="task-segment"
-      :class="[task.status, { active: activeType === task.task_type }]"
-      :aria-current="activeType === task.task_type ? 'page' : undefined"
-      @click="openTask(task.task_type)"
+      class="pipeline-step-item"
     >
-      <span class="task-number">{{ String(task.display_order).padStart(2, '0') }}</span>
-      <span class="task-copy">
-        <strong>{{ task.display_name }}</strong>
-        <span class="task-state">
+      <button
+        type="button"
+        class="pipeline-btn"
+        :class="[task.status, { active: activeType === task.task_type }]"
+        :aria-current="activeType === task.task_type ? 'page' : undefined"
+        @click="openTask(task.task_type)"
+      >
+        <span class="step-num">{{ String(task.display_order).padStart(2, '0') }}</span>
+        <span class="step-name">{{ task.display_name }}</span>
+        <span class="step-badge" :class="[task.status, { active: activeType === task.task_type }]">
           <el-icon :class="{ spinning: task.status === 'running' }"><component :is="statusMeta[task.status].icon" /></el-icon>
-          {{ statusMeta[task.status].label }}
+          <span>{{ task.agent_profile_status === 'initializing' ? '专属化中' : task.agent_profile_status === 'failed' ? '失败' : statusMeta[task.status].label }}</span>
         </span>
-      </span>
-      <span class="task-progress" aria-hidden="true"><i :style="{ width: `${task.progress}%` }" /></span>
-    </button>
+        <span v-if="['running', 'queued'].includes(task.status) && task.progress" class="step-mini-bar" aria-hidden="true">
+          <i :style="{ width: `${task.progress}%` }" />
+        </span>
+      </button>
+      <span v-if="idx < tasks.length - 1" class="step-chevron" aria-hidden="true">›</span>
+    </div>
   </nav>
 </template>
 
 <style scoped>
-.task-rail {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(150px, 1fr));
-  min-width: 900px;
-  background: #fff;
-  border-top: 1px solid #d9dce3;
-  border-bottom: 1px solid #d9dce3;
+.pipeline-track {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: #f1f5f9;
+  padding: 3px 4px;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid #e2e8f0;
 }
 
-.task-segment {
-  min-width: 0;
-  min-height: 76px;
-  padding: 12px 14px 10px;
-  display: grid;
-  grid-template-columns: 30px 1fr;
-  gap: 8px;
+.pipeline-step-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pipeline-btn {
+  height: 32px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   position: relative;
   border: 0;
-  border-right: 1px solid #d9dce3;
-  background: #fff;
-  color: #18191d;
+  border-radius: var(--radius-pill, 999px);
+  background: transparent;
+  color: #475569;
   text-align: left;
   cursor: pointer;
-  transition: background 150ms ease, color 150ms ease;
+  transition: all 180ms ease;
+  white-space: nowrap;
+  font-size: 12px;
 }
 
-.task-segment:last-child { border-right: 0; }
-.task-segment:hover { background: #f7f7f8; }
-.task-segment.active { background: #002fa7; color: #fff; }
+.pipeline-btn:hover {
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--text-primary, #0f172a);
+}
 
-.task-number {
-  font-size: 20px;
-  line-height: 1;
+.pipeline-btn.active {
+  background: #ffffff;
+  color: var(--primary-700, #4338ca);
+  font-weight: 800;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.16), 0 0 0 1px rgba(79, 70, 229, 0.12);
+}
+
+.step-num {
+  font-size: 10.5px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  color: #002fa7;
+  color: var(--primary-600, #4f46e5);
+  background: #e0e7ff;
+  padding: 1px 5px;
+  border-radius: 999px;
+  flex-shrink: 0;
 }
 
-.active .task-number { color: #fff; }
-.task-copy { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.task-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.task-state { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #656a73; }
-.active .task-state { color: rgba(255,255,255,.82); }
-.failed:not(.active) .task-state { color: #b42318; }
-.stale:not(.active) .task-state { color: #9a6700; }
-.approved:not(.active) .task-state { color: #067647; }
-.task-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #eceef2; }
-.task-progress i { display: block; height: 100%; background: #002fa7; transition: width 240ms ease; }
-.active .task-progress { background: rgba(255,255,255,.24); }
-.active .task-progress i { background: #fff; }
-.spinning { animation: spin 1s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+.pipeline-btn.active .step-num {
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--accent-violet, #7c3aed) 100%);
+}
+
+.step-name {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.step-badge.approved:not(.active) {
+  color: #059669;
+  background: #ecfdf5;
+}
+
+.step-badge.review:not(.active) {
+  color: #2563eb;
+  background: #eff6ff;
+}
+
+.step-badge.stale:not(.active) {
+  color: #d97706;
+  background: #fffbeb;
+}
+
+.step-badge.running:not(.active) {
+  color: #4f46e5;
+  background: #eef2ff;
+}
+
+.step-badge.failed:not(.active) {
+  color: #dc2626;
+  background: #fef2f2;
+}
+
+.step-badge.active {
+  color: #4338ca;
+  background: #eef2ff;
+}
+
+.step-chevron {
+  color: #cbd5e1;
+  font-size: 14px;
+  font-weight: 700;
+  user-select: none;
+}
+
+.step-mini-bar {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 1px;
+  height: 2px;
+  background: #dbe4ff;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.step-mini-bar i {
+  display: block;
+  height: 100%;
+  background: var(--primary-600, #4f46e5);
+  transition: width 240ms ease;
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 </style>
+
+

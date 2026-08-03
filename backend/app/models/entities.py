@@ -187,6 +187,9 @@ class Artifact(Base, TimestampMixin):
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     change_summary: Mapped[str] = mapped_column(String(500), default="首次生成")
     source_versions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    agent_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("course_task_agent_profiles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -204,6 +207,9 @@ class GenerationRun(Base, TimestampMixin):
     course_id: Mapped[str] = mapped_column(ForeignKey("course_projects.id", ondelete="CASCADE"), index=True)
     course_task_id: Mapped[str | None] = mapped_column(
         ForeignKey("course_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("course_task_agent_profiles.id", ondelete="SET NULL"), nullable=True, index=True
     )
     thread_id: Mapped[str] = mapped_column(String(100), unique=True)
     run_type: Mapped[str] = mapped_column(String(30), default="full")
@@ -278,6 +284,7 @@ class FileRecord(Base, TimestampMixin):
 
 class PromptTemplate(Base, TimestampMixin):
     __tablename__ = "prompt_templates"
+    __table_args__ = (UniqueConstraint("agent_type", "version"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     agent_type: Mapped[str] = mapped_column(String(50), index=True)
     version: Mapped[str] = mapped_column(String(30))
@@ -349,9 +356,46 @@ class CourseTask(Base, TimestampMixin):
     current_artifact_id: Mapped[str | None] = mapped_column(
         ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
     )
+    current_agent_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("course_task_agent_profiles.id", ondelete="SET NULL", use_alter=True), nullable=True
+    )
+    agent_profile_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    agent_profile_error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     active_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_runs.id", ondelete="SET NULL", use_alter=True), nullable=True
     )
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CourseTaskAgentProfile(Base, TimestampMixin):
+    __tablename__ = "course_task_agent_profiles"
+    __table_args__ = (UniqueConstraint("course_task_id", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("course_projects.id", ondelete="CASCADE"), index=True
+    )
+    course_task_id: Mapped[str] = mapped_column(
+        ForeignKey("course_tasks.id", ondelete="CASCADE"), index=True
+    )
+    task_type: Mapped[str] = mapped_column(String(40), index=True)
+    agent_type: Mapped[str] = mapped_column(String(60), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    initialization_run_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="CASCADE"), index=True
+    )
+    prompt_template_id: Mapped[str] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="RESTRICT"), index=True
+    )
+    template_version: Mapped[str] = mapped_column(String(30))
+    requirement_version: Mapped[int] = mapped_column(Integer)
+    blueprint_version: Mapped[int] = mapped_column(Integer)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    rendered_system_prompt: Mapped[str] = mapped_column(Text)
+    rendered_task_template: Mapped[str] = mapped_column(Text)
+    prompt_hash: Mapped[str] = mapped_column(String(64), index=True)
+    model_name: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(30), default="initializing", index=True)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

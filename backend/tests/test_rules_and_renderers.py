@@ -48,3 +48,21 @@ def test_docx_pptx_and_zip(tmp_path: Path):
     with zipfile.ZipFile(package) as archive:
         assert archive.testzip() is None
 
+
+def test_markdown_renderers_cover_all_lesson_plan_sections():
+    lesson = make_lesson_plan(make_blueprint(sample_course()))
+    lesson.reflection_placeholder = "REFLECTION_MARKER"
+    lesson.board_design = "BOARD_MARKER"
+    lesson.homework = "HOMEWORK_MARKER"
+
+    markdown = to_markdown("lesson_plan", lesson)
+
+    for heading in (
+        "内容分析", "学情分析", "教学目标", "教学重点", "教学难点",
+        "教学方法与策略", "教学资源", "教学过程", "板书设计", "作业布置", "教学反思",
+    ):
+        assert f"## {heading}" in markdown
+    assert "REFLECTION_MARKER" in markdown
+    assert "BOARD_MARKER" in markdown
+    assert "HOMEWORK_MARKER" in markdown
+    assert all(stage.assessment in markdown for stage in lesson.stages)

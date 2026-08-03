@@ -9,6 +9,7 @@ export interface Artifact {
   status: string;
   is_locked: boolean;
   change_summary?: string;
+  agent_profile_id?: string | null;
   created_at: string;
 }
 

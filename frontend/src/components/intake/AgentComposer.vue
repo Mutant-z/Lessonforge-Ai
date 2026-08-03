@@ -153,16 +153,16 @@ defineExpose({
 <style scoped>
 .agent-composer {
   background: #ffffff;
-  border: 1px solid #cfd2d9;
-  border-radius: 0;
+  border: 1px solid var(--border-default, #e2e8f0);
+  border-radius: var(--radius-card, 16px);
   padding: 12px 16px;
-  box-shadow: none;
-  transition: all 200ms var(--ease-out-smooth);
+  box-shadow: var(--shadow-sm, 0 4px 14px rgba(15, 23, 42, 0.05));
+  transition: all var(--motion-normal, 240ms) var(--ease-out-smooth, ease);
 }
 
 .agent-composer:focus-within {
-  border-color: #002fa7;
-  box-shadow: inset 3px 0 0 #002fa7;
+  border-color: var(--primary-500, #6366f1);
+  box-shadow: var(--shadow-glow-primary, 0 8px 24px rgba(99, 102, 241, 0.15)), 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
 textarea {
@@ -170,7 +170,7 @@ textarea {
   resize: none;
   border: 0;
   outline: 0;
-  color: var(--text-primary);
+  color: var(--text-primary, #0f172a);
   font: inherit;
   font-size: 14px;
   line-height: 1.5;
@@ -222,32 +222,39 @@ textarea::placeholder {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 12px;
-  border-radius: 0;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill, 999px);
   cursor: pointer;
-  font-weight: 700;
+  font-weight: 600;
   font-size: 12px;
-  transition: all var(--motion-fast);
+  transition: all var(--motion-fast, 150ms);
 }
 
 .attach-btn:hover {
-  color: #002fa7;
-  background: #f2f5ff;
-  border-color: #002fa7;
+  color: var(--primary-600, #4f46e5);
+  background: var(--primary-50, #eef2ff);
+  border-color: var(--primary-200, #c7d2fe);
 }
 
 .key-hint {
   color: #94a3b8;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
 }
 
 .send-btn {
-  border-radius: 0 !important;
-  font-weight: 800 !important;
-  padding: 8px 18px !important;
-  background: #002fa7 !important;
-  box-shadow: none !important;
+  border-radius: var(--radius-pill, 999px) !important;
+  font-weight: 700 !important;
+  padding: 8px 20px !important;
+  background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--accent-violet, #7c3aed) 100%) !important;
+  border: 0 !important;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.25) !important;
+  transition: all 200ms ease !important;
+}
+
+.send-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35) !important;
 }
 
 .pending-files {
@@ -262,10 +269,10 @@ textarea::placeholder {
   border: 1px solid #c7d2fe;
   background: #eef2ff;
   color: #3730a3;
-  border-radius: 0;
+  border-radius: var(--radius-pill, 999px);
   padding: 3px 10px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -299,25 +306,26 @@ textarea::placeholder {
   gap: 4px;
   font-size: 11.5px;
   font-weight: 700;
-  color: #002fa7;
+  color: var(--primary-600, #4f46e5);
 }
 
 .suggestion-row button {
   border: 1px solid #e0e7ff;
-  background: #f5f3ff;
-  color: #002fa7;
-  border-radius: 0;
-  padding: 2px 10px;
+  background: #f8fafc;
+  color: #4338ca;
+  border-radius: var(--radius-pill, 999px);
+  padding: 3px 12px;
   font-size: 11.5px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
-  transition: all var(--motion-fast);
+  transition: all var(--motion-fast, 150ms);
 }
 
 .suggestion-row button:hover {
-  border-color: #002fa7;
-  color: #ffffff;
-  background: #002fa7;
+  border-color: #c7d2fe;
+  color: #4338ca;
+  background: #eef2ff;
+  transform: translateY(-1px);
 }
 
 @media (max-width: 640px) {

@@ -12,6 +12,7 @@ from app.core.database import SessionLocal, get_db
 from app.core.security import create_stream_token, decode_stream_token
 from app.models.entities import CourseBlueprint, CourseProject, GenerationEvent, GenerationRun, User
 from app.services.generation_service import start_run, tasks
+from app.services.agent_initialization_service import initialization_jobs
 
 router = APIRouter(tags=["生成运行"])
 
@@ -56,7 +57,7 @@ async def cancel_run(run_id: str, user: User = Depends(current_user), db: AsyncS
     if not run:
         raise HTTPException(404, "生成任务不存在")
     await owned_course(run.course_id, user, db)
-    task = tasks.get(run_id)
+    task = tasks.get(run_id) or initialization_jobs.get(run_id)
     if task:
         task.cancel()
     run.status = "cancelled"

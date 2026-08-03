@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, owned_course
 from app.core.database import get_db
-from app.models.entities import AgentChatSession, AgentMessage, Artifact, ArtifactLock, User
+from app.models.entities import AgentChatSession, AgentMessage, Artifact, ArtifactLock, CourseTask, CourseTaskAgentProfile, User
 from app.providers.llm.mock import MockProvider
 from app.schemas.artifact import (
     AgentArtifactRevision,
@@ -28,6 +28,7 @@ from app.schemas.artifact import (
 )
 from app.services.model_config_service import owned_model_config, resolve_provider, resolved_model_name
 from app.services.course_task_service import register_artifact_version
+from app.services.agent_prompt_service import build_runtime_prompts
 
 router = APIRouter(tags=["课程资源"])
 MODULES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report", "citation_report"}
@@ -44,7 +45,7 @@ MODULE_SCHEMAS = {
 
 
 def serialize(item: Artifact) -> dict:
-    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "created_at", "approved_at")}
+    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "agent_profile_id", "created_at", "approved_at")}
 
 
 def _locked_value(content: dict, path: str):
@@ -121,7 +122,7 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
         raise HTTPException(404, "资源不存在")
     await owned_course(source.course_id, user, db)
     version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == source.course_id, Artifact.artifact_type == source.artifact_type)) or 0) + 1
-    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=payload.content_json, content_markdown=payload.content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary)
+    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=payload.content_json, content_markdown=payload.content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary, agent_profile_id=source.agent_profile_id)
     db.add(item)
     await db.flush()
     await register_artifact_version(db, item)
@@ -142,7 +143,7 @@ async def regenerate_artifact(artifact_id: str, payload: RegenerateRequest, user
     version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == source.course_id, Artifact.artifact_type == source.artifact_type)) or 0) + 1
     content = dict(source.content_json)
     content["revision_note"] = {"path": payload.path or "all", "instruction": payload.instruction}
-    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=content, content_markdown=source.content_markdown + f"\n\n> 局部重生成指令：{payload.instruction}", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=f"局部重生成：{payload.instruction[:80]}")
+    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=content, content_markdown=source.content_markdown + f"\n\n> 局部重生成指令：{payload.instruction}", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=f"局部重生成：{payload.instruction[:80]}", agent_profile_id=source.agent_profile_id)
     db.add(item)
     await db.commit()
     await db.refresh(item)
@@ -255,6 +256,12 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
         db.add(chat_session)
 
     version = source.version + 1
+    task = await db.scalar(select(CourseTask).where(
+        CourseTask.course_id == course_id, CourseTask.task_type == module_type,
+    ))
+    profile = await db.get(CourseTaskAgentProfile, task.current_agent_profile_id) if task and task.current_agent_profile_id else None
+    if module_type in {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"} and (not profile or profile.status != "ready"):
+        raise HTTPException(409, "项目专属 Agent 尚未初始化完成")
     if isinstance(provider, MockProvider):
         content = dict(source.content_json)
         content["revision_note"] = {"path": payload.path or "all", "instruction": payload.instruction}
@@ -271,12 +278,7 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
                 AgentMessage.module_type == module_type,
             ).order_by(AgentMessage.created_at.desc()).limit(12)
         ))
-        system = (
-            "你是 LessonForge AI 的课程资源修订 Agent。严格根据教师指令修订当前产物，"
-            "不得修改锁定内容，不得捏造引用来源或质量检测证据。"
-            "只返回符合给定输出 Schema 的 JSON，不展示隐藏推理。"
-        )
-        prompt = (
+        instruction = (
             "模块：" + module_type
             + "\n当前结构化内容：\n" + json.dumps(source.content_json, ensure_ascii=False)
             + "\n当前 Markdown：\n" + source.content_markdown
@@ -288,6 +290,13 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
             + "\n教师指令：\n" + payload.instruction
             + "\ncontent_json 必须符合：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
         )
+        if profile:
+            system, prompt = build_runtime_prompts(
+                profile, AgentArtifactRevision.model_json_schema(), {}, instruction,
+            )
+        else:
+            system = "你是课程质量与引用报告助手。不得修改规则证据，只返回符合输出 Schema 的 JSON。"
+            prompt = instruction + "\n输出 Schema：\n" + json.dumps(AgentArtifactRevision.model_json_schema(), ensure_ascii=False)
         try:
             revision = await provider.structured(system, prompt, AgentArtifactRevision)
         except Exception as exc:
@@ -311,6 +320,7 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
         model_name=resolved_model_name(provider, config),
         prompt_version=source.prompt_version,
         change_summary=f"Agent 对话修改：{payload.instruction[:80]}",
+        agent_profile_id=profile.id if profile else source.agent_profile_id,
     )
     db.add(artifact)
     await db.flush()

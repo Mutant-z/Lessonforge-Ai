@@ -43,19 +43,63 @@ export interface CourseTask {
   progress: number;
   dependency_types: string[];
   stale_dependencies: string[];
+  agent_profile_status: 'pending' | 'initializing' | 'ready' | 'failed' | 'stale';
+  agent_profile_version: number;
+  agent_profile_template_version?: string | null;
+  agent_profile_summary?: AgentProfileSummary | null;
+  stale_agent_profile: boolean;
+  agent_profile_error?: CourseTaskError | null;
   current_artifact: Artifact | null;
   active_run_id: string | null;
   error: CourseTaskError | null;
   updated_at: string;
   messages?: ProjectAgentMessage[];
   model_config_id?: string | null;
+  activity_run_id?: string | null;
+  activities?: TaskActivity[];
+  current_activity?: TaskActivity | null;
+}
+
+export type TaskActivityPhase =
+  | 'preparing'
+  | 'analyzing'
+  | 'generating'
+  | 'validating'
+  | 'replying'
+  | 'saving'
+  | 'completed';
+
+export interface TaskActivity {
+  phase: TaskActivityPhase;
+  label: string;
+  detail: string;
+  status: 'running' | 'completed' | 'failed';
+  progress: number;
+  elapsed_ms: number;
+}
+
+export interface AgentProfileSummary {
+  mission: string;
+  audience: string;
+  task_goals: string[];
+  knowledge_focus: string[];
+  style_guidelines: string[];
+  hard_constraints: string[];
+  quality_focus: string[];
+}
+
+export interface AgentInitializationState {
+  status: 'not_initialized' | 'queued' | 'running' | 'ready' | 'failed';
+  version: number;
+  progress: number;
+  error: CourseTaskError | null;
 }
 
 export interface ProjectAgentMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  status?: 'pending' | 'completed' | 'failed';
+  status?: 'pending' | 'streaming' | 'completed' | 'failed';
   artifact_id?: string | null;
   run_id?: string | null;
   created_at?: string;
@@ -97,6 +141,7 @@ export interface CourseProjectWorkspace {
   course: ProjectCourse;
   intent: TeachingIntent;
   planning: { status: string; progress: number; error: CourseTaskError | null };
+  agent_initialization: AgentInitializationState;
   tasks: CourseTask[];
   quality: ProjectQuality;
 }
@@ -109,8 +154,16 @@ export interface ProjectTaskEvent {
   task_type?: string;
   status?: CourseTaskStatus | 'ready' | 'planning';
   progress?: number;
-  phase?: string;
   artifact?: Artifact;
   message?: ProjectAgentMessage;
   error?: CourseTaskError;
+  version?: number;
+  phase?: TaskActivityPhase;
+  phase_label?: string;
+  detail?: string;
+  phase_status?: TaskActivity['status'];
+  elapsed_ms?: number;
+  message_id?: string;
+  delta?: string;
+  reset?: boolean;
 }

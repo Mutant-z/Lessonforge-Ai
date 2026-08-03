@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, owned_course
 from app.core.database import get_db
-from app.models.entities import CourseProject, CourseRequirement, User
+from app.models.entities import CourseBlueprint, CourseProject, CourseRequirement, User
 from app.schemas.course import CourseCreate, CourseList, CourseRead, CourseUpdate
 from app.services.model_config_service import owned_model_config, resolve_model_config
 
@@ -63,9 +63,40 @@ async def get_course(course_id: str, user: User = Depends(current_user), db: Asy
 @router.patch("/{course_id}", response_model=CourseRead)
 async def update_course(course_id: str, payload: CourseUpdate, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     course = await owned_course(course_id, user, db)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    context_fields = {"title", "subject", "grade_level", "audience", "duration_minutes", "scenario", "language", "settings_json"}
+    context_changed = bool(context_fields & set(changes))
+    for key, value in changes.items():
         setattr(course, key, value)
+    init_run = None
+    init_created = False
+    if context_changed:
+        latest = await db.scalar(select(CourseRequirement).where(
+            CourseRequirement.course_id == course.id,
+        ).order_by(CourseRequirement.version.desc()))
+        settings = course.settings_json or {}
+        form = {
+            "title": course.title, "subject": course.subject, "grade_level": course.grade_level,
+            "audience": course.audience, "duration_minutes": course.duration_minutes,
+            "scenario": course.scenario, "language": course.language, **settings,
+        }
+        db.add(CourseRequirement(
+            course_id=course.id, version=(latest.version if latest else 0) + 1,
+            form_json=form, raw_prompt="教师更新项目设置",
+        ))
+        await db.flush()
+        blueprint = await db.scalar(select(CourseBlueprint).where(
+            CourseBlueprint.course_id == course.id,
+            CourseBlueprint.version == course.current_blueprint_version,
+            CourseBlueprint.status == "approved",
+        ))
+        if blueprint:
+            from app.services.agent_initialization_service import create_initialization_run
+            init_run, init_created = await create_initialization_run(db, course, "requirement_updated")
     await db.commit()
+    if init_created and init_run:
+        from app.services.agent_initialization_service import start_initialization_run
+        start_initialization_run(init_run.id)
     await db.refresh(course)
     return course
 

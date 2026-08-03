@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -38,6 +39,11 @@ from app.services.course_task_service import (
 )
 from app.services.model_config_service import owned_model_config, resolve_provider
 from app.services.generation_service import start_blueprint_run
+from app.services.agent_initialization_service import (
+    create_initialization_run,
+    initialization_summary,
+    start_initialization_run,
+)
 
 router = APIRouter(tags=["课程项目任务"])
 
@@ -116,9 +122,23 @@ async def get_project(course_id: str, user: User = Depends(current_user), db: As
             "progress": 100 if blueprint and blueprint.status == "approved" else (planning_run.progress if planning_run else 0),
             "error": planning_run.error_json if planning_run and planning_run.status == "failed" else None,
         },
+        "agent_initialization": await initialization_summary(db, course_id),
         "tasks": [await task_payload(db, item) for item in tasks],
         "quality": await _quality_summary(db, course_id),
     }
+
+
+@router.post("/courses/{course_id}/agent-initialization/runs", status_code=202)
+async def initialize_project_agents(course_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    course = await owned_course(course_id, user, db)
+    try:
+        run, created = await create_initialization_run(db, course, "retry")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    if created:
+        start_initialization_run(run.id)
+    return {"run_id": run.id, "status": run.status, "created": created}
 
 
 @router.post("/courses/{course_id}/project/planning/retry", status_code=202)
@@ -177,17 +197,33 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
 @router.post("/courses/{course_id}/tasks/{task_type}/runs", status_code=202)
 async def run_task(course_id: str, task_type: str, payload: TaskRunRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     task = await _owned_task(course_id, task_type, user, db)
-    allowed = {"initial", "retry", "sync_dependencies"}
+    allowed = {"initial", "retry", "sync_dependencies", "sync_context"}
     if payload.action not in allowed:
         raise HTTPException(422, "不支持的任务操作")
     if payload.action == "sync_dependencies" and task.status != "stale":
         raise HTTPException(409, "当前任务不需要同步上游内容")
+    if payload.action == "sync_context" and task.status != "stale":
+        raise HTTPException(409, "当前任务不需要同步项目上下文")
     if payload.action == "retry" and task.status not in {"failed", "cancelled"}:
         raise HTTPException(409, "只有失败或已取消的任务可以重试")
     if payload.action == "initial" and task.current_artifact_id:
         raise HTTPException(409, "任务文件已经生成")
     try:
-        run = await create_task_run(db, task, payload.action)
+        retry_message = None
+        trigger_type = payload.action
+        if payload.action == "retry":
+            failed_run = await db.scalar(select(GenerationRun).where(
+                GenerationRun.course_task_id == task.id,
+                GenerationRun.status == "failed",
+            ).order_by(GenerationRun.created_at.desc()))
+            if failed_run and failed_run.trigger_type == "message":
+                retry_message = await db.scalar(select(AgentMessage).where(
+                    AgentMessage.run_id == failed_run.id,
+                    AgentMessage.role == "user",
+                ).order_by(AgentMessage.created_at.desc()))
+                if retry_message:
+                    trigger_type = "message"
+        run = await create_task_run(db, task, trigger_type, retry_message)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     await db.commit()
@@ -243,6 +279,8 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     if not task.current_artifact_id:
         raise HTTPException(409, "任务文件尚未生成")
     artifact = await db.get(Artifact, task.current_artifact_id)
+    if task.current_agent_profile_id and artifact.agent_profile_id != task.current_agent_profile_id:
+        raise HTTPException(409, "当前文件尚未同步最新项目专属 Agent 配置")
     artifact.status = "approved"
     artifact.approved_at = datetime.now(timezone.utc)
     task.status = "approved"
@@ -292,8 +330,10 @@ async def task_events(course_id: str, request: Request, token: str, after: int =
 
     async def stream():
         nonlocal cursor
-        idle = 0
-        while idle < 600:
+        idle_seconds = 0.0
+        fast_until = 0.0
+        last_heartbeat = 0.0
+        while idle_seconds < 600:
             async with SessionLocal() as db:
                 rows = list(await db.scalars(
                     select(GenerationEvent)
@@ -305,9 +345,16 @@ async def task_events(course_id: str, request: Request, token: str, after: int =
                     cursor = row.id
                     payload = {"event_id": row.id, **row.data_json}
                     yield f"id: {row.id}\nevent: {row.event_type}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-            idle = 0 if rows else idle + 1
+            now = time.monotonic()
+            if rows:
+                idle_seconds = 0.0
+                fast_until = now + 3
+            delay = 0.2 if now < fast_until else 1.0
             if not rows:
+                idle_seconds += delay
+            if not rows and now - last_heartbeat >= 10:
                 yield ": heartbeat\n\n"
-            await asyncio.sleep(1)
+                last_heartbeat = now
+            await asyncio.sleep(delay)
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

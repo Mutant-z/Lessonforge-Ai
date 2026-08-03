@@ -78,7 +78,7 @@ async def test_intent_confirmation_creates_and_runs_six_independent_tasks(client
 
 
 @pytest.mark.asyncio
-async def test_task_message_creates_version_and_marks_dependents_stale(client, auth_headers):
+async def test_task_message_creates_version_and_marks_dependents_stale(client, auth_headers, monkeypatch):
     course = (await client.post(
         "/api/v1/courses",
         headers=auth_headers,
@@ -142,3 +142,96 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         lambda item: next(task for task in item["tasks"] if task["task_type"] == "video_script")["current_artifact"]["version"] == 2,
     )
     assert next(task for task in project["tasks"] if task["task_type"] == "verbatim")["status"] == "stale"
+
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.entities import AgentMessage, GenerationEvent
+
+    run_id = sent.json()["run_id"]
+    async with SessionLocal() as db:
+        events = list(await db.scalars(select(GenerationEvent).where(
+            GenerationEvent.run_id == run_id,
+        ).order_by(GenerationEvent.id)))
+        reply = await db.scalar(select(AgentMessage).where(
+            AgentMessage.run_id == run_id,
+            AgentMessage.role == "assistant",
+        ))
+    event_types = [event.event_type for event in events]
+    assert "task_activity_updated" in event_types
+    assert event_types.index("agent_message_started") < event_types.index("agent_message_delta")
+    assert event_types.index("agent_message_delta") < event_types.index("agent_message_completed")
+    streamed = "".join(
+        event.data_json.get("delta", "")
+        for event in events
+        if event.event_type == "agent_message_delta" and not event.data_json.get("reset")
+    )
+    assert reply and reply.status == "completed"
+    assert streamed.strip() == reply.content
+
+    from app.providers.llm.mock import MockProvider
+
+    async def broken_stream(self, system, prompt):
+        raise RuntimeError("stream unavailable")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(MockProvider, "stream_text", broken_stream)
+    fallback_sent = await client.post(
+        f"/api/v1/courses/{course['id']}/tasks/ppt/messages",
+        headers=auth_headers,
+        json={"content": "进一步精简标题"},
+    )
+    assert fallback_sent.status_code == 202
+    project = await wait_for_project(
+        client,
+        auth_headers,
+        course["id"],
+        lambda item: next(
+            task for task in item["tasks"] if task["task_type"] == "ppt"
+        )["current_artifact"]["version"] == 3,
+    )
+    assert next(task for task in project["tasks"] if task["task_type"] == "ppt")["status"] == "review"
+    async with SessionLocal() as db:
+        fallback_reply = await db.scalar(select(AgentMessage).where(
+            AgentMessage.run_id == fallback_sent.json()["run_id"],
+            AgentMessage.role == "assistant",
+        ))
+    assert fallback_reply and fallback_reply.status == "completed"
+    assert "V3" in fallback_reply.content
+
+    import app.services.course_task_service as task_service
+
+    original_revision = task_service._generate_revision
+
+    async def broken_revision(*args, **kwargs):
+        raise RuntimeError("temporary structured output failure")
+
+    monkeypatch.setattr(task_service, "_generate_revision", broken_revision)
+    failed_sent = await client.post(
+        f"/api/v1/courses/{course['id']}/tasks/ppt/messages",
+        headers=auth_headers,
+        json={"content": "润色教学反思"},
+    )
+    assert failed_sent.status_code == 202
+    failed_project = await wait_for_project(
+        client,
+        auth_headers,
+        course["id"],
+        lambda item: next(task for task in item["tasks"] if task["task_type"] == "ppt")["status"] == "failed",
+    )
+    assert next(task for task in failed_project["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 3
+
+    monkeypatch.setattr(task_service, "_generate_revision", original_revision)
+    retried = await client.post(
+        f"/api/v1/courses/{course['id']}/tasks/ppt/runs",
+        headers=auth_headers,
+        json={"action": "retry"},
+    )
+    assert retried.status_code == 202, retried.text
+    recovered_project = await wait_for_project(
+        client,
+        auth_headers,
+        course["id"],
+        lambda item: next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 4,
+    )
+    assert next(task for task in recovered_project["tasks"] if task["task_type"] == "ppt")["status"] == "review"

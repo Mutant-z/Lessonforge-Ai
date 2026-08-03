@@ -62,7 +62,7 @@
             <div class="chip-label">配置端点</div>
             <div class="chip-title">{{ modelConfigs.length }} <span class="chip-unit">个服务接入</span></div>
           </div>
-          <span class="chip-tag tag-blue">OpenAI {{ providerStats.openai }} / Anthropic {{ providerStats.anthropic }}</span>
+          <span class="chip-tag tag-blue">OpenAI {{ providerStats.openai }} · Anthropic {{ providerStats.anthropic }}</span>
         </div>
 
         <!-- 3. API 密钥安全防线 -->
@@ -82,7 +82,7 @@
             <div class="chip-label">推演引擎</div>
             <div class="chip-title text-violet">SSE Stream Engine</div>
           </div>
-          <span class="chip-tag tag-purple">流式多 Agent</span>
+          <span class="chip-tag tag-purple">流式 Agent</span>
         </div>
       </div>
 
@@ -1106,12 +1106,12 @@ onMounted(() => {
   box-shadow: var(--shadow-glow-primary) !important;
 }
 
-/* 2. 超紧凑型 4 维顶部 Bar */
+/* 2. 超紧凑型 4 维顶部 Bar (动态分配列宽比例，解决右端 Tag 截断 Bug) */
 .metrics-bar {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-  margin-bottom: 14px;
+  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr) minmax(0, 0.88fr) minmax(0, 1.12fr);
+  gap: 10px;
+  margin-bottom: 12px;
   flex-shrink: 0;
 }
 
@@ -1125,13 +1125,15 @@ onMounted(() => {
   background: #ffffff;
   border: 1.5px solid #e2e8f0;
   border-radius: 14px;
-  padding: 10px 14px;
+  padding: 8px 11px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   border-left-width: 4px;
   transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .metric-chip:hover {

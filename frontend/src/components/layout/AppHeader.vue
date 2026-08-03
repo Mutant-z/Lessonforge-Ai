@@ -8,7 +8,8 @@ import {
   Setting, 
   SwitchButton, 
   Search,
-  Check
+  Check,
+  ArrowDown
 } from '@element-plus/icons-vue';
 
 const auth = useAuthStore();
@@ -89,14 +90,15 @@ function handleSearch() {
 
       <!-- User Logged In Actions -->
       <template v-if="auth.user">
-        <el-button type="primary" size="default" :icon="Plus" @click="router.push('/courses/new')">
+        <el-button type="primary" size="default" class="btn-create-header" :icon="Plus" @click="router.push('/courses/new')">
           新建微课
         </el-button>
 
-        <el-dropdown trigger="click" @command="handleCommand">
+        <el-dropdown trigger="click" popper-class="user-dropdown-popper" @command="handleCommand">
           <div class="user-avatar-trigger">
             <div class="avatar-circle">{{ auth.user.username.charAt(0).toUpperCase() }}</div>
             <span class="user-name-text">{{ auth.user.username }}</span>
+            <el-icon class="arrow-down-ic"><ArrowDown /></el-icon>
           </div>
           <template #dropdown>
             <el-dropdown-menu>
@@ -199,52 +201,94 @@ function handleSearch() {
   align-items: center;
   gap: 8px;
   padding: 6px 14px;
-  background: var(--accent-amber-soft);
-  border: 1px solid rgba(217, 119, 6, 0.3);
-  border-radius: var(--radius-pill);
+  background: #fff7ed;
+  border: 1.5px solid #fed7aa;
+  border-radius: 999px;
   cursor: pointer;
   font-size: 13px;
   font-weight: 800;
-  color: var(--accent-amber);
+  color: #c2410c;
+  box-shadow: 0 2px 8px rgba(249, 115, 22, 0.1);
+  transition: all 180ms ease;
+}
+
+.review-pending-pill:hover {
+  background: #ffedd5;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(249, 115, 22, 0.18);
 }
 
 .review-amber-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--accent-amber);
+  background: #ea580c;
+  box-shadow: 0 0 6px #ea580c;
+}
+
+.btn-create-header {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  color: #ffffff !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  font-size: 13.5px !important;
+  font-weight: 800 !important;
+  padding: 8px 18px !important;
+  box-shadow: 0 3px 12px rgba(79, 70, 229, 0.28) !important;
+  transition: all 180ms ease !important;
+}
+
+.btn-create-header:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.38) !important;
 }
 
 .user-avatar-trigger {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   cursor: pointer;
-  padding: 5px 10px;
-  border-radius: var(--radius-pill);
-  transition: background var(--motion-fast);
+  padding: 4px 14px 4px 4px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  border: 1.5px solid #e2e8f0;
+  transition: all 180ms ease;
 }
 
 .user-avatar-trigger:hover {
-  background: var(--bg-hover);
+  background: #ffffff;
+  border-color: #a5b4fc;
+  box-shadow: 0 3px 12px rgba(79, 70, 229, 0.1);
 }
 
 .avatar-circle {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--color-primary) 0%, var(--accent-violet) 100%);
-  color: #fff;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  color: #ffffff;
   font-weight: 900;
-  font-size: 15px;
+  font-size: 14px;
   display: grid;
   place-items: center;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.25);
 }
 
 .user-name-text {
-  font-size: 14.5px;
+  font-size: 13.5px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: #0f172a;
+}
+
+.arrow-down-ic {
+  font-size: 12px;
+  color: #64748b;
+  transition: transform 180ms ease;
+}
+
+.user-avatar-trigger:hover .arrow-down-ic {
+  color: #4f46e5;
+  transform: translateY(1px);
 }
 
 @media (max-width: 600px) {
@@ -272,5 +316,57 @@ function handleSearch() {
     width: 32px;
     height: 32px;
   }
+}
+</style>
+
+<style>
+/* 全局浮层: 用户下拉菜单高质感 Popover 样式 */
+.el-dropdown-menu.user-dropdown-popper,
+.user-dropdown-popper .el-dropdown-menu {
+  border-radius: 14px !important;
+  border: 1.5px solid #e2e8f0 !important;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12) !important;
+  padding: 6px !important;
+  background: #ffffff !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item {
+  border-radius: 10px !important;
+  font-size: 13.5px !important;
+  font-weight: 700 !important;
+  padding: 9px 14px !important;
+  color: #334155 !important;
+  gap: 8px !important;
+  transition: all 150ms ease !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item:hover {
+  background: #f8fafc !important;
+  color: #4f46e5 !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item .el-icon {
+  font-size: 15px !important;
+  color: #64748b !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item:hover .el-icon {
+  color: #4f46e5 !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item--divided {
+  border-top: 1px solid #f1f5f9 !important;
+  margin-top: 4px !important;
+  padding-top: 9px !important;
+  color: #dc2626 !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item--divided:hover {
+  background: #fef2f2 !important;
+  color: #dc2626 !important;
+}
+
+.user-dropdown-popper .el-dropdown-menu__item--divided:hover .el-icon {
+  color: #dc2626 !important;
 }
 </style>

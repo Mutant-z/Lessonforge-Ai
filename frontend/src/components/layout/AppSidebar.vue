@@ -1,13 +1,11 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../../stores/auth';
 import { useCourseStore } from '../../stores/courses';
-import { useTaskCenterStore } from '../../stores/taskCenter';
 import { 
   DataBoard, 
   Plus, 
-  Cpu, 
   Setting, 
   Fold, 
   Expand 
@@ -16,11 +14,27 @@ import StatusBadge from '../feedback/StatusBadge.vue';
 
 const auth = useAuthStore();
 const courses = useCourseStore();
-const taskCenter = useTaskCenterStore();
 const router = useRouter();
 const route = useRoute();
 
 const isCollapsed = ref(localStorage.getItem('lf_sidebar_collapsed') === 'true');
+const isCompactViewport = ref(false);
+const sidebarCollapsed = computed(() => isCollapsed.value || isCompactViewport.value);
+let compactViewportQuery: MediaQueryList | undefined;
+
+function syncCompactViewport(event?: MediaQueryListEvent) {
+  isCompactViewport.value = event?.matches ?? compactViewportQuery?.matches ?? false;
+}
+
+onMounted(() => {
+  compactViewportQuery = window.matchMedia('(max-width: 900px)');
+  syncCompactViewport();
+  compactViewportQuery.addEventListener('change', syncCompactViewport);
+});
+
+onUnmounted(() => {
+  compactViewportQuery?.removeEventListener('change', syncCompactViewport);
+});
 
 function toggleCollapse() {
   isCollapsed.value = !isCollapsed.value;
@@ -38,80 +52,70 @@ function navigate(path: string) {
 </script>
 
 <template>
-  <aside class="app-sidebar" :class="{ collapsed: isCollapsed }">
+  <aside class="app-sidebar" :class="{ collapsed: sidebarCollapsed }">
     <!-- Brand Header -->
-    <div class="sidebar-brand" @click="navigate('/')">
-      <div class="brand-logo">LF</div>
-      <div v-if="!isCollapsed" class="brand-meta">
-        <span class="brand-name">课启智造</span>
-        <span class="brand-sub">LessonForge AI</span>
+    <div class="sidebar-brand">
+      <div class="brand-logo-area" @click="navigate('/')">
+        <div class="brand-logo">LF</div>
+        <div v-if="!sidebarCollapsed" class="brand-meta">
+          <span class="brand-name">课启智造</span>
+          <span class="brand-sub">LessonForge AI</span>
+        </div>
       </div>
       <el-button
-        v-if="!isCollapsed"
         class="collapse-toggle-btn"
         link
-        :icon="Fold"
+        :icon="sidebarCollapsed ? Expand : Fold"
+        :title="sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'"
         @click.stop="toggleCollapse"
       />
     </div>
 
     <!-- Create Course Primary Action -->
     <div class="sidebar-action-row">
-      <el-tooltip :disabled="!isCollapsed" content="新建微课项目" placement="right">
+      <el-tooltip :disabled="!sidebarCollapsed" content="新建微课项目" placement="right">
         <button class="new-course-btn" @click="navigate('/courses/new')">
           <el-icon><Plus /></el-icon>
-          <span v-if="!isCollapsed">新建微课项目</span>
+          <span v-if="!sidebarCollapsed">新建微课项目</span>
         </button>
       </el-tooltip>
     </div>
 
     <!-- Core Nav Section -->
     <div class="nav-section">
-      <div v-if="!isCollapsed" class="nav-section-title">核心功能</div>
+      <div v-if="!sidebarCollapsed" class="nav-section-title">核心功能</div>
       
-      <el-tooltip :disabled="!isCollapsed" content="工作台总览" placement="right">
+      <el-tooltip :disabled="!sidebarCollapsed" content="工作台总览" placement="right">
         <button 
           class="nav-item" 
           :class="{ active: route.path === '/' }"
           @click="navigate('/')"
         >
-          <el-icon><DataBoard /></el-icon>
-          <span v-if="!isCollapsed">教师工作台</span>
+          <div class="nav-item-icon"><el-icon><DataBoard /></el-icon></div>
+          <span v-if="!sidebarCollapsed" class="nav-item-label">教师工作台</span>
         </button>
       </el-tooltip>
 
-      <el-tooltip :disabled="!isCollapsed" content="Agent 任务中心" placement="right">
-        <button 
-          class="nav-item" 
-          :class="{ active: taskCenter.isDrawerOpen }"
-          @click="taskCenter.toggleDrawer()"
-        >
-          <el-icon><Cpu /></el-icon>
-          <span v-if="!isCollapsed">Agent 任务中心</span>
-          <span v-if="!isCollapsed && taskCenter.runningCount > 0" class="nav-badge">{{ taskCenter.runningCount }}</span>
-        </button>
-      </el-tooltip>
-
-      <el-tooltip :disabled="!isCollapsed" content="模型与系统偏好" placement="right">
+      <el-tooltip :disabled="!sidebarCollapsed" content="模型与系统偏好" placement="right">
         <button 
           class="nav-item" 
           :class="{ active: route.path === '/settings' }"
           @click="navigate('/settings')"
         >
-          <el-icon><Setting /></el-icon>
-          <span v-if="!isCollapsed">模型与偏好</span>
+          <div class="nav-item-icon"><el-icon><Setting /></el-icon></div>
+          <span v-if="!sidebarCollapsed" class="nav-item-label">模型与偏好</span>
         </button>
       </el-tooltip>
     </div>
 
     <!-- Course Projects Section -->
     <div v-if="auth.user" class="nav-section course-section">
-      <div v-if="!isCollapsed" class="nav-section-title">
+      <div v-if="!sidebarCollapsed" class="nav-section-title">
         <span>我的微课项目</span>
         <span class="course-count-tag">{{ courses.items.length }}</span>
       </div>
       
-      <div v-if="!isCollapsed" class="course-list-scroll">
+      <div v-if="!sidebarCollapsed" class="course-list-scroll">
         <button
           v-for="course in courses.items"
           :key="course.id"
@@ -125,24 +129,6 @@ function navigate(path: string) {
           </div>
           <StatusBadge :status="course.status" size="small" />
         </button>
-      </div>
-    </div>
-
-    <!-- Sidebar Footer with Connection & Version info -->
-    <div class="sidebar-footer">
-      <el-button
-        v-if="isCollapsed"
-        class="expand-bottom-toggle-btn"
-        link
-        :icon="Expand"
-        @click="toggleCollapse"
-      />
-      <div v-else class="footer-meta-block">
-        <div class="model-status-indicator">
-          <span class="status-dot green"></span>
-          <span>大模型就绪 (DeepSeek/GPT-4o)</span>
-        </div>
-        <span class="version-text">LessonForge AI v1.2 · 多 Agent 平台</span>
       </div>
     </div>
   </aside>
@@ -168,13 +154,52 @@ function navigate(path: string) {
   padding: 22px 10px;
 }
 
+@media (max-width: 900px) {
+  .app-sidebar.collapsed {
+    width: 64px;
+    padding: 14px 8px;
+  }
+
+  .app-sidebar.collapsed .sidebar-brand {
+    justify-content: center;
+  }
+
+  .app-sidebar.collapsed .brand-logo {
+    width: 40px;
+    height: 40px;
+    font-size: 17px;
+  }
+
+  .app-sidebar.collapsed .new-course-btn,
+  .app-sidebar.collapsed .nav-item {
+    justify-content: center;
+    padding-inline: 10px;
+  }
+}
+
 .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border-light);
+  transition: all var(--motion-fast);
+}
+
+.app-sidebar.collapsed .sidebar-brand {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 14px;
+}
+
+.brand-logo-area {
   display: flex;
   align-items: center;
   gap: 12px;
   cursor: pointer;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--border-light);
+  min-width: 0;
+  flex: 1;
 }
 
 .brand-logo {
@@ -202,17 +227,31 @@ function navigate(path: string) {
   font-size: 17.5px;
   font-weight: 900;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .brand-sub {
   font-size: 12px;
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .collapse-toggle-btn {
   margin-left: auto;
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: 17px;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  transition: all var(--motion-fast);
+}
+
+.collapse-toggle-btn:hover {
+  color: var(--color-primary);
+  background: var(--bg-subtle);
+}
+
+.app-sidebar.collapsed .collapse-toggle-btn {
+  margin-left: 0;
 }
 
 .sidebar-action-row {
@@ -249,12 +288,12 @@ function navigate(path: string) {
 }
 
 .nav-section-title {
-  font-size: 13px;
+  font-size: 11.5px;
   font-weight: 800;
-  color: var(--text-muted);
-  letter-spacing: 0.06em;
+  color: #94a3b8;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   padding: 0 8px;
   display: flex;
   justify-content: space-between;
@@ -262,49 +301,80 @@ function navigate(path: string) {
 }
 
 .course-count-tag {
-  font-size: 12px;
-  font-weight: 700;
-  background: var(--surface-tertiary);
-  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 800;
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #e2e8f0;
   padding: 2px 8px;
-  border-radius: var(--radius-pill);
+  border-radius: 999px;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
-  border: 0;
+  padding: 8px 12px;
+  border: 1.5px solid transparent;
   background: transparent;
-  border-radius: var(--radius-control);
-  color: var(--text-secondary);
-  font-size: 15px;
-  font-weight: 600;
+  border-radius: 12px;
+  color: #475569;
+  font-size: 14.5px;
+  font-weight: 700;
   cursor: pointer;
-  transition: all var(--motion-fast);
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
 }
 
+.nav-item-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  transition: all 180ms ease;
+}
+
 .nav-item:hover {
-  background: var(--bg-subtle);
-  color: var(--text-primary);
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.nav-item:hover .nav-item-icon {
+  background: #eef2ff;
+  border-color: #c7d2fe;
+  color: #4f46e5;
 }
 
 .nav-item.active {
-  background: var(--color-primary-soft);
-  color: var(--color-primary);
-  font-weight: 700;
+  background: linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%);
+  border-color: #c7d2fe;
+  color: #4f46e5;
+  font-weight: 800;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.08);
 }
 
-.nav-badge {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 800;
-  background: var(--color-primary);
+.nav-item.active .nav-item-icon {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  border: 0;
   color: #ffffff;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.3);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 20%;
+  height: 60%;
+  width: 4px;
+  border-radius: 999px;
+  background: #4f46e5;
 }
 
 .course-section {
@@ -326,40 +396,45 @@ function navigate(path: string) {
 .course-list-item {
   width: 100%;
   padding: 12px 14px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  border-radius: var(--radius-control);
+  border: 1.5px solid #e2e8f0;
+  background: #ffffff;
+  border-radius: 14px;
   text-align: left;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  transition: all var(--motion-fast);
+  gap: 8px;
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.02);
 }
 
 .course-list-item:hover {
-  border-color: var(--border-active);
-  background: var(--bg-page);
-  transform: translateX(2px);
+  border-color: #c7d2fe;
+  background: #f8fafc;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
 }
 
 .course-list-item.selected {
-  border-color: var(--color-primary);
-  background: var(--color-primary-soft);
+  border-color: #4f46e5;
+  background: linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%);
+  box-shadow: 0 4px 18px rgba(79, 70, 229, 0.12);
 }
 
 .course-item-title {
   font-size: 14.5px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: #0f172a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.35;
 }
 
 .course-item-info {
-  font-size: 13px;
-  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
 }
 
 .sidebar-footer {

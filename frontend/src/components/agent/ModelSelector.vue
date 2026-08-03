@@ -8,11 +8,13 @@ const props = withDefaults(defineProps<{
   disabled?: boolean;
   compact?: boolean;
   label?: string;
+  capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | null;
 }>(), {
   modelValue: null,
   disabled: false,
   compact: false,
   label: '对话模型',
+  capability: null,
 });
 
 const emit = defineEmits<{
@@ -22,6 +24,9 @@ const emit = defineEmits<{
 
 const store = useModelConfigStore();
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
+const availableConfigs = computed(() => props.capability
+  ? store.configs.filter(item => item.capabilities?.includes(props.capability!))
+  : store.configs);
 
 function formatTokens(value: number) {
   if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
@@ -57,7 +62,7 @@ onMounted(() => {
 <template>
   <div class="model-selector" :class="{ compact }">
     <span v-if="label" class="selector-label">{{ label }}</span>
-    <div v-if="store.configs.length" class="selector-control">
+    <div v-if="availableConfigs.length" class="selector-control">
       <el-select
         :model-value="modelValue || undefined"
         :disabled="disabled"
@@ -73,7 +78,7 @@ onMounted(() => {
           <el-icon class="select-prefix-icon"><Cpu /></el-icon>
         </template>
         <el-option
-          v-for="config in store.configs"
+          v-for="config in availableConfigs"
           :key="config.id"
           :value="config.id"
           :label="config.name || config.model_name"
@@ -274,7 +279,8 @@ onMounted(() => {
   font-size: 11px;
 }
 
-.compact .selector-label {
+.compact .selector-label,
+.compact .capability-tags {
   display: none;
 }
 

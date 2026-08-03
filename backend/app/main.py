@@ -6,25 +6,28 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import artifacts, auth, blueprints, courses, exports, generations, intakes, materials, projects, quality, settings
+from app.api.v1 import artifact_assets, artifacts, auth, blueprints, courses, exports, intakes, materials, ppt_templates, projects, quality, settings
 from app.core.config import get_settings
-from app.core.database import create_schema
-from app.services.generation_service import tasks as generation_tasks
+from app.core.database import SessionLocal, create_schema
+from app.services.project_planning_service import planning_jobs
 from app.services.intake_service import intake_tasks
 from app.services.course_task_service import resume_incomplete_task_runs, task_jobs
 from app.services.agent_initialization_service import initialization_jobs, resume_incomplete_initialization_runs
+from app.services.exercise_visual_service import cleanup_orphan_artifact_assets
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_settings().prepare_storage()
     await create_schema()
+    async with SessionLocal() as db:
+        await cleanup_orphan_artifact_assets(db)
     await resume_incomplete_initialization_runs()
     await resume_incomplete_task_runs()
     try:
         yield
     finally:
-        pending = list(generation_tasks.values()) + list(intake_tasks.values()) + list(task_jobs.values()) + list(initialization_jobs.values())
+        pending = list(planning_jobs.values()) + list(intake_tasks.values()) + list(task_jobs.values()) + list(initialization_jobs.values())
         for task in pending:
             task.cancel()
         if pending:
@@ -51,5 +54,5 @@ async def health():
     return {"status": "ok", "service": "lessonforge-api"}
 
 
-for module in (auth, courses, materials, intakes, blueprints, artifacts, generations, projects, quality, exports, settings):
+for module in (auth, courses, materials, intakes, blueprints, artifacts, artifact_assets, ppt_templates, projects, quality, exports, settings):
     app.include_router(module.router, prefix="/api/v1")

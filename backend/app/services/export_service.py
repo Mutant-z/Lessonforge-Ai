@@ -5,8 +5,9 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.renderers.docx_renderer import render_exercise_docx, render_markdown_docx
+from app.renderers.docx_renderer import render_exercise_docx, render_markdown_docx, render_task_sheet_docx, render_video_script_docx
 from app.renderers.pptx_renderer import render_pptx
+from app.services.ppt_template_service import ppt_template_catalog_version, resolve_ppt_template
 
 
 def safe_package_name(title: str) -> str:
@@ -27,25 +28,57 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
     folder.mkdir(parents=True, exist_ok=True)
     files = []
 
-    def add(path: Path, artifact_type: str, version: int = 1):
-        files.append({"type": artifact_type, "version": version, "file": path.name, "sha256": sha256(path), "size": path.stat().st_size})
+    def add(path: Path, artifact_type: str, version: int = 1, **metadata):
+        files.append({"type": artifact_type, "version": version, "file": path.name, "sha256": sha256(path), "size": path.stat().st_size, **metadata})
 
     mappings = [
         ("lesson_plan", "01_教学设计.docx", "教学设计"),
-        ("task_sheet", "03_学习任务单.docx", "学习任务单"),
-        ("video_script", "06_微课视频脚本.docx", "微课视频脚本"),
         ("verbatim", "07_教师逐字稿.docx", "教师逐字稿"),
     ]
     for kind, filename, label in mappings:
         if kind in artifacts:
             path = render_markdown_docx(label, artifacts[kind]["content_markdown"], folder / filename, f"V{artifacts[kind]['version']}")
             add(path, kind, artifacts[kind]["version"])
+    if "video_script" in artifacts:
+        video = artifacts["video_script"]
+        schema_version = video["content_json"].get("schema_version", "1.0")
+        source_versions = video.get("source_versions_json") or {}
+        if schema_version == "2.0":
+            path = render_video_script_docx(
+                "微课视频脚本", video["content_json"], folder / "06_微课视频脚本.docx",
+                f"V{video['version']}", source_versions,
+            )
+        else:
+            path = render_markdown_docx("微课视频脚本", video["content_markdown"], folder / "06_微课视频脚本.docx", f"V{video['version']}")
+        add(path, "video_script", video["version"], schema_version=schema_version, source_versions=source_versions)
+        markdown_path = folder / "06_微课视频脚本.md"
+        markdown_path.write_text(video["content_markdown"], encoding="utf-8")
+        add(markdown_path, "video_script_markdown", video["version"], schema_version=schema_version, source_versions=source_versions)
+    if "task_sheet" in artifacts:
+        task_sheet = artifacts["task_sheet"]
+        if task_sheet["content_json"].get("schema_version") == "2.0":
+            path = render_task_sheet_docx("学习任务单", task_sheet["content_json"], folder / "03_学习任务单.docx", f"V{task_sheet['version']}")
+        else:
+            path = render_markdown_docx("学习任务单", task_sheet["content_markdown"], folder / "03_学习任务单.docx", f"V{task_sheet['version']}")
+        add(path, "task_sheet", task_sheet["version"])
+        markdown_path = folder / "03_学习任务单.md"
+        markdown_path.write_text(task_sheet["content_markdown"], encoding="utf-8")
+        add(markdown_path, "task_sheet_markdown", task_sheet["version"])
     if "ppt" in artifacts:
-        path = render_pptx(title, artifacts["ppt"]["content_json"], folder / "02_课件.pptx")
-        add(path, "ppt", artifacts["ppt"]["version"])
+        ppt_content = artifacts["ppt"]["content_json"]
+        template = resolve_ppt_template(ppt_content.get("theme"))
+        path = render_pptx(title, ppt_content, folder / "02_课件.pptx")
+        add(
+            path,
+            "ppt",
+            artifacts["ppt"]["version"],
+            template_id=template["id"],
+            template_catalog_version=ppt_template_catalog_version(),
+        )
     if "exercise" in artifacts:
-        student = render_exercise_docx("课后练习（学生版）", artifacts["exercise"]["content_json"], folder / "04_课后练习_学生版.docx", False)
-        teacher = render_exercise_docx("课后练习（教师版）", artifacts["exercise"]["content_json"], folder / "05_课后练习_教师版.docx", True)
+        asset_paths = artifacts["exercise"].get("asset_paths") or {}
+        student = render_exercise_docx("课后练习（学生版）", artifacts["exercise"]["content_json"], folder / "04_课后练习_学生版.docx", False, asset_paths)
+        teacher = render_exercise_docx("课后练习（教师版）", artifacts["exercise"]["content_json"], folder / "05_课后练习_教师版.docx", True, asset_paths)
         add(student, "exercise_student", artifacts["exercise"]["version"]); add(teacher, "exercise_teacher", artifacts["exercise"]["version"])
     (folder / "08_质量报告.md").write_text(artifacts.get("quality_report", {}).get("content_markdown", "# 质量报告\n\n已通过系统结构化检查。"), encoding="utf-8")
     add(folder / "08_质量报告.md", "quality_report")

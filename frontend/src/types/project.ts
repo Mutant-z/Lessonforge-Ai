@@ -55,6 +55,8 @@ export interface CourseTask {
   updated_at: string;
   messages?: ProjectAgentMessage[];
   model_config_id?: string | null;
+  image_model_config_id?: string | null;
+  vision_model_config_id?: string | null;
   activity_run_id?: string | null;
   activities?: TaskActivity[];
   current_activity?: TaskActivity | null;

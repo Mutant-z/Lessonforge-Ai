@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import type { ExerciseItem } from '../../types';
+import type { ExerciseQuestion } from '../../types';
 import { Refresh, View, Lock } from '@element-plus/icons-vue';
 
 const props = defineProps<{
-  exercise: ExerciseItem;
+  exercise: ExerciseQuestion;
   index: number;
 }>();
 
@@ -13,18 +13,18 @@ const emit = defineEmits<{
   (e: 'delete', id: string): void;
 }>();
 
-const showAnswer = ref(true);
+const showAnswer = ref(false);
 
 function getDifficultyType(diff: string) {
-  if (diff === 'easy') return 'success';
-  if (diff === 'hard') return 'danger';
+  if (diff === 'basic') return 'success';
+  if (diff === 'advanced') return 'danger';
   return 'warning';
 }
 
 function getDifficultyLabel(diff: string) {
-  if (diff === 'easy') return '基础巩固';
-  if (diff === 'hard') return '拓展挑战';
-  return '进阶应用';
+  if (diff === 'basic') return '基础巩固';
+  if (diff === 'advanced') return '迁移挑战';
+  return '理解应用';
 }
 </script>
 
@@ -36,7 +36,7 @@ function getDifficultyLabel(diff: string) {
         <el-tag size="small" :type="getDifficultyType(exercise.difficulty)">
           {{ getDifficultyLabel(exercise.difficulty) }}
         </el-tag>
-        <span class="ex-type">{{ exercise.type === 'single_choice' ? '单选题' : exercise.type === 'multiple_choice' ? '多选题' : exercise.type === 'fill_blank' ? '填空题' : '简答与分析题' }}</span>
+        <span class="ex-type">{{ exercise.question_type === 'single_choice' ? '单选题' : exercise.question_type === 'multiple_choice' ? '多选题' : exercise.question_type === 'fill_blank' ? '填空题' : '简答与分析题' }}</span>
       </div>
 
       <div class="ex-actions">
@@ -51,13 +51,13 @@ function getDifficultyLabel(diff: string) {
 
     <!-- Question Body -->
     <div class="ex-question">
-      <p>{{ exercise.question }}</p>
+      <p>{{ exercise.stem }}</p>
     </div>
 
     <!-- Options if Choice Question -->
     <div v-if="exercise.options && exercise.options.length" class="ex-options">
       <div v-for="(opt, oIdx) in exercise.options" :key="oIdx" class="option-item">
-        {{ opt }}
+        {{ opt.id }}. {{ opt.text }}
       </div>
     </div>
 
@@ -65,14 +65,14 @@ function getDifficultyLabel(diff: string) {
     <div v-if="showAnswer" class="ex-answer-section animate-fade-in">
       <div class="answer-row">
         <strong>【正确答案】:</strong>
-        <span class="answer-text">{{ exercise.answer }}</span>
+        <span class="answer-text">{{ exercise.answer_key.correct_option_ids.join('、') || exercise.answer_key.accepted_answers.join('、') || exercise.answer_key.reference_answer }}</span>
       </div>
       <div class="explanation-row">
         <strong>【解析指南】:</strong>
-        <p class="explanation-text">{{ exercise.explanation }}</p>
+        <p class="explanation-text">{{ exercise.analysis }}</p>
       </div>
-      <div v-if="exercise.target_objective" class="objective-ref">
-        🎯 关联教学目标: {{ exercise.target_objective }}
+      <div v-if="exercise.objective_ids.length" class="objective-ref">
+        关联教学目标: {{ exercise.objective_ids.join('、') }}
       </div>
     </div>
   </div>

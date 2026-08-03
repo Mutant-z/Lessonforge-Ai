@@ -318,10 +318,10 @@ async function createSampleCourse() {
                     </div>
 
                     <div class="course-resources-preview">
-                      <span class="res-item"><el-icon><Document /></el-icon> 教学设计</span>
-                      <span class="res-item"><el-icon><Files /></el-icon> 16:9 PPT</span>
-                      <span class="res-item"><el-icon><CircleCheck /></el-icon> 任务单</span>
-                      <span class="res-item"><el-icon><Cpu /></el-icon> 脚本</span>
+                      <span class="res-item doc"><el-icon><Document /></el-icon> 教学设计</span>
+                      <span class="res-item ppt"><el-icon><Files /></el-icon> 16:9 PPT</span>
+                      <span class="res-item sheet"><el-icon><CircleCheck /></el-icon> 任务单</span>
+                      <span class="res-item script"><el-icon><Cpu /></el-icon> 脚本</span>
                     </div>
 
                     <div class="course-card-footer">
@@ -768,31 +768,33 @@ async function createSampleCourse() {
 
 
 .course-card {
-  background: var(--surface-secondary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-card);
-  padding: 16px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 18px 20px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  box-shadow: var(--shadow-xs);
-  transition: all var(--motion-normal) var(--ease-out-smooth);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.03);
+  transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
 }
 
 .course-card:hover {
-  border-color: var(--border-active);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-md);
-  background: var(--surface-primary);
+  border-color: #c7d2fe;
+  transform: translateY(-3px);
+  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.12);
+  background: #ffffff;
 }
 
 .course-card-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .title-and-tags {
@@ -803,69 +805,94 @@ async function createSampleCourse() {
 .course-tags-row {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .meta-tag {
-  font-size: 11.5px;
-  font-weight: 800;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
   white-space: nowrap;
+  line-height: 1.4;
 }
 
-.meta-tag.subject { background: var(--color-primary-soft); color: var(--color-primary); }
-.meta-tag.grade { background: var(--surface-tertiary); color: var(--text-secondary); }
-.meta-tag.duration { background: var(--accent-cyan-soft); color: var(--accent-cyan); }
+.meta-tag.subject { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
+.meta-tag.grade { background: #f8fafc; color: #475569; border: 1px solid #e2e8f0; }
+.meta-tag.duration { background: #f0f9ff; color: #0284c7; border: 1px solid #bae6fd; }
 
 .course-card-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 16.5px;
   font-weight: 800;
-  color: var(--text-primary);
-  line-height: 1.4;
+  color: #0f172a;
+  line-height: 1.45;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: -0.01em;
 }
 
 .course-resources-preview {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
-  background: var(--surface-primary);
-  border-radius: var(--radius-xs);
-  margin-bottom: 10px;
-  border: 1px solid var(--border-light);
+  padding: 10px 14px;
+  background: #f8fafc;
+  border-radius: 12px;
+  margin-bottom: 14px;
+  border: 1px solid #e2e8f0;
 }
 
 .res-item {
-  font-size: 12px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  color: #334155;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
+
+.res-item .el-icon {
+  font-size: 14px;
+}
+
+.res-item.doc .el-icon { color: #4f46e5; }
+.res-item.ppt .el-icon { color: #d97706; }
+.res-item.sheet .el-icon { color: #059669; }
+.res-item.script .el-icon { color: #7c3aed; }
 
 .course-card-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-light);
+  padding-top: 12px;
+  border-top: 1px dashed #e2e8f0;
 }
 
 .update-time {
-  font-size: 12px;
-  color: var(--text-muted);
+  font-size: 12.5px;
+  color: #64748b;
+  font-weight: 500;
 }
 
 .enter-btn {
-  font-size: 13px !important;
-  font-weight: 800 !important;
+  font-size: 12.5px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  padding: 6px 14px !important;
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.25) !important;
+  transition: all 180ms ease !important;
+}
+
+.enter-btn:hover {
+  transform: translateX(2px) !important;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35) !important;
 }
 
 /* Compact Zero Courses Guided Onboarding Styles */

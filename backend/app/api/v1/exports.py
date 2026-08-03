@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import current_user, owned_course
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.models.entities import Artifact, CourseBlueprint, FileRecord, User
+from app.models.entities import Artifact, ArtifactAsset, CourseBlueprint, FileRecord, User
 from app.services.export_service import build_course_package, sha256
 
 router = APIRouter(tags=["导出"])
@@ -23,10 +23,31 @@ async def create_export(course_id: str, user: User = Depends(current_user), db: 
     rows = list(await db.scalars(select(Artifact).where(Artifact.course_id == course_id).order_by(Artifact.version.desc())))
     artifacts = {}
     for row in rows:
-        artifacts.setdefault(row.artifact_type, {"version": row.version, "content_json": row.content_json, "content_markdown": row.content_markdown})
+        artifacts.setdefault(row.artifact_type, {
+            "id": row.id, "version": row.version, "content_json": row.content_json,
+            "content_markdown": row.content_markdown, "source_versions_json": row.source_versions_json,
+        })
     required = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"}
     if missing := required - artifacts.keys():
         raise HTTPException(409, f"缺少资源：{', '.join(sorted(missing))}")
+    referenced_asset_ids = {
+        visual.get("asset_id")
+        for section in artifacts["exercise"]["content_json"].get("sections", [])
+        for block in section.get("blocks", [])
+        if block.get("kind") == "question_group"
+        for stimulus in block.get("stimuli", [])
+        if (visual := stimulus.get("visual")) and visual.get("asset_id")
+    }
+    exercise_assets = list(await db.scalars(select(ArtifactAsset).where(
+        ArtifactAsset.id.in_(referenced_asset_ids),
+        ArtifactAsset.course_id == course_id,
+        ArtifactAsset.owner_id == user.id,
+        ArtifactAsset.status == "approved",
+    ))) if referenced_asset_ids else []
+    artifacts["exercise"]["asset_paths"] = {
+        asset.id: str((get_settings().storage_root / (asset.preview_relative_path or asset.relative_path)).resolve())
+        for asset in exercise_assets
+    }
     output_dir = get_settings().storage_root / "generated" / course.id
     zip_path, manifest = build_course_package(course.id, course.title, blueprint.content_json, blueprint.version, artifacts, output_dir)
     relative = str(zip_path.relative_to(get_settings().storage_root))
@@ -48,4 +69,3 @@ async def download(export_id: str, user: User = Depends(current_user), db: Async
     if root not in path.parents or not path.exists():
         raise HTTPException(404, "导出文件已不存在")
     return FileResponse(path, filename=record.original_filename, media_type="application/zip")
-

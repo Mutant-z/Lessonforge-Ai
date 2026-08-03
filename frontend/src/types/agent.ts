@@ -67,22 +67,6 @@ export interface AgentStreamEvent {
   payload?: any;
 }
 
-export interface GenerationTask {
-  id: string;
-  course_id: string;
-  thread_id?: string;
-  run_type?: 'blueprint' | 'full' | string;
-  status: 'queued' | 'running' | 'waiting_human' | 'completed' | 'failed' | 'cancelled' | string;
-  current_node?: string;
-  progress: number;
-  error?: { message: string };
-  created_at?: string;
-  finished_at?: string;
-  course_title?: string;
-}
-
-export type GenerationRun = GenerationTask;
-
 export const NODE_LABEL_MAP: Record<string, string> = {
   supervisor: '核心调度 Agent',
   blueprint_agent: '课程蓝图 Agent',

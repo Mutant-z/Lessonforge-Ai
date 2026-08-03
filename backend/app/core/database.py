@@ -47,6 +47,17 @@ async def create_schema() -> None:
                     sync_conn.execute(text(
                         "ALTER TABLE model_configs ADD COLUMN supports_multimodal BOOLEAN NOT NULL DEFAULT 0"
                     ))
+                if "capabilities_json" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN capabilities_json JSON NOT NULL DEFAULT '[]'"))
+                    sync_conn.execute(text(
+                        "UPDATE model_configs SET capabilities_json = "
+                        "CASE WHEN supports_multimodal = 1 THEN '[\"text_generation\",\"structured_output\",\"vision_review\"]' "
+                        "ELSE '[\"text_generation\",\"structured_output\"]' END"
+                    ))
+                if "api_mode" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN api_mode VARCHAR(50) NOT NULL DEFAULT 'text_chat'"))
+                if "adapter_config_json" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN adapter_config_json JSON NOT NULL DEFAULT '{}'"))
 
             for table_name in ("course_projects", "course_intake_sessions"):
                 if table_name in inspector.get_table_names():
@@ -75,6 +86,10 @@ async def create_schema() -> None:
                     "current_agent_profile_id": "VARCHAR(36)",
                     "agent_profile_status": "VARCHAR(30) NOT NULL DEFAULT 'pending'",
                     "agent_profile_error_json": "JSON",
+                },
+                "agent_chat_sessions": {
+                    "image_model_config_id": "VARCHAR(36)",
+                    "vision_model_config_id": "VARCHAR(36)",
                 },
             }
             for table_name, definitions in compatibility_columns.items():

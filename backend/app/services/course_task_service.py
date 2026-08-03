@@ -23,6 +23,7 @@ from app.models.entities import (
     AgentMessage,
     AgentChatSession,
     Artifact,
+    ArtifactAsset,
     ArtifactLock,
     CourseBlueprint,
     CourseProject,
@@ -45,10 +46,20 @@ from app.schemas.artifact import (
     VerbatimContent,
     VideoScriptContent,
 )
+from app.schemas.agent_profile import ExerciseProfile, TaskSheetProfile, VideoScriptProfile
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.model_config_service import resolve_provider, resolved_model_name
-from app.services.agent_prompt_service import build_runtime_prompts
-from app.services.quality_service import validate_resources
+from app.services.agent_prompt_service import (
+    active_prompt_template,
+    build_runtime_prompts,
+    ensure_prompt_templates,
+    prepare_profile_prompts,
+)
+from app.services.project_knowledge_service import build_project_knowledge_context
+from app.services.exercise_review_service import degrade_unreviewed_visuals, review_and_repair_exercise
+from app.services.exercise_visual_service import process_exercise_visuals
+from app.services.quality_service import validate_exercise, validate_resources, validate_video_script
+from app.services.ppt_template_service import resolve_ppt_template
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +68,7 @@ TASK_SPECS = (
     ("ppt", "PPT 课件", "PPT Agent", "ppt_agent", []),
     ("task_sheet", "学习任务单", "任务单 Agent", "task_sheet_agent", []),
     ("exercise", "课后练习", "练习 Agent", "exercise_agent", []),
-    ("video_script", "视频脚本", "视频脚本 Agent", "video_script_agent", ["ppt"]),
+    ("video_script", "视频脚本", "视频脚本 Agent", "video_script_agent", ["lesson_plan", "ppt"]),
     ("verbatim", "教师逐字稿", "逐字稿 Agent", "verbatim_agent", ["ppt", "video_script"]),
 )
 TASK_SPEC_BY_TYPE = {item[0]: item for item in TASK_SPECS}
@@ -191,6 +202,11 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
     by_type = {item.task_type: item for item in existing}
     for order, (task_type, _, _, agent_type, dependencies) in enumerate(TASK_SPECS, 1):
         if task_type in by_type:
+            current = by_type[task_type]
+            if current.agent_type != agent_type:
+                current.agent_type = agent_type
+            if current.dependency_types_json != dependencies:
+                current.dependency_types_json = dependencies
             continue
         artifact = await db.scalar(select(Artifact).where(
             Artifact.course_id == course_id,
@@ -311,6 +327,7 @@ async def _run_with_generation_heartbeat(run_id: str, awaitable):
 
 
 async def create_task_run(db, task: CourseTask, trigger_type: str, user_message: AgentMessage | None = None) -> GenerationRun:
+    await _ensure_current_task_profile(db, task)
     if task.active_run_id or task.status in {"queued", "running"}:
         raise ValueError("当前任务已有 Agent 正在运行")
     if task.agent_profile_status != "ready" or not task.current_agent_profile_id:
@@ -394,13 +411,88 @@ async def _profile_provider(db, course: CourseProject, task: CourseTask):
     return profile, provider, config
 
 
-async def _upstream_content(db, task: CourseTask) -> dict:
-    result = {}
-    for dependency in task.dependency_types_json:
-        artifact = await _latest_artifact(db, task.course_id, dependency)
-        if artifact:
-            result[dependency] = artifact.content_json
-    return result
+async def _ensure_current_task_profile(db, task: CourseTask) -> CourseTaskAgentProfile | None:
+    profile = await db.get(CourseTaskAgentProfile, task.current_agent_profile_id) if task.current_agent_profile_id else None
+    if task.task_type not in {"task_sheet", "exercise", "video_script"} or not profile or profile.status != "ready":
+        return profile
+    await ensure_prompt_templates(db)
+    template = await active_prompt_template(db, task.agent_type)
+    if profile.prompt_template_id == template.id:
+        return profile
+    course = await db.get(CourseProject, task.course_id)
+    blueprint = await db.scalar(select(CourseBlueprint).where(
+        CourseBlueprint.course_id == task.course_id,
+        CourseBlueprint.version == profile.blueprint_version,
+    ))
+    if not course or not blueprint:
+        raise RuntimeError("Agent V2 升级时缺少课程或蓝图上下文")
+    context = dict(profile.context_json or {})
+    upgrades = ({
+        "objective_evidence_alignment_requirements": ["每项任务关联课程目标、知识点与可验收的学习证据"],
+        "lesson_plan_reference_requirements": ["教学设计存在时软引用其环节与学习证据，不存在时不阻塞生成"],
+        "recording_space_requirements": ["至少提供一个可填写的观察或记录表"],
+        "student_language_requirements": ["使用学生能直接执行的动作语言"],
+        "exercise_boundary_requirements": ["不生成完整题库、参考答案或教师解析"],
+    } if task.task_type == "task_sheet" else {
+        "objective_evidence_alignment_requirements": ["每道计分题关联目标、知识点、教学环节和可判定学习证据"],
+        "lesson_plan_reference_requirements": ["教学设计存在时优先参考阶段、活动、评价证据与误区；不存在时不阻塞生成"],
+        "task_sheet_non_reuse_requirements": ["借鉴目标、情境和支架，但不得直接复用任务步骤或过程性问题"],
+        "section_and_scoring_requirements": ["三区均非空，总分固定为 100 分，题目和评分点分值守恒"],
+        "printable_answer_space_requirements": ["学生版隐藏答案并为每题提供匹配的作答空间"],
+        "visual_stimulus_requirements": ["最多三张必要配图，精确图示使用确定性图形，视觉材料必须提供替代材料"],
+        "review_and_repair_requirements": ["检查答案、干扰项、可解性和评分点；自动修复最多一次"],
+    } if task.task_type == "exercise" else {
+        "objective_alignment_requirements": ["每个分镜映射真实的课程目标、知识点与教学环节"],
+        "narrative_arc_requirements": ["按导入、建构、示范、检查和总结形成完整叙事闭环"],
+        "slide_mapping_requirements": ["只引用真实 PPT 页面并保持页面顺序"],
+        "scene_granularity_requirements": ["同一页面可拆分多个连续分镜"],
+        "visual_direction_requirements": ["明确页面状态、聚焦对象、常规动效与转场"],
+        "narration_requirements": ["输出可直接录制且不照读 PPT 的完整旁白"],
+        "subtitle_requirements": ["字幕忠实覆盖旁白并遵守行宽限制"],
+        "interaction_requirements": ["关键判断处设置问题、等待和反馈衔接"],
+        "timing_and_pacing_requirements": ["总时长、逐页时长、旁白容量、字幕和停顿守恒"],
+        "production_feasibility_requirements": ["仅使用 16:9 PPT 录屏和常规动效"],
+        "verbatim_handoff_requirements": ["向逐字稿交付稳定旁白、时间轴和页面映射"],
+        "review_and_repair_requirements": ["检查引用、时长、字幕覆盖和制作可执行性"],
+    })
+    for key, value in upgrades.items():
+        context.setdefault(key, value)
+    specialized = {
+        "task_sheet": TaskSheetProfile,
+        "exercise": ExerciseProfile,
+        "video_script": VideoScriptProfile,
+    }[task.task_type].model_validate(context)
+    system_prompt, task_prompt, digest = prepare_profile_prompts(
+        template, specialized.model_dump(), course, blueprint.content_json, blueprint.version,
+    )
+    version = (await db.scalar(select(func.max(CourseTaskAgentProfile.version)).where(
+        CourseTaskAgentProfile.course_task_id == task.id,
+    )) or 0) + 1
+    profile.status = "superseded"
+    upgraded = CourseTaskAgentProfile(
+        course_id=profile.course_id,
+        course_task_id=profile.course_task_id,
+        task_type=profile.task_type,
+        agent_type=profile.agent_type,
+        version=version,
+        initialization_run_id=profile.initialization_run_id,
+        prompt_template_id=template.id,
+        template_version=template.version,
+        requirement_version=profile.requirement_version,
+        blueprint_version=profile.blueprint_version,
+        context_json=specialized.model_dump(),
+        summary_json=specialized.summary(course.audience).model_dump(),
+        rendered_system_prompt=system_prompt,
+        rendered_task_template=task_prompt,
+        prompt_hash=digest,
+        model_name=profile.model_name,
+        status="ready",
+    )
+    db.add(upgraded)
+    await db.flush()
+    task.current_agent_profile_id = upgraded.id
+    task.agent_profile_status = "ready"
+    return upgraded
 
 
 async def _generate_initial(db, course: CourseProject, task: CourseTask, blueprint: CourseBlueprint):
@@ -411,7 +503,10 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         mock = make_lesson_plan(bp)
         schema = LessonPlanContent
     elif kind == "ppt":
-        mock = make_ppt(bp)
+        preferred_template = resolve_ppt_template(
+            (config.preferences_json or {}).get("default_ppt_template") if config else None,
+        )["id"]
+        mock = make_ppt(bp, preferred_template)
         schema = PPTContent
     elif kind == "task_sheet":
         mock = make_task_sheet(bp)
@@ -420,11 +515,13 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         mock = make_exercises(bp)
         schema = ExerciseContent
     elif kind == "video_script":
+        lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
         ppt_artifact = await _latest_artifact(db, course.id, "ppt")
-        if not ppt_artifact:
-            raise RuntimeError("PPT 尚未生成")
+        if not lesson_artifact or not ppt_artifact:
+            raise RuntimeError("教学设计或 PPT 尚未生成")
+        lesson_plan = LessonPlanContent.model_validate(lesson_artifact.content_json)
         ppt = PPTContent.model_validate(ppt_artifact.content_json)
-        mock = make_video_script(bp, ppt)
+        mock = make_video_script(bp, lesson_plan, ppt)
         schema = VideoScriptContent
     else:
         ppt_artifact = await _latest_artifact(db, course.id, "ppt")
@@ -435,14 +532,20 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         script = VideoScriptContent.model_validate(script_artifact.content_json)
         mock = make_verbatim(bp, ppt, script)
         schema = VerbatimContent
+    knowledge_context, source_versions = await build_project_knowledge_context(
+        db, task, blueprint.content_json, blueprint.version, profile.context_json,
+        config.context_window_tokens if config else None,
+    )
     if isinstance(provider, MockProvider):
         value = mock
     else:
         system, prompt = build_runtime_prompts(
-            profile, schema.model_json_schema(), await _upstream_content(db, task), "生成本任务文件首稿。",
+            profile, schema.model_json_schema(), knowledge_context, "生成本任务文件首稿。",
         )
         value = await provider.structured(system, prompt, schema)
-    return value, resolved_model_name(provider, config), profile
+    if kind == "ppt":
+        value.theme = mock.theme
+    return value, resolved_model_name(provider, config), profile, source_versions
 
 
 def _locked_value(content: dict, path: str):
@@ -461,7 +564,7 @@ def _locked_value(content: dict, path: str):
     return value
 
 
-async def _generate_revision(db, course: CourseProject, task: CourseTask, run: GenerationRun, source: Artifact):
+async def _generate_revision(db, course: CourseProject, task: CourseTask, run: GenerationRun, source: Artifact, blueprint: CourseBlueprint):
     message = await db.scalar(select(AgentMessage).where(
         AgentMessage.run_id == run.id,
         AgentMessage.role == "user",
@@ -472,13 +575,33 @@ async def _generate_revision(db, course: CourseProject, task: CourseTask, run: G
     if any(lock.json_path in {"", "$"} for lock in locks):
         raise RuntimeError("当前任务文件已整体锁定")
     profile, provider, config = await _profile_provider(db, course, task)
+    knowledge_context, source_versions = await build_project_knowledge_context(
+        db, task, blueprint.content_json, blueprint.version, profile.context_json,
+        config.context_window_tokens if config else None,
+    )
     version = source.version + 1
     if isinstance(provider, MockProvider):
-        content = dict(source.content_json)
-        content["revision_note"] = {"instruction": message.content}
+        if task.task_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
+            factory = make_task_sheet if task.task_type == "task_sheet" else make_exercises
+            content = factory(CourseBlueprintSchema.model_validate(blueprint.content_json)).model_dump()
+        elif task.task_type == "video_script" and source.content_json.get("schema_version") != "2.0":
+            lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
+            ppt_artifact = await _latest_artifact(db, course.id, "ppt")
+            if not lesson_artifact or not ppt_artifact:
+                raise RuntimeError("视频脚本 V2 升级时缺少教学设计或 PPT")
+            content = make_video_script(
+                CourseBlueprintSchema.model_validate(blueprint.content_json),
+                LessonPlanContent.model_validate(lesson_artifact.content_json),
+                PPTContent.model_validate(ppt_artifact.content_json),
+            ).model_dump()
+        else:
+            content = dict(source.content_json)
+        conflict_note = ""
+        if knowledge_context.get("conflicts"):
+            conflict_note = " 检测到兄弟产物与蓝图的引用冲突，已按蓝图保留合法编号。"
         revision = AgentArtifactRevisionPayload(
             content_json=content,
-            assistant_reply=f"已根据你的要求创建{TASK_SPEC_BY_TYPE[task.task_type][1]} V{version}，原版本仍可在版本历史中恢复。",
+            assistant_reply=f"已根据你的要求创建{TASK_SPEC_BY_TYPE[task.task_type][1]} V{version}，原版本仍可在版本历史中恢复。{conflict_note}",
         )
     else:
         history = list(await db.scalars(select(AgentMessage).where(
@@ -494,10 +617,53 @@ async def _generate_revision(db, course: CourseProject, task: CourseTask, run: G
             + "\ncontent_json 必须符合：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
         )
         system, prompt = build_runtime_prompts(
-            profile, AgentArtifactRevisionPayload.model_json_schema(), await _upstream_content(db, task), instruction,
+            profile, AgentArtifactRevisionPayload.model_json_schema(), knowledge_context, instruction,
         )
         revision = await provider.structured(system, prompt, AgentArtifactRevisionPayload)
-    return revision, message, resolved_model_name(provider, config), profile, provider, locks
+    return revision, message, resolved_model_name(provider, config), profile, provider, locks, source_versions
+
+
+async def _generate_context_sync(
+    db,
+    course: CourseProject,
+    task: CourseTask,
+    source: Artifact,
+    blueprint: CourseBlueprint,
+):
+    profile, provider, config = await _profile_provider(db, course, task)
+    knowledge_context, source_versions = await build_project_knowledge_context(
+        db, task, blueprint.content_json, blueprint.version, profile.context_json,
+        config.context_window_tokens if config else None,
+    )
+    schema = TASK_SCHEMAS[task.task_type]
+    locks = list(await db.scalars(select(ArtifactLock).where(ArtifactLock.artifact_id == source.id)))
+    if isinstance(provider, MockProvider):
+        if task.task_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
+            factory = make_task_sheet if task.task_type == "task_sheet" else make_exercises
+            value = factory(CourseBlueprintSchema.model_validate(blueprint.content_json))
+        elif task.task_type == "video_script" and source.content_json.get("schema_version") != "2.0":
+            lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
+            ppt_artifact = await _latest_artifact(db, course.id, "ppt")
+            if not lesson_artifact or not ppt_artifact:
+                raise RuntimeError("视频脚本 V2 升级时缺少教学设计或 PPT")
+            value = make_video_script(
+                CourseBlueprintSchema.model_validate(blueprint.content_json),
+                LessonPlanContent.model_validate(lesson_artifact.content_json),
+                PPTContent.model_validate(ppt_artifact.content_json),
+            )
+        else:
+            value = schema.model_validate(source.content_json)
+    else:
+        instruction = (
+            "请在保留当前文件有效内容的基础上同步最新项目知识；不得无故改写未受影响字段。\n"
+            "当前待同步文件：\n" + json.dumps(source.content_json, ensure_ascii=False)
+            + "\n锁定路径：\n" + json.dumps([item.json_path for item in locks], ensure_ascii=False)
+        )
+        system, prompt = build_runtime_prompts(
+            profile, schema.model_json_schema(), knowledge_context, instruction,
+        )
+        value = await provider.structured(system, prompt, schema)
+    return value, resolved_model_name(provider, config), profile, source_versions, locks
 
 
 async def _create_streaming_reply(run_id: str) -> str:
@@ -670,7 +836,7 @@ async def _mark_dependents_stale(db, source_task: CourseTask, source_version: in
     return stale_tasks
 
 
-async def register_artifact_version(db, artifact: Artifact):
+async def register_artifact_version(db, artifact: Artifact, invalidate_dependents: bool = True):
     """Make a teacher-created or legacy Agent version the task's current file."""
     task = await db.scalar(select(CourseTask).where(
         CourseTask.course_id == artifact.course_id,
@@ -686,7 +852,8 @@ async def register_artifact_version(db, artifact: Artifact):
     task.progress = 100
     task.error_json = None
     task.completed_at = utcnow()
-    await _mark_dependents_stale(db, task, artifact.version)
+    if invalidate_dependents:
+        await _mark_dependents_stale(db, task, artifact.version)
 
 
 async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint):
@@ -697,6 +864,19 @@ async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint
             return
         resources[task_type] = artifact.content_json
     issues = validate_resources(CourseBlueprintSchema.model_validate(blueprint.content_json), resources)
+    exercise_review = (resources.get("exercise") or {}).get("review_summary") or {}
+    for note in exercise_review.get("notes", []):
+        issues.append({
+            "severity": "minor",
+            "artifact_type": "exercise",
+            "location": "$.review_summary.notes",
+            "dimension": "model_review",
+            "description": note,
+            "evidence": note,
+            "suggestion": "请教师复核该题，或在练习 Agent 中继续修改。",
+            "target_agent": "exercise_agent",
+            "required_action": "revise",
+        })
     report = QualityReport(
         course_id=course.id,
         score=max(0, 100 - len(issues) * 8),
@@ -771,17 +951,27 @@ async def execute_task_run(run_id: str):
                     raise RuntimeError("任务文件尚未生成")
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
                     run_id,
-                    _generate_revision(db, course, task, run, source),
+                    _generate_revision(db, course, task, run, source, blueprint),
                 )
-                revision, user_message, model_name, profile, provider, locks = generated
+                revision, user_message, model_name, profile, provider, locks, source_versions = generated
                 content = revision.content_json
                 change_summary = f"Agent 对话修改：{user_message.content[:80]}"
+            elif run.trigger_type == "sync_context":
+                if not source:
+                    raise RuntimeError("任务文件尚未生成，无法同步项目上下文")
+                generated, generation_elapsed = await _run_with_generation_heartbeat(
+                    run_id,
+                    _generate_context_sync(db, course, task, source, blueprint),
+                )
+                value, model_name, profile, source_versions, locks = generated
+                content = value.model_dump()
+                change_summary = "上下文同步生成"
             else:
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
                     run_id,
                     _generate_initial(db, course, task, blueprint),
                 )
-                value, model_name, profile = generated
+                value, model_name, profile, source_versions = generated
                 content = value.model_dump()
                 markdown = to_markdown(task.task_type, value)
                 change_summary = (
@@ -803,7 +993,59 @@ async def execute_task_run(run_id: str):
 
             current_phase = "validating"
             await _publish_activity(run_id, "validating", 76)
+            visual_notes: list[str] = []
+            if task.task_type == "ppt":
+                preserved_theme = (source.content_json or {}).get("theme") if source else content.get("theme")
+                content = {**content, "theme": resolve_ppt_template(preserved_theme)["id"]}
+            if task.task_type == "exercise":
+                content, _, pipeline_notes = await process_exercise_visuals(db, course, run, content)
+                content, degraded_notes = degrade_unreviewed_visuals(content)
+                visual_notes = [*pipeline_notes, *degraded_notes]
             validated_model = TASK_SCHEMAS[task.task_type].model_validate(content)
+            if task.task_type == "video_script":
+                lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
+                ppt_artifact = await _latest_artifact(db, course.id, "ppt")
+                if not lesson_artifact or not ppt_artifact:
+                    raise RuntimeError("视频脚本校验时缺少教学设计或 PPT")
+                video_issues = validate_video_script(
+                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    validated_model.model_dump(), lesson_artifact.content_json, ppt_artifact.content_json,
+                )
+                blocking = [item for item in video_issues if item["severity"] in {"critical", "major"}]
+                if blocking:
+                    raise RuntimeError(blocking[0]["description"])
+            if task.task_type == "exercise":
+                task_sheet_artifact = await _latest_artifact(db, course.id, "task_sheet")
+                exercise_issues = validate_exercise(
+                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    validated_model.model_dump(),
+                    task_sheet_artifact.content_json if task_sheet_artifact else None,
+                )
+                blocking = [item for item in exercise_issues if item["severity"] in {"critical", "major"}]
+                if blocking:
+                    raise RuntimeError(blocking[0]["description"])
+                _, review_provider, _ = await _profile_provider(db, course, task)
+                validated_model, _ = await review_and_repair_exercise(
+                    review_provider,
+                    validated_model,
+                    task_sheet_artifact.content_json if task_sheet_artifact else None,
+                )
+                review_data = validated_model.model_dump()
+                review_data["review_summary"]["rules_status"] = "passed"
+                if visual_notes:
+                    review_data["review_summary"]["visual_review_status"] = "degraded"
+                    review_data["review_summary"]["needs_teacher_attention"] = True
+                    review_data["review_summary"]["notes"].extend(visual_notes)
+                else:
+                    has_visual = any(
+                        stimulus.get("visual")
+                        for section in review_data["sections"]
+                        for block in section["blocks"]
+                        if block["kind"] == "question_group"
+                        for stimulus in block["stimuli"]
+                    )
+                    review_data["review_summary"]["visual_review_status"] = "passed" if has_visual else "not_required"
+                validated_model = ExerciseContent.model_validate(review_data)
             validated = validated_model.model_dump()
             markdown = to_markdown(task.task_type, validated_model)
             if source:
@@ -819,7 +1061,6 @@ async def execute_task_run(run_id: str):
                 Artifact.course_id == course.id,
                 Artifact.artifact_type == task.task_type,
             )) or 0) + 1
-            source_versions = await _source_versions(db, task)
             await db.commit()
 
             reply_id = None
@@ -866,6 +1107,14 @@ async def execute_task_run(run_id: str):
             )
             db.add(artifact)
             await db.flush()
+            if task.task_type == "exercise":
+                generated_assets = list(await db.scalars(select(ArtifactAsset).where(
+                    ArtifactAsset.generation_run_id == run.id,
+                    ArtifactAsset.course_id == course.id,
+                    ArtifactAsset.artifact_id.is_(None),
+                )))
+                for asset in generated_assets:
+                    asset.artifact_id = artifact.id
             task.current_artifact_id = artifact.id
             final_status = "review" if task.current_agent_profile_id == profile.id else "stale"
             task.status = final_status

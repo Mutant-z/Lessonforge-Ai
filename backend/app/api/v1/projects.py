@@ -38,7 +38,7 @@ from app.services.course_task_service import (
     task_payload,
 )
 from app.services.model_config_service import owned_model_config, resolve_provider
-from app.services.generation_service import start_blueprint_run
+from app.services.project_planning_service import start_blueprint_run
 from app.services.agent_initialization_service import (
     create_initialization_run,
     initialization_summary,
@@ -57,7 +57,9 @@ class TaskMessageRequest(BaseModel):
 
 
 class TaskModelRequest(BaseModel):
-    model_config_id: str
+    model_config_id: str | None = None
+    image_model_config_id: str | None = None
+    vision_model_config_id: str | None = None
 
 
 async def _owned_task(course_id: str, task_type: str, user: User, db: AsyncSession):
@@ -191,6 +193,8 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
         "created_at": row.created_at,
     } for row in rows]
     payload["model_config_id"] = config.id if config else None
+    payload["image_model_config_id"] = chat_session.image_model_config_id if chat_session else None
+    payload["vision_model_config_id"] = chat_session.vision_model_config_id if chat_session else None
     return payload
 
 
@@ -202,8 +206,12 @@ async def run_task(course_id: str, task_type: str, payload: TaskRunRequest, user
         raise HTTPException(422, "不支持的任务操作")
     if payload.action == "sync_dependencies" and task.status != "stale":
         raise HTTPException(409, "当前任务不需要同步上游内容")
-    if payload.action == "sync_context" and task.status != "stale":
-        raise HTTPException(409, "当前任务不需要同步项目上下文")
+    if payload.action == "sync_context" and not task.current_artifact_id:
+        raise HTTPException(409, "任务文件尚未生成，无法同步项目上下文")
+    if payload.action == "sync_context":
+        artifact = await db.get(Artifact, task.current_artifact_id)
+        if artifact and artifact.is_locked:
+            raise HTTPException(409, "当前任务文件已整体锁定")
     if payload.action == "retry" and task.status not in {"failed", "cancelled"}:
         raise HTTPException(409, "只有失败或已取消的任务可以重试")
     if payload.action == "initial" and task.current_artifact_id:
@@ -260,17 +268,34 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
 @router.patch("/courses/{course_id}/tasks/{task_type}/model")
 async def change_task_model(course_id: str, task_type: str, payload: TaskModelRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _owned_task(course_id, task_type, user, db)
-    config = await owned_model_config(db, user.id, payload.model_config_id)
+    if not any((payload.model_config_id, payload.image_model_config_id, payload.vision_model_config_id)):
+        raise HTTPException(422, "至少选择一种模型配置")
     session = await db.scalar(select(AgentChatSession).where(
         AgentChatSession.course_id == course_id,
         AgentChatSession.module_type == task_type,
     ))
-    if session:
+    if not session:
+        session = AgentChatSession(course_id=course_id, module_type=task_type)
+        db.add(session)
+    if payload.model_config_id:
+        config = await owned_model_config(db, user.id, payload.model_config_id)
         session.model_config_id = config.id
-    else:
-        db.add(AgentChatSession(course_id=course_id, module_type=task_type, model_config_id=config.id))
+    if payload.image_model_config_id:
+        image_config = await owned_model_config(db, user.id, payload.image_model_config_id)
+        if "image_generation" not in (image_config.capabilities_json or []):
+            raise HTTPException(422, "所选模型未声明图片生成能力")
+        session.image_model_config_id = image_config.id
+    if payload.vision_model_config_id:
+        vision_config = await owned_model_config(db, user.id, payload.vision_model_config_id)
+        if "vision_review" not in (vision_config.capabilities_json or []):
+            raise HTTPException(422, "所选模型未声明视觉复核能力")
+        session.vision_model_config_id = vision_config.id
     await db.commit()
-    return {"model_config_id": config.id}
+    return {
+        "model_config_id": session.model_config_id,
+        "image_model_config_id": session.image_model_config_id,
+        "vision_model_config_id": session.vision_model_config_id,
+    }
 
 
 @router.post("/courses/{course_id}/tasks/{task_type}/approve")

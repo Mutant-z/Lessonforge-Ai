@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import type { TaskSheetItem } from '../../types';
+import type { TaskSheetTask } from '../../types';
 import { Timer, Check } from '@element-plus/icons-vue';
 
 defineProps<{
-  task: TaskSheetItem;
+  task: TaskSheetTask;
   index: number;
 }>();
 </script>
@@ -12,7 +12,7 @@ defineProps<{
   <div class="task-sheet-card lf-card card-hover">
     <div class="task-header">
       <div class="task-title-group">
-        <span class="task-num">任务 {{ index + 1 }}</span>
+      <span class="task-num">{{ task.id || `任务 ${index + 1}` }}</span>
         <h4 class="task-title">{{ task.title }}</h4>
       </div>
       <span class="task-duration">
@@ -21,18 +21,18 @@ defineProps<{
     </div>
 
     <div class="task-objective-box">
-      <strong>🎯 学习探究目标:</strong> {{ task.objective }}
+      <strong>对应目标：</strong> {{ task.objective_ids.join('、') }}
     </div>
 
     <div class="task-steps">
-      <h5>📋 操作步骤与方法:</h5>
+      <h5>操作步骤与方法：</h5>
       <ol>
         <li v-for="(step, sIdx) in task.steps" :key="sIdx">{{ step }}</li>
       </ol>
     </div>
 
     <div class="task-output">
-      <strong><el-icon><Check /></el-icon> 成果输出要求:</strong> {{ task.output_requirement }}
+      <strong><el-icon><Check /></el-icon> 成果输出要求：</strong> {{ task.student_output }}
     </div>
   </div>
 </template>

@@ -54,11 +54,12 @@ const store = useProjectStore();
 .workspace-top-bar {
   background: #ffffff;
   border-bottom: 1px solid var(--border-default, #e2e8f0);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.02);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 8px 18px 8px;
+  gap: 6px;
+  padding: 6px 20px 6px;
+  flex-shrink: 0;
 }
 
 .workspace-meta-row {
@@ -108,9 +109,9 @@ const store = useProjectStore();
 
 .course-heading-box h1 {
   margin: 0;
-  font-size: 14.5px;
+  font-size: 14px;
   font-weight: 800;
-  line-height: 1;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -161,7 +162,7 @@ const store = useProjectStore();
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding: 10px 16px 12px;
+  position: relative;
 }
 
 .project-shell :deep(.el-button--primary) {
@@ -179,11 +180,10 @@ const store = useProjectStore();
 }
 
 @media (max-width: 900px) {
-  .workspace-top-bar { padding: 6px 12px; }
+  .workspace-top-bar { padding: 4px 12px; }
   .meta-right > span { display: none; }
   .course-spec-badge { display: none; }
   .back-pill-btn span { display: none; }
-  .project-content { padding: 8px 10px 10px; }
 }
 </style>
 

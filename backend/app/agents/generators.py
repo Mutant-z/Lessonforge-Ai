@@ -7,8 +7,13 @@ from app.providers.llm.mock import MockProvider
 from app.providers.llm.router import get_provider
 from app.services.model_config_service import resolve_provider
 from app.schemas.artifact import (
-    ExerciseContent, ExerciseItem, LearningTask, LessonPlanContent, LessonStage, PPTContent,
-    ScriptSegment, Slide, TaskSheetContent, VerbatimContent, VerbatimSection, VideoScriptContent,
+    ExerciseAnswerKey, ExerciseAnswerSpace, ExerciseContent, ExerciseCourseInfo, ExerciseOption,
+    ExercisePaperSettings, ExerciseQuestion, ExerciseQuestionGroup, ExerciseReviewSummary,
+    AnimationCue, ExerciseScoringPoint, ExerciseSection, ExerciseStimulus, LearningTask, LessonPlanContent, LessonStage, PauseCue, PPTContent,
+    Slide, SoundCue, SubtitleChunk, TaskRecordTable, TaskSheetContent, TaskSheetCourseInfo,
+    TaskSheetObjective, TaskSheetQuestion, TaskSheetSelfAssessment, VerbatimContent,
+    VerbatimSection, VideoAudioTrack, VideoInteraction, VideoProductionSettings, VideoScene,
+    VideoScriptContent, VideoScriptCourseInfo, VideoTextTrack, VideoVisualTrack,
 )
 from app.schemas.blueprint import (
     AssessmentItem, CourseBlueprintSchema, CourseIdentity, KnowledgePoint, LearningAnalysis,
@@ -91,7 +96,7 @@ def make_lesson_plan(bp: CourseBlueprintSchema) -> LessonPlanContent:
     )
 
 
-def make_ppt(bp: CourseBlueprintSchema) -> PPTContent:
+def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_swiss_blue") -> PPTContent:
     seconds = bp.course_identity.duration_minutes * 60
     specs = [
         ("S01", "cover", bp.course_identity.title, "建立课程主题", [bp.course_identity.subject, bp.course_identity.grade_level], "title", "使用课程主题与简洁几何构图", 20),
@@ -104,48 +109,334 @@ def make_ppt(bp: CourseBlueprintSchema) -> PPTContent:
     ]
     total = sum(x[-1] for x in specs)
     specs[-1] = (*specs[-1][:-1], max(20, specs[-1][-1] + seconds - total))
-    return PPTContent(slides=[Slide(id=i, page_type=t, title=title, purpose=purpose, body=body, layout=layout, visual_suggestion=visual, speaker_notes=f"围绕“{title}”讲解，不照读页面文字。", duration_seconds=duration) for i,t,title,purpose,body,layout,visual,duration in specs])
+    return PPTContent(theme=theme, slides=[Slide(id=i, page_type=t, title=title, purpose=purpose, body=body, layout=layout, visual_suggestion=visual, speaker_notes=f"围绕“{title}”讲解，不照读页面文字。", duration_seconds=duration) for i,t,title,purpose,body,layout,visual,duration in specs])
 
 
 def make_task_sheet(bp: CourseBlueprintSchema) -> TaskSheetContent:
+    objectives = [
+        TaskSheetObjective(
+            id=objective.id,
+            statement=f"{objective.condition}，{objective.behavior}{bp.course_identity.title}相关任务",
+            success_criterion=objective.criterion,
+        )
+        for objective in bp.objectives
+    ]
+    objective_ids = [objective.id for objective in bp.objectives]
+    knowledge_ids = [point.id for point in bp.knowledge_points]
+    stages = bp.timeline
     return TaskSheetContent(
-        learning_objectives=[f"{o.id}：{o.behavior}{o.criterion}" for o in bp.objectives],
-        preparation=["阅读课程主题与学习目标", "准备记录关键判断依据"],
+        course_info=TaskSheetCourseInfo(
+            course_title=bp.course_identity.title,
+            subject=bp.course_identity.subject,
+            grade_level=bp.course_identity.grade_level,
+            audience=bp.course_identity.audience,
+            duration_minutes=bp.course_identity.duration_minutes,
+        ),
+        learning_objectives=objectives,
+        preparation=["阅读本页学习目标", "准备纸笔或电子记录工具"],
         tasks=[
-            LearningTask(id="T-01", action="观察并判断", object="导入情境", output="一条初步判断及依据", completion_criterion="判断明确，至少写出一个依据"),
-            LearningTask(id="T-02", action="应用", object="核心方法", output="完整解题或操作步骤", completion_criterion="步骤完整，结论与条件一致"),
+            LearningTask(
+                id="T-01", title="观察情境并做出初步判断", phase="in_class",
+                stage_id=stages[0].segment_id, objective_ids=[objective_ids[0]],
+                knowledge_point_ids=[knowledge_ids[0]], action="观察、标记并判断", object="课程导入情境",
+                steps=["圈出情境中的关键条件", "写下你的初步判断", "用一条信息说明判断依据"],
+                student_output="一条初步判断和至少一条依据", completion_criterion="判断明确，依据来自情境中的真实信息",
+                estimated_minutes=max(1, stages[0].end_minute - stages[0].start_minute), collaboration_mode="individual",
+                scaffolds=["我看到的关键信息是……", "我判断……，因为……"],
+            ),
+            LearningTask(
+                id="T-02", title="解释核心关系", phase="in_class",
+                stage_id=stages[1].segment_id, objective_ids=[objective_ids[0]],
+                knowledge_point_ids=[knowledge_ids[0]], action="整理并解释", object=bp.key_points[0],
+                steps=["写出核心概念", "标明概念成立的条件", "用自己的话解释关键关系"],
+                student_output="一段包含概念、条件和关系的解释", completion_criterion=bp.objectives[0].criterion,
+                estimated_minutes=max(1, stages[1].end_minute - stages[1].start_minute), collaboration_mode="pair",
+                scaffolds=["这个概念适用于……", "关键关系可以用……表示"],
+            ),
+            LearningTask(
+                id="T-03", title="应用方法并检查结论", phase="in_class",
+                stage_id=stages[-1].segment_id, objective_ids=objective_ids,
+                knowledge_point_ids=knowledge_ids, action="应用、记录并检查", object=f"{bp.course_identity.title}的基础应用任务",
+                steps=["识别任务中的条件", "选择对应概念或方法", "完成推理并对照条件检查结论"],
+                student_output="完整的处理步骤、结论和检查说明", completion_criterion=bp.objectives[-1].criterion,
+                estimated_minutes=max(1, stages[-1].end_minute - stages[-1].start_minute), collaboration_mode="individual",
+                scaffolds=["已知条件是……", "我选择的方法是……", "我用……检查了结论"],
+            ),
         ],
-        observation_prompts=["我观察到的关键信息", "我使用的概念或方法", "我如何检查结论"],
-        learning_questions=["这个概念在什么条件下适用？", "遇到新问题时第一步做什么？"],
-        self_assessment=["我能准确解释核心概念", "我能独立完成基础应用", "我能说明判断依据"],
+        record_table=TaskRecordTable(
+            title="学习观察记录",
+            instructions="在完成任务时记录关键信息、你的解释和检查结果。",
+            columns=["任务", "关键信息或现象", "我的解释", "检查结果"],
+            blank_rows=4,
+        ),
+        learning_questions=[
+            TaskSheetQuestion(id="LQ-01", prompt="这个概念在什么条件下适用？", objective_ids=[objective_ids[0]], stage_id=stages[1].segment_id),
+            TaskSheetQuestion(id="LQ-02", prompt="遇到新问题时，你如何选择第一步？", objective_ids=[objective_ids[-1]], stage_id=stages[-1].segment_id),
+        ],
+        self_assessment=[
+            TaskSheetSelfAssessment(id=f"SA-{index:02d}", statement=f"我已达成：{objective.statement}", objective_ids=[objective.id])
+            for index, objective in enumerate(objectives, 1)
+        ],
         extension=["寻找一个生活或专业场景，说明本课方法如何应用。"],
     )
 
 
 def make_exercises(bp: CourseBlueprintSchema) -> ExerciseContent:
-    return ExerciseContent(items=[
-        ExerciseItem(id="Q-01", question_type="single_choice", stem=f"关于“{bp.course_identity.title}”的核心概念，下列理解最符合本课要求的是（ ）。", options=["A. 只需记住结论", "B. 需要同时说明概念和适用条件", "C. 所有情境都使用同一步骤", "D. 无需检查结论"], correct_answers=["B"], explanation="本课目标要求能解释核心概念及其适用条件。", difficulty="basic", objective_ids=["OBJ-01"], knowledge_point_ids=["KP-01"], estimated_minutes=1),
-        ExerciseItem(id="Q-02", question_type="short_answer", stem=f"请写出应用“{bp.course_identity.title}”解决一个基础任务的三个主要步骤。", correct_answers=["识别条件；选择概念；完成推理并检查"], explanation="答案应体现从任务分析到结论检查的完整过程。", difficulty="intermediate", objective_ids=["OBJ-02"], knowledge_point_ids=["KP-01", "KP-02"], estimated_minutes=3),
-    ])
+    objectives = [item.id for item in bp.objectives]
+    knowledge = [item.id for item in bp.knowledge_points]
+    primary_objective = objectives[0]
+    application_objective = objectives[-1]
+    primary_knowledge = knowledge[0]
+    application_knowledge = knowledge[-1]
+    stage_refs = [item.segment_id for item in bp.timeline]
+    target_minutes = max(5, min(45, round(bp.course_identity.duration_minutes * 0.75, 1)))
+    return ExerciseContent(
+        course_info=ExerciseCourseInfo(
+            course_title=bp.course_identity.title,
+            subject=bp.course_identity.subject,
+            grade_level=bp.course_identity.grade_level,
+            audience=bp.course_identity.audience,
+            duration_minutes=bp.course_identity.duration_minutes,
+        ),
+        paper_settings=ExercisePaperSettings(
+            title=f"{bp.course_identity.title} · 课后练习",
+            student_instructions=["独立完成全部题目", "写出必要的判断依据或过程", "完成后检查答案是否符合题目条件"],
+            total_score=100,
+            estimated_minutes=target_minutes,
+            answer_requirements="客观题填写选项编号，主观题写出判断依据、过程和结论。",
+        ),
+        sections=[
+            ExerciseSection(
+                id="basic_consolidation", title="基础巩固", score=40,
+                blocks=[
+                    ExerciseQuestion(
+                        id="Q-01", question_type="single_choice",
+                        stem=f"关于“{bp.course_identity.title}”的核心概念，下列理解最符合本课要求的是（ ）。",
+                        options=[
+                            ExerciseOption(id="A", text="只需记住结论，不必说明条件"),
+                            ExerciseOption(id="B", text="需要同时说明核心概念和适用条件"),
+                            ExerciseOption(id="C", text="所有情境都使用完全相同的步骤"),
+                            ExerciseOption(id="D", text="得到结果后不需要检查"),
+                        ],
+                        score=20, estimated_minutes=max(1, round(target_minutes * .12, 1)),
+                        objective_ids=[primary_objective], knowledge_point_ids=[primary_knowledge],
+                        source_refs=stage_refs[1:2], difficulty="basic", cognitive_level="understand",
+                        answer_key=ExerciseAnswerKey(correct_option_ids=["B"]),
+                        analysis="课程目标要求学生不仅说出结论，还要说明概念成立或适用的条件。",
+                        answer_space=ExerciseAnswerSpace(mode="none", lines=0),
+                        common_errors=["只复述结论而忽略适用条件"],
+                    ),
+                    ExerciseQuestion(
+                        id="Q-02", question_type="fill_blank",
+                        stem="完成应用过程时，应先识别任务中的______，再选择对应概念，最后检查结论。",
+                        score=20, estimated_minutes=max(1, round(target_minutes * .13, 1)),
+                        objective_ids=[application_objective], knowledge_point_ids=[application_knowledge],
+                        source_refs=stage_refs[-1:], difficulty="basic", cognitive_level="remember",
+                        answer_key=ExerciseAnswerKey(accepted_answers=["条件", "已知条件", "关键信息"]),
+                        analysis="识别条件是选择概念和方法的前提。",
+                        answer_space=ExerciseAnswerSpace(mode="lines", lines=1),
+                    ),
+                ],
+            ),
+            ExerciseSection(
+                id="understanding_application", title="理解应用", score=40,
+                blocks=[
+                    ExerciseQuestionGroup(
+                        id="G-01", title="阅读材料，完成应用检查",
+                        instructions="先从材料中提取条件，再回答两个问题。",
+                        stimuli=[ExerciseStimulus(
+                            id="ST-01", kind="text", title="应用情境",
+                            text=f"一名同学准备运用“{bp.course_identity.title}”处理一个基础任务。他先写下结论，随后才补充条件，也没有检查结论是否适用于当前情境。",
+                        )],
+                        sub_questions=[
+                            ExerciseQuestion(
+                                id="Q-03", question_type="short_answer",
+                                stem="指出这名同学处理过程中的两个问题。",
+                                score=20, estimated_minutes=max(1, round(target_minutes * .2, 1)),
+                                objective_ids=[primary_objective], knowledge_point_ids=[primary_knowledge],
+                                source_refs=stage_refs[1:2], difficulty="intermediate", cognitive_level="analyze",
+                                answer_key=ExerciseAnswerKey(reference_answer="没有先识别条件；没有检查结论是否满足情境条件。"),
+                                analysis="完整过程应先分析条件，并在形成结论后进行适用性检查。",
+                                scoring_points=[
+                                    ExerciseScoringPoint(id="SP-03-1", criterion="指出条件分析顺序错误", points=10, acceptable_evidence="说明应先识别条件再形成结论"),
+                                    ExerciseScoringPoint(id="SP-03-2", criterion="指出缺少结果检查", points=10, acceptable_evidence="说明需要检查结论与情境条件是否一致"),
+                                ],
+                                answer_space=ExerciseAnswerSpace(mode="lines", lines=4),
+                            ),
+                            ExerciseQuestion(
+                                id="Q-04", question_type="short_answer",
+                                stem="请按正确顺序写出三个主要处理步骤。",
+                                score=20, estimated_minutes=max(1, round(target_minutes * .2, 1)),
+                                objective_ids=[application_objective], knowledge_point_ids=list(dict.fromkeys([primary_knowledge, application_knowledge])),
+                                source_refs=stage_refs[-1:], difficulty="intermediate", cognitive_level="apply",
+                                answer_key=ExerciseAnswerKey(reference_answer="识别任务条件；选择对应概念或方法；完成推理并检查结论。"),
+                                analysis="步骤应体现从条件分析、方法选择到结论检查的完整过程。",
+                                scoring_points=[
+                                    ExerciseScoringPoint(id="SP-04-1", criterion="识别任务条件", points=6, acceptable_evidence="提取或说明已知条件和关键信息"),
+                                    ExerciseScoringPoint(id="SP-04-2", criterion="选择概念或方法", points=7, acceptable_evidence="说明依据条件选择相应概念或方法"),
+                                    ExerciseScoringPoint(id="SP-04-3", criterion="完成并检查", points=7, acceptable_evidence="形成结论并检查是否满足条件"),
+                                ],
+                                answer_space=ExerciseAnswerSpace(mode="lines", lines=5),
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            ExerciseSection(
+                id="transfer_challenge", title="迁移挑战", score=20,
+                blocks=[
+                    ExerciseQuestion(
+                        id="Q-05", question_type="case_analysis",
+                        stem=f"请自选一个不同于课堂示例的新情境，说明如何运用“{bp.course_identity.title}”解决问题，并写出你检查结论的方法。",
+                        score=20, estimated_minutes=max(2, round(target_minutes * .35, 1)),
+                        objective_ids=list(dict.fromkeys([primary_objective, application_objective])),
+                        knowledge_point_ids=list(dict.fromkeys([primary_knowledge, application_knowledge])),
+                        source_refs=stage_refs[-1:], difficulty="advanced", cognitive_level="transfer",
+                        answer_key=ExerciseAnswerKey(reference_answer="答案应包含真实的新情境、关键条件、所选概念或方法、完整过程、结论及检查方法。"),
+                        analysis="迁移题重点评价学生能否在新情境中主动识别条件、选择方法并验证结论。",
+                        scoring_points=[
+                            ExerciseScoringPoint(id="SP-05-1", criterion="情境与条件明确", points=4, acceptable_evidence="给出不同于课堂示例的具体情境并列出关键条件"),
+                            ExerciseScoringPoint(id="SP-05-2", criterion="方法选择有依据", points=5, acceptable_evidence="所选概念或方法与条件相符，并说明理由"),
+                            ExerciseScoringPoint(id="SP-05-3", criterion="过程和结论完整", points=7, acceptable_evidence="写出连贯处理过程和明确结论"),
+                            ExerciseScoringPoint(id="SP-05-4", criterion="完成结果检查", points=4, acceptable_evidence="说明如何核对条件、步骤或结论"),
+                        ],
+                        answer_space=ExerciseAnswerSpace(mode="lines", lines=8),
+                        common_errors=["直接套用课堂结论，没有说明新情境条件", "只写结论，没有给出检查方法"],
+                    ),
+                ],
+            ),
+        ],
+        review_summary=ExerciseReviewSummary(
+            rules_status="passed", text_review_status="pending", visual_review_status="not_required",
+        ),
+    )
 
 
-def make_video_script(bp: CourseBlueprintSchema, ppt: PPTContent) -> VideoScriptContent:
+def _subtitle_chunks(text: str, duration: float, width: int = 18) -> list[SubtitleChunk]:
+    chunks = [text[index:index + width] for index in range(0, len(text), width)] or [text]
+    step = duration / len(chunks)
+    return [
+        SubtitleChunk(
+            start_offset_seconds=round(index * step, 2),
+            end_offset_seconds=round(duration if index == len(chunks) - 1 else (index + 1) * step, 2),
+            text=chunk,
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def _video_role(page_type: str) -> str:
+    return {
+        "cover": "导入", "objectives": "目标", "scenario": "情境", "concept": "概念讲解",
+        "process": "示范", "comparison": "概念讲解", "case": "示范", "question": "检查点",
+        "exercise": "练习", "summary": "总结", "homework": "总结",
+    }.get(page_type, "过渡")
+
+
+def _scene_narration(bp: CourseBlueprintSchema, slide: Slide) -> str:
+    body = "、".join(slide.body[:3])
+    if slide.page_type == "cover":
+        return f"欢迎进入《{bp.course_identity.title}》微课。接下来我们会从真实问题出发，逐步建立概念、练习方法，并检查自己的理解。"
+    if slide.page_type == "objectives":
+        return f"完成这段学习后，你需要能够做到这些事情：{body}。先记住，最终不仅要说出结论，还要说明判断依据。"
+    if slide.page_type == "scenario":
+        return f"先观察屏幕中的情境。暂时不要急着套用结论，请找出关键条件，再作出你的初步判断，并想一想依据来自哪里。"
+    if slide.page_type in {"concept", "comparison"}:
+        return f"理解这一部分的关键，不是孤立记忆词语，而是看清概念、适用条件和彼此关系。请结合画面依次关注：{body}。"
+    if slide.page_type in {"process", "case"}:
+        return f"把方法用于实际任务时，可以按三个动作推进：先识别条件，再选择对应概念或方法，最后完成推理并检查结论。现在跟随标注看一遍完整过程。"
+    if slide.page_type in {"exercise", "question"}:
+        return f"现在请暂停讲解，独立完成屏幕中的任务：{body}。作答后不要马上继续，先检查条件、步骤和结论是否一致。"
+    if slide.page_type in {"summary", "homework"}:
+        return f"回看整段学习，我们完成了从概念理解到方法应用的过程。请用自己的话概括这三点：{body}，并说明最关键的判断依据。"
+    return f"接下来围绕“{slide.title}”继续学习。请关注画面中的信息变化，并把它与前一个结论联系起来。"
+
+
+def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent, ppt: PPTContent) -> VideoScriptContent:
     cursor = 0
-    segments = []
+    scenes = []
+    objective_ids_all = [item.id for item in bp.objectives]
+    knowledge_ids_all = [item.id for item in bp.knowledge_points]
     for index, slide in enumerate(ppt.slides, 1):
         end = cursor + slide.duration_seconds
-        fmt = lambda s: f"{s // 60:02d}:{s % 60:02d}"
-        segments.append(ScriptSegment(id=f"VS-{index:02d}", time_range=f"{fmt(cursor)}—{fmt(end)}", stage=slide.purpose, slide_ids=[slide.id], visual=f"显示 {slide.id}《{slide.title}》", narration=slide.speaker_notes, action="按要点依次高亮", on_screen_text="；".join(slide.body[:3]), pause="问题出现后停顿 2 秒" if slide.page_type in {"scenario", "exercise"} else "自然停顿", production_notes=slide.visual_suggestion))
+        midpoint_minutes = ((cursor + end) / 2) / 60
+        stage = next(
+            (item for item in lesson_plan.stages if any(bp_stage.segment_id == item.id and bp_stage.start_minute <= midpoint_minutes <= bp_stage.end_minute for bp_stage in bp.timeline)),
+            lesson_plan.stages[min(index - 1, len(lesson_plan.stages) - 1)],
+        )
+        objective_ids = [item.id for item in bp.objectives if stage.id in item.activity_ids]
+        if not objective_ids:
+            objective_ids = objective_ids_all if slide.page_type in {"objectives", "summary"} else [objective_ids_all[min(index - 1, len(objective_ids_all) - 1)]]
+        knowledge_ids = list(dict.fromkeys(
+            knowledge_id for item in bp.objectives if item.id in objective_ids for knowledge_id in item.knowledge_point_ids
+        )) or knowledge_ids_all
+        narration = _scene_narration(bp, slide)
+        interactive = slide.page_type in {"scenario", "exercise", "question"}
+        pause_duration = min(3.0, max(2.0, slide.duration_seconds * .08)) if interactive else 0
+        pause_offset = max(0.0, slide.duration_seconds - pause_duration - 1) if interactive else 0
+        animation_cues = [
+            AnimationCue(offset_seconds=0, target="整页", action="显示", instruction=f"显示 {slide.id}《{slide.title}》"),
+        ]
+        if slide.body:
+            animation_cues.append(AnimationCue(
+                offset_seconds=round(min(slide.duration_seconds * .35, max(1, slide.duration_seconds - 1)), 2),
+                target=slide.body[0], action="高亮", instruction="随旁白聚焦当前核心信息",
+            ))
+        interaction = None
+        if interactive:
+            interaction = VideoInteraction(
+                prompt="请根据画面信息作出判断，并说出一条依据。",
+                wait_seconds=pause_duration,
+                expected_response="能够引用画面中的关键条件形成判断。",
+                feedback_transition="带着你的判断继续观看，接下来对照方法检查依据。",
+            )
+        scenes.append(VideoScene(
+            id=f"VS-{index:02d}", sequence=index, title=slide.title,
+            pedagogical_role=_video_role(slide.page_type), lesson_stage_id=stage.id,
+            slide_id=slide.id, objective_ids=objective_ids, knowledge_point_ids=knowledge_ids,
+            start_seconds=cursor, end_seconds=end, learning_purpose=slide.purpose,
+            visual_track=VideoVisualTrack(composition=f"以 {slide.id} 为主画面；{slide.visual_suggestion}", animation_cues=animation_cues),
+            audio_track=VideoAudioTrack(
+                narration_text=narration, delivery_tone="清晰、自然、重点处稍放慢",
+                emphasis_terms=[slide.title],
+                pause_cues=[PauseCue(offset_seconds=pause_offset, duration_seconds=pause_duration, purpose="留出独立判断时间")] if interactive else [],
+                sound_cues=[SoundCue(offset_seconds=0, description="轻提示音进入互动问题")] if interactive else [],
+            ),
+            text_track=VideoTextTrack(
+                on_screen_text=[slide.title],
+                subtitle_chunks=_subtitle_chunks(narration, slide.duration_seconds),
+            ),
+            interaction=interaction,
+            production_notes=[slide.visual_suggestion, "保持 16:9 PPT 录屏画面，不添加无来源素材"],
+        ))
         cursor = end
-    return VideoScriptContent(segments=segments)
+    return VideoScriptContent(
+        course_info=VideoScriptCourseInfo(
+            course_title=bp.course_identity.title, subject=bp.course_identity.subject,
+            grade_level=bp.course_identity.grade_level, audience=bp.course_identity.audience,
+            duration_seconds=bp.course_identity.duration_minutes * 60,
+        ),
+        production_settings=VideoProductionSettings(target_duration_seconds=bp.course_identity.duration_minutes * 60),
+        scenes=scenes,
+    )
 
 
 def make_verbatim(bp: CourseBlueprintSchema, ppt: PPTContent, script: VideoScriptContent) -> VerbatimContent:
     sections = []
-    for index, segment in enumerate(script.segments):
-        slide = ppt.slides[index]
-        body = "，".join(slide.body)
-        sections.append(VerbatimSection(id=f"VB-{index+1:02d}", slide_ids=segment.slide_ids, time_range=segment.time_range, required_text=f"现在我们来看{slide.title}。{body}。请注意这些内容之间的关系，并尝试用自己的话复述。", optional_text=f"如果时间允许，可以结合{bp.course_identity.audience}熟悉的情境再举一个例子。", interaction="请先思考两秒，再说出你的判断依据。" if slide.page_type in {"scenario", "exercise"} else "邀请学生用一句话概括。"))
+    slides = {slide.id: slide for slide in ppt.slides}
+    fmt = lambda value: f"{int(value) // 60:02d}:{int(value) % 60:02d}"
+    for index, scene in enumerate(script.scenes):
+        slide = slides[scene.slide_id]
+        required = scene.audio_track.narration_text
+        if scene.interaction:
+            required += f" {scene.interaction.prompt} {scene.interaction.feedback_transition}"
+        sections.append(VerbatimSection(
+            id=f"VB-{index+1:02d}", slide_ids=[scene.slide_id],
+            time_range=f"{fmt(scene.start_seconds)}—{fmt(scene.end_seconds)}",
+            required_text=required,
+            optional_text=f"如果时间允许，可以结合{bp.course_identity.audience}熟悉的情境补充说明“{slide.title}”。",
+            interaction=scene.interaction.prompt if scene.interaction else "邀请学生用一句话概括当前要点。",
+        ))
     return VerbatimContent(sections=sections)
 
 
@@ -168,31 +459,93 @@ def to_markdown(kind: str, content) -> str:
                 "",
             ]
     elif kind == "exercise":
-        for item in data["items"]:
-            lines += [
-                f"## {item['id']} · {item['stem']}",
-                f"- 题型：{item['question_type']}",
-                f"- 难度：{item['difficulty']}",
-                f"- 预计用时：{item['estimated_minutes']} 分钟",
-                *[f"- {option}" for option in item["options"]],
-                f"**答案：** {'、'.join(item['correct_answers'])}",
-                f"**解析：** {item['explanation']}",
-                f"**目标覆盖：** {'、'.join(item['objective_ids'])}",
-                f"**知识点：** {'、'.join(item['knowledge_point_ids'])}",
-                f"**来源：** {'、'.join(item['source_refs']) or '无外部来源'}",
-                "",
-            ]
+        settings = data["paper_settings"]
+        info = data["course_info"]
+        lines += [
+            f"**课程：** {info['course_title']}",
+            f"**学科 / 年级：** {info['subject']} / {info['grade_level'] or info['audience']}",
+            f"**总分：** {settings['total_score']} 分",
+            f"**建议用时：** {settings['estimated_minutes']} 分钟", "",
+            "## 作答说明", *[f"- {item}" for item in settings["student_instructions"]],
+            f"- {settings['answer_requirements']}", "",
+        ]
+
+        def append_stimulus(stimulus: dict):
+            if stimulus["kind"] == "text":
+                lines.extend([f"> {stimulus.get('title') or '材料'}：{stimulus['text']}", ""])
+            elif stimulus["kind"] == "table":
+                columns = stimulus["columns"]
+                lines.extend([
+                    f"**{stimulus.get('title') or '材料表'}**",
+                    "| " + " | ".join(columns) + " |",
+                    "| " + " | ".join(["---"] * len(columns)) + " |",
+                    *["| " + " | ".join(row) + " |" for row in stimulus["rows"]], "",
+                ])
+            elif stimulus.get("visual"):
+                visual = stimulus["visual"]
+                lines.extend([f"> 配图：{visual.get('caption') or visual['alt_text']}", f"> 替代材料：{visual['fallback_stimulus']}", ""])
+
+        def append_question(item: dict):
+            lines.extend([
+                f"### {item['id']} · {item['stem']}（{item['score']} 分）",
+                f"- 题型：{item['question_type']} · 预计用时：{item['estimated_minutes']} 分钟",
+                *[f"- {option['id']}. {option['text']}" for option in item.get("options", [])],
+            ])
+            answer_space = item.get("answer_space") or {}
+            if answer_space.get("mode") == "table" and answer_space.get("columns"):
+                columns = answer_space["columns"]
+                lines.extend([
+                    "| " + " | ".join(columns) + " |",
+                    "| " + " | ".join(["---"] * len(columns)) + " |",
+                    *["| " + " | ".join([" "] * len(columns)) + " |" for _ in range(answer_space.get("blank_rows", 1))],
+                ])
+            elif answer_space.get("mode") in {"lines", "grid"}:
+                lines.extend(["______________________________" for _ in range(answer_space.get("lines", 2))])
+            lines.append("")
+
+        for section in data["sections"]:
+            lines += [f"## {section['title']}（{section['score']} 分）", ""]
+            for block in section["blocks"]:
+                if block["kind"] == "question_group":
+                    lines += [f"### {block['id']} · {block['title']}", block.get("instructions", ""), ""]
+                    for stimulus in block["stimuli"]:
+                        append_stimulus(stimulus)
+                    for item in block["sub_questions"]:
+                        append_question(item)
+                else:
+                    append_question(block)
     elif kind == "video_script":
-        for item in data["segments"]:
+        info = data["course_info"]
+        settings = data["production_settings"]
+        lines += [
+            f"**课程：** {info['course_title']}",
+            f"**学科 / 年级：** {info['subject']} / {info['grade_level'] or info['audience']}",
+            f"**制作方式：** 16:9 PPT 录屏与常规动效",
+            f"**目标时长：** {settings['target_duration_seconds']} 秒",
+            f"**建议语速：** {settings['narration_chars_per_minute']} 字/分钟", "",
+        ]
+        for item in data["scenes"]:
+            visual = item["visual_track"]
+            audio = item["audio_track"]
+            text_track = item["text_track"]
+            animation = "；".join(
+                f"+{cue['offset_seconds']}s {cue['action']} {cue['target']}（{cue['instruction']}）"
+                for cue in visual["animation_cues"]
+            ) or "无"
+            subtitles = " / ".join(cue["text"] for cue in text_track["subtitle_chunks"])
             lines += [
-                f"## {item['id']} · {item['time_range']} · {item['stage']}",
-                f"- PPT 页面：{'、'.join(item['slide_ids'])}",
-                f"- 画面：{item['visual']}",
-                f"- 旁白：{item['narration']}",
-                f"- 动作：{item['action']}",
-                f"- 屏幕文字：{item['on_screen_text']}",
-                f"- 停顿：{item['pause']}",
-                f"- 制作备注：{item['production_notes']}",
+                f"## {item['id']} · {item['start_seconds']:.0f}s—{item['end_seconds']:.0f}s · {item['pedagogical_role']}",
+                f"- PPT 页面：{item['slide_id']} · 教学环节：{item['lesson_stage_id']}",
+                f"- 目标 / 知识点：{'、'.join(item['objective_ids'])} / {'、'.join(item['knowledge_point_ids'])}",
+                f"- 学习目的：{item['learning_purpose']}",
+                f"- 画面：{visual['composition']}",
+                f"- 动效：{animation}",
+                f"- 旁白：{audio['narration_text']}",
+                f"- 语气与强调：{audio['delivery_tone']}；{'、'.join(audio['emphasis_terms']) or '无'}",
+                f"- 字幕：{subtitles}",
+                f"- 屏幕贴字：{'、'.join(text_track['on_screen_text']) or '无'}",
+                f"- 互动：{item['interaction']['prompt'] if item.get('interaction') else '无'}",
+                f"- 制作备注：{'；'.join(item['production_notes']) or '无'}",
                 "",
             ]
     elif kind == "verbatim":
@@ -200,17 +553,50 @@ def to_markdown(kind: str, content) -> str:
         for item in data["sections"]:
             lines += [f"## {item['id']} · {item['time_range']} · {','.join(item['slide_ids'])}", item["required_text"], f"> 可选补充：{item['optional_text']}", f"**互动：** {item['interaction']}", ""]
     elif kind == "task_sheet":
+        info = data["course_info"]
         lines += [
-            "## 学习目标", *[f"- {x}" for x in data["learning_objectives"]], "",
+            f"**课程：** {info['course_title']}",
+            f"**学科 / 年级：** {info['subject']} / {info['grade_level'] or info['audience']}",
+            f"**建议时长：** {info['duration_minutes']} 分钟", "",
+            "## 学习目标",
+            *[f"- {x['id']}：{x['statement']}（达成标准：{x['success_criterion']}）" for x in data["learning_objectives"]], "",
             "## 课前准备", *[f"- {x}" for x in data["preparation"]], "",
             "## 学习任务",
         ]
         for task in data["tasks"]:
-            lines += [f"### {task['id']}", f"- 动作：{task['action']}", f"- 对象：{task['object']}", f"- 输出：{task['output']}", f"- 完成标准：{task['completion_criterion']}", ""]
+            lines += [
+                f"### {task['id']} · {task['title']}",
+                f"- 阶段：{task['phase']} / {task.get('stage_id') or '无指定环节'}",
+                f"- 对应目标：{'、'.join(task['objective_ids'])}",
+                f"- 预计用时：{task['estimated_minutes']} 分钟",
+                f"- 学习动作：{task['action']}", f"- 操作对象：{task['object']}",
+                "- 操作步骤：", *[f"  - {step}" for step in task["steps"]],
+                f"- 成果要求：{task['student_output']}", f"- 完成标准：{task['completion_criterion']}",
+            ]
+            if task.get("scaffolds"):
+                lines += ["- 思考支架：", *[f"  - {item}" for item in task["scaffolds"]]]
+            if task.get("record_table"):
+                table = task["record_table"]
+                lines += [
+                    f"#### {table['title']}", table["instructions"],
+                    "| " + " | ".join(table["columns"]) + " |",
+                    "| " + " | ".join(["---"] * len(table["columns"])) + " |",
+                    *["| " + " | ".join([" "] * len(table["columns"])) + " |" for _ in range(table["blank_rows"])],
+                ]
+            lines.append("")
+        if data.get("record_table"):
+            table = data["record_table"]
+            lines += [
+                f"## {table['title']}", table["instructions"],
+                "| " + " | ".join(table["columns"]) + " |",
+                "| " + " | ".join(["---"] * len(table["columns"])) + " |",
+                *["| " + " | ".join([" "] * len(table["columns"])) + " |" for _ in range(table["blank_rows"])],
+                "",
+            ]
         lines += [
-            "## 观察提示", *[f"- {x}" for x in data["observation_prompts"]], "",
-            "## 学习疑问", *[f"- {x}" for x in data["learning_questions"]], "",
-            "## 自我评价", *[f"- {x}" for x in data["self_assessment"]], "",
+            "## 课堂问题", *[f"- {x['id']}：{x['prompt']}" for x in data["learning_questions"]], "",
+            f"## 自我评价（{' / '.join(data['self_assessment_scale'])}）",
+            *[f"- □ {x['statement']}" for x in data["self_assessment"]], "",
             "## 拓展任务", *[f"- {x}" for x in data["extension"]], "",
         ]
     else:

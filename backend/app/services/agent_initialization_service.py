@@ -28,8 +28,8 @@ TASK_INFO = {
     "lesson_plan": ("lesson_plan_agent", "形成目标、活动与评价一致的完整教学设计"),
     "ppt": ("ppt_agent", "形成适合本课程叙事与视觉表达的 PPT 页面方案"),
     "task_sheet": ("task_sheet_agent", "把课程目标转化为学生可执行、可验收的学习任务"),
-    "exercise": ("exercise_agent", "形成覆盖目标且具有合理难度梯度的练习与解析"),
-    "video_script": ("video_script_agent", "把 PPT 转化为带画面、旁白、动作与时长的脚本"),
+    "exercise": ("exercise_agent", "形成目标、题目与学习证据一致的结构化课后练习，并交付学生卷和教师卷"),
+    "video_script": ("video_script_agent", "把教学设计与 PPT 转化为可直接录制和制作的结构化微课分镜脚本"),
     "verbatim": ("verbatim_agent", "形成符合时长、语速和互动要求的教师口语逐字稿"),
 }
 
@@ -68,7 +68,12 @@ def _common_profile(bp: CourseBlueprintSchema, course: CourseProject, task_type:
     }
 
 
-def deterministic_bundle(bp: CourseBlueprintSchema, course: CourseProject, preferences: dict | None = None) -> AgentInitializationBundle:
+def deterministic_bundle(
+    bp: CourseBlueprintSchema,
+    course: CourseProject,
+    preferences: dict | None = None,
+    source: dict | None = None,
+) -> AgentInitializationBundle:
     extras = {
         "lesson_plan": {
             "alignment_requirements": ["每个目标必须对应教学活动和学习证据"],
@@ -84,18 +89,39 @@ def deterministic_bundle(bp: CourseBlueprintSchema, course: CourseProject, prefe
         "task_sheet": {
             "learner_action_requirements": ["使用可观察动作描述任务"],
             "deliverable_requirements": ["每项任务明确学生产出和完成标准"],
-            "scaffolding_requirements": ["由观察、解释到应用逐步撤除支架"],
+            "scaffolding_requirements": ["按观察、解释、应用、反思组织学习支架"],
+            "objective_evidence_alignment_requirements": ["每项任务必须关联课程目标、知识点与可验收的学习证据"],
+            "lesson_plan_reference_requirements": ["教学设计存在时参考其环节、学生活动和评价证据；不存在时不得阻塞生成"],
+            "recording_space_requirements": ["至少设计一个真实可填写的观察或记录表"],
+            "student_language_requirements": ["使用学生可直接执行的简明指令，避免仅使用‘理解’或‘掌握’等不可观察动词"],
+            "exercise_boundary_requirements": ["可设计过程性问题，但不生成完整题库、参考答案或教师解析"],
         },
         "exercise": {
             "objective_coverage_requirements": ["每个目标至少由一道题覆盖"],
-            "question_mix_requirements": ["题型服务于目标，不为多样而多样"],
-            "difficulty_requirements": ["包含基础、理解和迁移梯度"],
-            "explanation_requirements": ["解析说明依据并指出常见误区"],
+            "question_mix_requirements": ["同时支持独立题与共享材料题组；题型服务于目标，不为多样而多样"],
+            "difficulty_requirements": ["单卷按基础巩固、理解应用、迁移挑战组织，并匹配对应认知层级"],
+            "explanation_requirements": ["客观题提供准确答案与解析；主观题提供参考答案和分步评分点"],
+            "objective_evidence_alignment_requirements": ["每道计分题关联蓝图目标、知识点、教学环节和可判定学习证据"],
+            "lesson_plan_reference_requirements": ["教学设计存在时优先参考阶段、学生活动、评价证据、重点难点与误区；不存在时不得阻塞生成"],
+            "task_sheet_non_reuse_requirements": ["可借鉴任务单的目标、情境和支架，但不得直接复用任务步骤或过程性问题"],
+            "section_and_scoring_requirements": ["三区均非空，总分固定为 100 分，题目与评分点分值必须守恒"],
+            "printable_answer_space_requirements": ["学生卷为每题提供与题型相匹配的作答空间，且不显示答案、解析或评分点"],
+            "visual_stimulus_requirements": ["最多使用三张必要的生成式图片；精确图示使用确定性图形；所有视觉材料必须提供等价替代材料"],
+            "review_and_repair_requirements": ["检查答案、干扰项、可解性和评分标准；发现问题后只自动修复一次并标记剩余教师关注项"],
         },
         "video_script": {
-            "slide_mapping_requirements": ["每个分镜引用真实存在的 PPT 页面 ID"],
-            "visual_and_narration_requirements": ["画面、旁白和屏显文字分工明确"],
-            "timing_requirements": ["所有分镜总时长与课程时长一致"],
+            "objective_alignment_requirements": ["每个分镜映射真实的课程目标、知识点与教学环节，并体现对应学习证据"],
+            "narrative_arc_requirements": ["按导入、建构、示范、检查和总结形成完整微课叙事闭环"],
+            "slide_mapping_requirements": ["每个分镜只引用真实存在的 PPT 页面 ID，并保持 PPT 页面顺序"],
+            "scene_granularity_requirements": ["允许同一 PPT 页面拆分为多个连续分镜，但不得跨页制造无法执行的镜头"],
+            "visual_direction_requirements": ["明确当前页面状态、聚焦对象、常规录屏动效和转场指令"],
+            "narration_requirements": ["提供可直接录音的适龄完整旁白，避免照读 PPT 正文或 speaker notes"],
+            "subtitle_requirements": ["字幕忠实覆盖旁白，并遵守单行 18 字、最多 2 行的默认限制"],
+            "interaction_requirements": ["在核心判断、示范或练习处设置必要的问题、等待和反馈衔接"],
+            "timing_and_pacing_requirements": ["总时长、逐页时长、旁白容量、字幕和停顿必须守恒"],
+            "production_feasibility_requirements": ["仅使用 16:9 PPT 录屏、聚焦、高亮、标注、转场和少量声音提示"],
+            "verbatim_handoff_requirements": ["为逐字稿提供稳定的旁白、时间轴、页面与教学环节事实源"],
+            "review_and_repair_requirements": ["输出前检查引用、时长、字幕覆盖和制作可执行性"],
         },
         "verbatim": {
             "speaking_style_requirements": ["使用自然、准确且符合学习者水平的口语"],
@@ -105,12 +131,27 @@ def deterministic_bundle(bp: CourseBlueprintSchema, course: CourseProject, prefe
         },
     }
     profiles = []
+    source = source or {}
+    confirmed = source.get("confirmed_requirement") or {}
+    requirement_items = []
+    if confirmed.get("raw_teacher_intent"):
+        requirement_items.append(str(confirmed["raw_teacher_intent"])[:1200])
+    if confirmed.get("fields"):
+        requirement_items.append(json.dumps(confirmed["fields"], ensure_ascii=False)[:1800])
+    material_summaries = []
+    for material in (source.get("materials") or [])[:12]:
+        summary = material.get("summary")
+        if not summary and material.get("excerpts"):
+            summary = material["excerpts"][0].get("content", "")[:600]
+        material_summaries.append(f"{material.get('filename') or material.get('id')}：{summary or '无摘要'}")
     for task_type in TASK_INFO:
         profile = _common_profile(bp, course, task_type)
+        profile["project_requirement_summary"] = requirement_items
+        profile["material_summaries"] = material_summaries
         if task_type == "ppt" and (preferences or {}).get("default_ppt_template"):
             profile["hard_constraints"].append(f"使用 PPT 模板：{preferences['default_ppt_template']}")
         if task_type == "video_script":
-            profile["upstream_usage"] = ["必须以当前 PPT 版本为页面和叙事依据"]
+            profile["upstream_usage"] = ["必须同时以当前教学设计和 PPT 版本为教学节奏、页面与叙事依据"]
         elif task_type == "verbatim":
             profile["upstream_usage"] = ["必须同时以当前 PPT 和视频脚本为依据"]
         profile.update(extras[task_type])
@@ -132,7 +173,7 @@ async def generate_initialization_bundle(
     Validation and template errors continue to fail the whole initialization run.
     """
     if isinstance(provider, MockProvider):
-        return deterministic_bundle(bp, course, preferences), None
+        return deterministic_bundle(bp, course, preferences, source), None
 
     system = (
         "你是 LessonForge AI 的项目 Agent 初始化器。一次生成六个交付子 Agent 的结构化专属配置。"
@@ -156,7 +197,7 @@ async def generate_initialization_bundle(
             "Agent profile model extraction unavailable; using blueprint-based recovery",
             extra={"course_id": course.id, "provider_error_code": exc.code},
         )
-        return deterministic_bundle(bp, course, preferences), warning
+        return deterministic_bundle(bp, course, preferences, source), warning
 
 
 async def _initialization_input(db, course: CourseProject, blueprint: CourseBlueprint, requirement: CourseRequirement, preferences: dict | None = None):

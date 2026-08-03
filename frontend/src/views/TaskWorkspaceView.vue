@@ -3,15 +3,24 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { ArrowDown, CircleCheck, Clock, Cpu, Edit, Lock, MagicStick, Promotion, RefreshRight, Setting, Warning } from '@element-plus/icons-vue';
 import { api, errorMessage } from '../api/client';
+import { pptTemplatesApi } from '../api/pptTemplates';
+import { settingsApi } from '../api/settings';
 import { useProjectStore } from '../stores/project';
 import { useAutoScroll } from '../composables/useAutoScroll';
-import type { Artifact } from '../types';
+import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoScriptContent } from '../types';
 import ProjectShell from '../components/project/ProjectShell.vue';
 import ModelSelector from '../components/agent/ModelSelector.vue';
 import MarkdownRenderer from '../components/content-renderers/MarkdownRenderer.vue';
 import SlidePreview from '../components/domain/SlidePreview.vue';
 import SlideThumbnail from '../components/domain/SlideThumbnail.vue';
+import TaskSheetEditor from '../components/domain/TaskSheetEditor.vue';
+import TaskSheetPreview from '../components/domain/TaskSheetPreview.vue';
+import ExerciseEditor from '../components/domain/ExerciseEditor.vue';
+import ExercisePreview from '../components/domain/ExercisePreview.vue';
+import VideoScriptEditor from '../components/domain/VideoScriptEditor.vue';
+import VideoScriptPreview from '../components/domain/VideoScriptPreview.vue';
 import VersionSelector from '../components/domain/VersionSelector.vue';
+import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
 
 const route = useRoute();
 const store = useProjectStore();
@@ -26,8 +35,17 @@ const versions = ref<Artifact[]>([]);
 const showVersions = ref(false);
 const editing = ref(false);
 const draftMarkdown = ref('');
+const taskSheetDraft = ref<TaskSheetContent | null>(null);
+const exerciseDraft = ref<ExerciseContent | null>(null);
+const videoScriptDraft = ref<VideoScriptContent | null>(null);
 const showProfile = ref(false);
 const showActivities = ref(false);
+const pptTemplates = ref<PPTTemplate[]>([]);
+const templateCatalogVersion = ref('');
+const defaultTemplateId = ref(DEFAULT_PPT_TEMPLATE.id);
+const previewTemplateId = ref(DEFAULT_PPT_TEMPLATE.id);
+const showTemplateDrawer = ref(false);
+const applyingTemplate = ref(false);
 const chatViewport = ref<HTMLElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -62,6 +80,16 @@ const task = computed(() => store.currentTask);
 const artifact = computed(() => task.value?.current_artifact || null);
 const isRunning = computed(() => ['queued', 'running'].includes(task.value?.status || ''));
 const profileReady = computed(() => task.value?.agent_profile_status === 'ready');
+const currentTemplateId = computed(() => {
+  const requested = artifact.value?.content_json?.theme;
+  return requested && pptTemplates.value.some(item => item.id === requested)
+    ? requested
+    : DEFAULT_PPT_TEMPLATE.id;
+});
+const currentTemplate = computed(() => pptTemplates.value.find(item => item.id === currentTemplateId.value) || DEFAULT_PPT_TEMPLATE);
+const previewTemplate = computed(() => pptTemplates.value.find(item => item.id === previewTemplateId.value) || currentTemplate.value);
+const templateDrawerDirection = computed(() => isMobile.value ? 'btt' : 'rtl');
+const templateDrawerSize = computed(() => isMobile.value ? '82%' : '460px');
 const contentUpdateSignature = computed(() => {
   const messages = task.value?.messages || [];
   const latest = messages[messages.length - 1];
@@ -137,6 +165,50 @@ async function load() {
   }
 }
 
+async function loadPptTemplates() {
+  try {
+    const [catalog, settings] = await Promise.all([
+      pptTemplatesApi.getCatalog(),
+      settingsApi.getSettings(),
+    ]);
+    pptTemplates.value = catalog.templates;
+    templateCatalogVersion.value = catalog.version;
+    defaultTemplateId.value = settings.preferences.default_ppt_template || DEFAULT_PPT_TEMPLATE.id;
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  }
+}
+
+function openTemplateDrawer() {
+  previewTemplateId.value = currentTemplateId.value;
+  showTemplateDrawer.value = true;
+}
+
+function closeTemplateDrawer() {
+  previewTemplateId.value = currentTemplateId.value;
+  showTemplateDrawer.value = false;
+}
+
+async function applyPptTemplate() {
+  if (!artifact.value || previewTemplateId.value === currentTemplateId.value || applyingTemplate.value) return;
+  applyingTemplate.value = true;
+  error.value = '';
+  try {
+    const result = await pptTemplatesApi.applyTemplate(
+      artifact.value.id,
+      previewTemplateId.value,
+      artifact.value.version,
+    );
+    if (task.value) task.value.current_artifact = result.artifact;
+    showTemplateDrawer.value = false;
+    await store.refreshTasks();
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  } finally {
+    applyingTemplate.value = false;
+  }
+}
+
 async function send() {
   const content = input.value.trim();
   if (!content || sending.value) return;
@@ -174,6 +246,20 @@ async function setModel(id: string) {
   catch (cause) { error.value = errorMessage(cause); }
 }
 
+async function setImageModel(id: string) {
+  try {
+    const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType.value}/model`, { image_model_config_id: id });
+    if (task.value) task.value.image_model_config_id = data.image_model_config_id;
+  } catch (cause) { error.value = errorMessage(cause); }
+}
+
+async function setVisionModel(id: string) {
+  try {
+    const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType.value}/model`, { vision_model_config_id: id });
+    if (task.value) task.value.vision_model_config_id = data.vision_model_config_id;
+  } catch (cause) { error.value = errorMessage(cause); }
+}
+
 async function lockArtifact() {
   if (!artifact.value) return;
   try {
@@ -196,9 +282,61 @@ function selectVersion(version: Artifact) {
   showVersions.value = false;
 }
 
+function isTaskSheetV2(value: unknown): value is TaskSheetContent {
+  return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '2.0');
+}
+
+function isExerciseV2(value: unknown): value is ExerciseContent {
+  return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '2.0');
+}
+
+function isVideoScriptV2(value: unknown): value is VideoScriptContent {
+  return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '2.0');
+}
+
+const editableTaskSheet = computed<TaskSheetContent>({
+  get: () => taskSheetDraft.value as TaskSheetContent,
+  set: value => { taskSheetDraft.value = value; },
+});
+const editableExercise = computed<ExerciseContent>({
+  get: () => exerciseDraft.value as ExerciseContent,
+  set: value => { exerciseDraft.value = value; },
+});
+const editableVideoScript = computed<VideoScriptContent>({
+  get: () => videoScriptDraft.value as VideoScriptContent,
+  set: value => { videoScriptDraft.value = value; },
+});
+
 function beginEdit() {
+  error.value = '';
+  if (taskType.value === 'task_sheet') {
+    if (!isTaskSheetV2(artifact.value?.content_json)) {
+      error.value = '这是旧版任务单。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化任务单。';
+      return;
+    }
+    taskSheetDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as TaskSheetContent;
+  } else if (taskType.value === 'exercise') {
+    if (!isExerciseV2(artifact.value?.content_json)) {
+      error.value = '这是旧版课后练习。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化练习。';
+      return;
+    }
+    exerciseDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as ExerciseContent;
+  } else if (taskType.value === 'video_script') {
+    if (!isVideoScriptV2(artifact.value?.content_json)) {
+      error.value = '这是旧版视频脚本。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化脚本。';
+      return;
+    }
+    videoScriptDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as VideoScriptContent;
+  }
   draftMarkdown.value = artifact.value?.content_markdown || '';
   editing.value = true;
+}
+
+function cancelEdit() {
+  editing.value = false;
+  taskSheetDraft.value = null;
+  exerciseDraft.value = null;
+  videoScriptDraft.value = null;
 }
 
 function prepareSlideRevision(index: number) {
@@ -209,24 +347,34 @@ function prepareSlideRevision(index: number) {
 async function saveEdit() {
   if (!artifact.value) return;
   try {
+    const contentJson = taskType.value === 'task_sheet' && taskSheetDraft.value
+      ? taskSheetDraft.value
+      : taskType.value === 'exercise' && exerciseDraft.value
+        ? exerciseDraft.value
+        : taskType.value === 'video_script' && videoScriptDraft.value
+          ? videoScriptDraft.value
+        : artifact.value.content_json;
     const { data } = await api.patch<Artifact>(`/artifacts/${artifact.value.id}`, {
-      content_json: artifact.value.content_json,
+      content_json: contentJson,
       content_markdown: draftMarkdown.value,
       change_summary: '教师在线编辑',
     });
     if (task.value) task.value.current_artifact = data;
     editing.value = false;
+    taskSheetDraft.value = null;
+    exerciseDraft.value = null;
+    videoScriptDraft.value = null;
     await store.refreshTasks();
   } catch (cause) { error.value = errorMessage(cause); }
 }
 
 const quickPromptsMap: Record<string, string[]> = {
-  teaching_design: ['增加课堂探究实验环节', '强化教学重难点拆解', '简化学情分析描述', '补充课后拓展延伸'],
+  lesson_plan: ['增加课堂探究实验环节', '强化教学重难点拆解', '简化学情分析描述', '补充课后拓展延伸'],
   ppt: ['优化 PPT 页面排版视觉', '增加图表示意结构', '精简每页文字字数', '强化重点结论高亮'],
-  learning_task: ['增加自主思考引导题', '补充分层练习任务', '优化任务完成标准'],
-  after_class: ['增加阶梯式梯度练习', '补充详细解题思路', '区分基础题与拔高题'],
-  script: ['增加教师讲授口语化过渡', '补充镜头画面描述', '标注重点强调语调'],
-  transcript: ['调整口语表达更自然', '增加课堂互动提示音', '控制讲解语速与时长'],
+  task_sheet: ['对齐教学环节', '增加观察记录表', '优化完成标准', '增强任务梯度', '精简学生说明'],
+  exercise: ['对齐教学目标', '优化难度梯度', '增加材料题组', '检查答案与评分点', '生成或替换必要配图', '精简题量与学生说明'],
+  video_script: ['压缩旁白时长', '减少照读 PPT', '增强画面动效', '增加检查点', '优化字幕节奏', '同步教学设计', '校准逐页时长'],
+  verbatim: ['调整口语表达更自然', '增加课堂互动提示音', '控制讲解语速与时长'],
 };
 
 const currentQuickPrompts = computed(() => quickPromptsMap[taskType.value] || ['优化语言表达', '补充案例说明', '调整结构层级']);
@@ -239,7 +387,10 @@ function applyQuickPrompt(prompt: string) {
 }
 
 watch(taskType, load);
-watch(() => artifact.value?.id, () => { mobilePane.value = 'file'; });
+watch(() => artifact.value?.id, () => {
+  mobilePane.value = 'file';
+  previewTemplateId.value = currentTemplateId.value;
+});
 watch(contentUpdateSignature, async () => {
   await nextTick();
   notifyNewContent(!isRunning.value);
@@ -250,6 +401,7 @@ onMounted(() => {
   updateMobileBreakpoint();
   mobileMedia.addEventListener('change', updateMobileBreakpoint);
   load();
+  loadPptTemplates();
 });
 
 onUnmounted(() => {
@@ -459,6 +611,24 @@ onUnmounted(() => {
                 :disabled="isRunning"
                 @change="setModel"
               />
+              <ModelSelector
+                v-if="taskType === 'exercise'"
+                :model-value="task.image_model_config_id || null"
+                compact
+                label="配图"
+                capability="image_generation"
+                :disabled="isRunning"
+                @change="setImageModel"
+              />
+              <ModelSelector
+                v-if="taskType === 'exercise'"
+                :model-value="task.vision_model_config_id || null"
+                compact
+                label="审图"
+                capability="vision_review"
+                :disabled="isRunning"
+                @change="setVisionModel"
+              />
             </div>
             <div class="footer-right">
               <span class="key-tip">Shift+Enter 换行</span>
@@ -499,7 +669,15 @@ onUnmounted(() => {
             <h2>{{ task.display_name }} <small v-if="artifact">V{{ artifact.version }}</small></h2>
           </div>
           <div v-if="artifact" class="file-actions">
+            <el-button
+              v-if="taskType === 'ppt'"
+              size="small"
+              :icon="MagicStick"
+              :disabled="artifact.is_locked || isRunning"
+              @click="openTemplateDrawer"
+            >模板 · {{ currentTemplate.short_name }}</el-button>
             <el-button size="small" :icon="Clock" @click="loadVersions">版本历史</el-button>
+            <el-button size="small" :icon="RefreshRight" :disabled="artifact.is_locked || isRunning" @click="run('sync_context')">同步上下文</el-button>
             <el-button size="small" :icon="Lock" :disabled="artifact.is_locked" @click="lockArtifact">{{ artifact.is_locked ? '已锁定' : '锁定文件' }}</el-button>
             <el-button size="small" :icon="Edit" :disabled="artifact.is_locked" @click="beginEdit">编辑</el-button>
             <el-button size="small" type="primary" :icon="CircleCheck" :disabled="task.status === 'approved' || task.stale_agent_profile" @click="approve">{{ task.status === 'approved' ? '已确认' : '确认文件' }}</el-button>
@@ -512,17 +690,32 @@ onUnmounted(() => {
           <strong>{{ task.progress }}%</strong>
         </div>
 
-        <div v-if="editing" class="editor">
+        <div v-if="editing && taskType === 'task_sheet' && taskSheetDraft" class="structured-editor">
+          <div class="structured-editor-scroll"><TaskSheetEditor v-model="editableTaskSheet" /></div>
+          <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
+        </div>
+        <div v-else-if="editing && taskType === 'exercise' && exerciseDraft" class="structured-editor">
+          <div class="structured-editor-scroll"><ExerciseEditor v-model="editableExercise" /></div>
+          <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
+        </div>
+        <div v-else-if="editing && taskType === 'video_script' && videoScriptDraft" class="structured-editor">
+          <div class="structured-editor-scroll"><VideoScriptEditor v-model="editableVideoScript" /></div>
+          <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
+        </div>
+        <div v-else-if="editing" class="editor">
           <textarea v-model="draftMarkdown" spellcheck="false" />
-          <footer><el-button size="small" @click="editing = false">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
+          <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
         </div>
         <div v-else-if="artifact" class="artifact-viewport" :class="{ updated: artifact.id }">
           <div v-if="taskType === 'ppt' && artifact.content_json?.slides" class="ppt-layout">
             <div class="slide-list">
-              <SlideThumbnail v-for="(slide, index) in artifact.content_json.slides" :key="slide.id || index" :slide="slide" :index="index" :is-active="selectedSlide === index" @select="selectedSlide = $event" />
+              <SlideThumbnail v-for="(slide, index) in artifact.content_json.slides" :key="slide.id || index" :slide="slide" :index="index" :is-active="selectedSlide === index" :template="previewTemplate" @select="selectedSlide = $event" />
             </div>
-            <div class="slide-preview"><SlidePreview :slide="artifact.content_json.slides[selectedSlide]" :slide-index="selectedSlide" :total-slides="artifact.content_json.slides.length" @regenerate-slide="prepareSlideRevision" /></div>
+            <div class="slide-preview"><SlidePreview :slide="artifact.content_json.slides[selectedSlide]" :slide-index="selectedSlide" :total-slides="artifact.content_json.slides.length" :template="previewTemplate" @regenerate-slide="prepareSlideRevision" /></div>
           </div>
+          <TaskSheetPreview v-else-if="taskType === 'task_sheet' && isTaskSheetV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
+          <ExercisePreview v-else-if="taskType === 'exercise' && isExerciseV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
+          <VideoScriptPreview v-else-if="taskType === 'video_script' && isVideoScriptV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
           <MarkdownRenderer v-else :content="artifact.content_markdown" />
         </div>
         <div v-else class="file-empty">
@@ -534,6 +727,73 @@ onUnmounted(() => {
       </main>
     </div>
     <VersionSelector v-if="showVersions" :versions="versions" :current-version="artifact?.version" @select="selectVersion" @close="showVersions = false" />
+    <el-drawer
+      v-model="showTemplateDrawer"
+      class="ppt-template-drawer"
+      :direction="templateDrawerDirection"
+      :size="templateDrawerSize"
+      :show-close="false"
+      @closed="previewTemplateId = currentTemplateId"
+    >
+      <template #header>
+        <div class="template-drawer-head">
+          <div>
+            <span>PPT 模板</span>
+            <h3>选择课件视觉风格</h3>
+          </div>
+          <small>目录 V{{ templateCatalogVersion || '1.0.0' }}</small>
+        </div>
+      </template>
+
+      <div class="template-drawer-body">
+        <p class="template-drawer-intro">使用当前第 {{ selectedSlide + 1 }} 页内容比较模板。应用后只改变视觉，不修改页面内容和教师备注。</p>
+        <div class="template-card-grid">
+          <div
+            v-for="item in pptTemplates"
+            :key="item.id"
+            class="template-choice-card"
+            :class="{ selected: previewTemplateId === item.id }"
+            role="button"
+            tabindex="0"
+            :aria-pressed="previewTemplateId === item.id"
+            @click="previewTemplateId = item.id"
+            @keydown.enter.prevent="previewTemplateId = item.id"
+            @keydown.space.prevent="previewTemplateId = item.id"
+          >
+            <div class="template-card-preview">
+              <SlideThumbnail
+                v-if="artifact?.content_json?.slides?.[selectedSlide]"
+                :slide="artifact.content_json.slides[selectedSlide]"
+                :index="selectedSlide"
+                :is-active="false"
+                :template="item"
+              />
+            </div>
+            <div class="template-card-title-row">
+              <strong>{{ item.name }}</strong>
+              <span v-if="currentTemplateId === item.id">当前课件</span>
+            </div>
+            <p>{{ item.description }}</p>
+            <div class="template-card-meta">
+              <div class="palette-dots" aria-label="模板配色">
+                <i :style="{ background: item.palette.primary }" />
+                <i :style="{ background: item.palette.secondary }" />
+                <i :style="{ background: item.palette.background }" />
+              </div>
+              <span v-if="defaultTemplateId === item.id">我的默认</span>
+              <small v-else>{{ item.recommended_for.join('、') }}</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="template-drawer-footer">
+          <div><strong>{{ previewTemplate.name }}</strong><span>将保存为新的 PPT 版本</span></div>
+          <div><el-button @click="closeTemplateDrawer">取消</el-button><el-button type="primary" :loading="applyingTemplate" :disabled="previewTemplateId === currentTemplateId" @click="applyPptTemplate">应用此模板</el-button></div>
+        </div>
+      </template>
+    </el-drawer>
   </ProjectShell>
 </template>
 
@@ -646,6 +906,7 @@ onUnmounted(() => {
 
 .agent-header-meta {
   min-width: 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
 }
@@ -654,28 +915,33 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .header-name-row h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 800;
   color: var(--text-primary, #0f172a);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
 }
 
 .status-live-chip {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 700;
   color: var(--primary-700, #4338ca);
   background: var(--primary-50, #eef2ff);
   border: 1px solid var(--primary-200, #c7d2fe);
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: 999px;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .profile-toggle-btn {
@@ -691,8 +957,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 4px;
   white-space: nowrap;
-  transition: all 150ms ease;
   flex-shrink: 0;
+  transition: all 150ms ease;
 }
 
 .profile-toggle-btn:hover, .profile-toggle-btn.active {
@@ -1114,8 +1380,9 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 4px;
+  padding-top: 6px;
   border-top: 1px solid #f1f5f9;
+  min-width: 0;
 }
 
 .footer-left {
@@ -1123,6 +1390,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .footer-right {
@@ -1130,12 +1399,14 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .key-tip {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-muted, #94a3b8);
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .composer-send-circle {
@@ -1335,6 +1606,43 @@ onUnmounted(() => {
   box-shadow: inset 0 1px 4px rgba(15, 23, 42, 0.02);
 }
 
+.template-drawer-head { width: 100%; display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e2e8f0; padding-bottom: 16px; }
+.template-drawer-head span { display: block; margin-bottom: 4px; color: #4f46e5; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.template-drawer-head h3 { margin: 0; color: #0f172a; font-size: 20px; font-weight: 800; line-height: 1.25; }
+.template-drawer-head small { color: #64748b; font-size: 12.5px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.template-drawer-body { min-height: 0; padding-top: 4px; }
+.template-drawer-intro { margin: 0 0 18px; padding: 12px 16px; border-radius: 10px; background: #f8fafc; border: 1px solid #e2e8f0; color: #475569; font-size: 13.5px; line-height: 1.6; font-weight: 500; }
+.template-card-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.template-card-title-row strong { color: #0f172a; font-size: 15px; font-weight: 800; line-height: 1.35; }
+.template-card-title-row span { flex-shrink: 0; color: #4338ca; background: #eef2ff; border: 1px solid #c7d2fe; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.template-card-meta > span { flex-shrink: 0; color: #047857; background: #ecfdf5; border: 1px solid #a7f3d0; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; }
+.template-choice-card > p { min-height: 44px; margin: 6px 0 12px; color: #475569; font-size: 13px; line-height: 1.55; font-weight: 500; }
+.template-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
+.template-card-meta small { overflow: hidden; color: #64748b; font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.palette-dots { display: flex; gap: 5px; }
+.palette-dots i { width: 14px; height: 14px; border: 1.5px solid rgba(255, 255, 255, 0.9); box-shadow: 0 1px 4px rgba(15, 23, 42, 0.15); border-radius: 50%; }
+.template-drawer-footer { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 16px; border-top: 1px solid #e2e8f0; }
+.template-drawer-footer > div:first-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.template-drawer-footer strong { overflow: hidden; color: #0f172a; font-size: 15px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.template-drawer-footer span { color: #64748b; font-size: 12.5px; font-weight: 500; }
+.template-drawer-footer > div:last-child { display: flex; flex-shrink: 0; gap: 10px; }
+.template-drawer-footer :deep(.el-button) { border-radius: 999px !important; font-weight: 700 !important; }
+.template-drawer-footer :deep(.el-button--primary) { background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important; border: 0 !important; box-shadow: 0 3px 12px rgba(79, 70, 229, 0.3) !important; padding: 9px 20px !important; font-size: 13.5px !important; }
+.template-card-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.template-choice-card { min-width: 0; padding: 14px; border: 1.5px solid #e2e8f0; border-radius: 14px; background: #ffffff; cursor: pointer; outline: none; transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1); box-sizing: border-box; }
+.template-choice-card:hover, .template-choice-card:focus-visible { border-color: #818cf8; transform: translateY(-2px); box-shadow: 0 8px 24px rgba(79, 70, 229, 0.12); }
+.template-choice-card.selected { border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.25), 0 8px 24px rgba(79, 70, 229, 0.14); background: #ffffff; }
+.template-card-preview { pointer-events: none; margin: -6px -6px 12px; border-radius: 10px; overflow: hidden; border: 1px solid #f1f5f9; box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04); }
+.template-card-preview :deep(.slide-thumbnail-card) { padding: 0; border: 0; border-radius: 0; }
+.template-card-meta small { overflow: hidden; color: #7a808a; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.palette-dots { display: flex; gap: 4px; }
+.palette-dots i { width: 11px; height: 11px; border: 1px solid rgba(22, 26, 34, .14); border-radius: 50%; }
+.template-drawer-footer { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid #d9dce3; }
+.template-drawer-footer > div:first-child { min-width: 0; display: flex; flex-direction: column; gap: 3px; text-align: left; }
+.template-drawer-footer strong { overflow: hidden; color: #161a22; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.template-drawer-footer span { color: #646b78; font-size: 10px; }
+.template-drawer-footer > div:last-child { display: flex; flex-shrink: 0; gap: 8px; }
+
 .editor {
   flex: 1;
   min-height: 0;
@@ -1367,6 +1675,30 @@ onUnmounted(() => {
 
 .editor footer :deep(.el-button) {
   border-radius: var(--radius-pill, 999px) !important;
+}
+
+.structured-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f4f4f5;
+}
+
+.structured-editor-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.structured-editor footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #cfd2d9;
+  background: #ffffff;
 }
 
 .file-empty {
@@ -1410,12 +1742,17 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
-  .task-workspace { grid-template-columns: 1fr; position: relative; }
+  .task-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    position: relative;
+  }
   .mobile-pane-switch { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid #e2e8f0; }
   .mobile-pane-switch button { height: 38px; border: 0; background: #ffffff; font-weight: 700; }
   .mobile-pane-switch button.active { background: var(--primary-600, #4f46e5); color: #ffffff; }
   .mobile-hidden { display: none; }
-  .agent-pane, .file-pane { min-height: 0; }
+  .agent-pane, .file-pane { width: 100% !important; min-width: 0; min-height: 0; grid-row: 2; }
   .file-toolbar { align-items: flex-start; }
   .file-actions { max-width: 240px; }
   .ppt-layout { grid-template-columns: 120px minmax(0, 1fr); }
@@ -1428,5 +1765,8 @@ onUnmounted(() => {
   .ppt-layout { grid-template-columns: 1fr; }
   .slide-list { display: flex; overflow-x: auto; }
   .slide-preview { min-height: 300px; padding: 8px; }
+  .template-card-grid { grid-template-columns: 1fr; }
+  .template-drawer-footer { align-items: stretch; flex-direction: column; }
+  .template-drawer-footer > div:last-child { justify-content: flex-end; }
 }
 </style>

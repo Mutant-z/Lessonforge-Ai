@@ -1,0 +1,143 @@
+{
+  "version": "1.0.0",
+  "templates": [
+    {
+      "id": "lessonforge_swiss_blue",
+      "file": "lessonforge_swiss_blue.pptx",
+      "name": "瑞士蓝·清晰学术",
+      "short_name": "瑞士蓝",
+      "description": "高对比蓝色导轨与清晰网格，强调概念层级和严谨表达。",
+      "recommended_for": ["通用课程", "数学", "物理"],
+      "composition": "swiss_rail",
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F7F7F8",
+        "primary": "#002FA7",
+        "secondary": "#DCE7FF",
+        "text": "#161A22",
+        "muted": "#646B78",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_nordic_clean",
+      "file": "lessonforge_nordic_clean.pptx",
+      "name": "北欧绿·自然探究",
+      "short_name": "北欧绿",
+      "description": "柔和绿意、大面积留白与轻量分区，适合观察和探究过程。",
+      "recommended_for": ["生物", "地理", "综合实践"],
+      "composition": "nordic_field",
+      "palette": {
+        "background": "#F4F8F6",
+        "surface": "#FFFFFF",
+        "primary": "#0F766E",
+        "secondary": "#CFE8DF",
+        "text": "#17332E",
+        "muted": "#58706B",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_modern_academic",
+      "file": "lessonforge_modern_academic.pptx",
+      "name": "现代紫·示范课堂",
+      "short_name": "现代紫",
+      "description": "紫色非对称标题区与醒目页码，突出公开课的演示节奏。",
+      "recommended_for": ["公开课", "示范课", "教学评审"],
+      "composition": "academic_offset",
+      "palette": {
+        "background": "#FAF8FF",
+        "surface": "#FFFFFF",
+        "primary": "#6D28D9",
+        "secondary": "#E9DDFE",
+        "text": "#251B38",
+        "muted": "#6E647E",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_humanities_editorial",
+      "file": "lessonforge_humanities_editorial.pptx",
+      "name": "人文书卷·编辑排版",
+      "short_name": "人文书卷",
+      "description": "暖色纸张质感、砖红细线与书刊式标题，适合叙事和材料阅读。",
+      "recommended_for": ["语文", "历史", "道德与法治"],
+      "composition": "editorial_margin",
+      "palette": {
+        "background": "#F3E7D3",
+        "surface": "#FAF3E7",
+        "primary": "#8A3B2E",
+        "secondary": "#D6B897",
+        "text": "#382A22",
+        "muted": "#756457",
+        "on_primary": "#FFF9F0"
+      },
+      "typography": {
+        "heading": "SimSun",
+        "body": "Microsoft YaHei",
+        "latin": "Georgia"
+      }
+    },
+    {
+      "id": "lessonforge_science_dark",
+      "file": "lessonforge_science_dark.pptx",
+      "name": "深海科技·实验演示",
+      "short_name": "深海科技",
+      "description": "深蓝背景与青色信号轨道，为实验步骤和技术信息提供强对比。",
+      "recommended_for": ["物理实验", "科学", "信息技术"],
+      "composition": "science_signal",
+      "palette": {
+        "background": "#0B1020",
+        "surface": "#131C33",
+        "primary": "#00C2FF",
+        "secondary": "#173C57",
+        "text": "#EAF6FF",
+        "muted": "#9CB8CA",
+        "on_primary": "#07111D"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_primary_vivid",
+      "file": "lessonforge_primary_vivid.pptx",
+      "name": "活力课堂·橙蓝启蒙",
+      "short_name": "活力课堂",
+      "description": "橙蓝撞色、放大编号和圆润内容区，帮助低龄学习者抓住重点。",
+      "recommended_for": ["小学", "启蒙", "活动型课程"],
+      "composition": "primary_blocks",
+      "palette": {
+        "background": "#FFF7ED",
+        "surface": "#FFFFFF",
+        "primary": "#F97316",
+        "secondary": "#2563EB",
+        "text": "#2D241E",
+        "muted": "#76675D",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    }
+  ]
+}

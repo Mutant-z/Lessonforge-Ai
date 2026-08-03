@@ -3,11 +3,8 @@ import { computed, ref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useAuthStore } from '../../stores/auth';
 import { useCourseStore } from '../../stores/courses';
-import { useTaskCenterStore } from '../../stores/taskCenter';
 import { 
   Plus, 
-  Cpu, 
-  User, 
   Setting, 
   SwitchButton, 
   Search,
@@ -16,7 +13,6 @@ import {
 
 const auth = useAuthStore();
 const courses = useCourseStore();
-const taskCenter = useTaskCenterStore();
 const router = useRouter();
 const route = useRoute();
 
@@ -89,16 +85,6 @@ function handleSearch() {
       >
         <span class="review-amber-dot"></span>
         <span>{{ reviewPendingCount }} 个项目待处理</span>
-      </div>
-
-      <!-- Background Agent Tasks Indicator -->
-      <div 
-        v-if="taskCenter.runningCount > 0" 
-        class="task-indicator-btn animate-fade-in"
-        @click="taskCenter.toggleDrawer()"
-      >
-        <span class="task-ping-dot animate-pulse"></span>
-        <span class="task-count-text">{{ taskCenter.runningCount }} 个 Agent 运行中</span>
       </div>
 
       <!-- User Logged In Actions -->
@@ -229,32 +215,6 @@ function handleSearch() {
   background: var(--accent-amber);
 }
 
-.task-indicator-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  background: var(--color-primary-soft);
-  border: 1px solid var(--color-primary-border);
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 800;
-  color: var(--color-primary);
-  transition: transform var(--motion-fast);
-}
-
-.task-indicator-btn:hover {
-  transform: translateY(-1px);
-}
-
-.task-ping-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-primary);
-}
-
 .user-avatar-trigger {
   display: flex;
   align-items: center;
@@ -285,5 +245,32 @@ function handleSearch() {
   font-size: 14.5px;
   font-weight: 800;
   color: var(--text-primary);
+}
+
+@media (max-width: 600px) {
+  .app-header {
+    padding: 0 12px;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .header-left,
+  .review-pending-pill,
+  .user-name-text {
+    display: none;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  .user-avatar-trigger {
+    padding: 3px;
+  }
+
+  .avatar-circle {
+    width: 32px;
+    height: 32px;
+  }
 }
 </style>

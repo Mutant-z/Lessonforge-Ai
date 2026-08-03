@@ -2,8 +2,10 @@
 import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { api, errorMessage } from '../api/client';
+import { pptTemplatesApi } from '../api/pptTemplates';
 import { useCourseStore } from '../stores/courses';
-import type { Artifact } from '../types';
+import type { Artifact, PPTTemplate } from '../types';
+import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
 import PageHeader from '../components/layout/PageHeader.vue';
 import StatusBadge from '../components/feedback/StatusBadge.vue';
 import EmptyState from '../components/feedback/EmptyState.vue';
@@ -50,6 +52,7 @@ const chatSending = ref(false);
 const modelSwitching = ref(false);
 const isTeleprompterMode = ref(false);
 const selectedSlideIndex = ref(0);
+const pptTemplates = ref<PPTTemplate[]>([]);
 
 const tabs = [
   ['lesson_plan', '教学设计'],
@@ -63,11 +66,18 @@ const tabs = [
 ];
 
 const currentArtifact = computed(() => items.value.find(x => x.artifact_type === activeTab.value));
+const currentPptTemplate = computed(() => pptTemplates.value.find(
+  item => item.id === currentArtifact.value?.content_json?.theme,
+) || DEFAULT_PPT_TEMPLATE);
 
 async function loadArtifacts() {
   try {
-    await store.open(courseId);
-    const { data } = await api.get(`/courses/${courseId}/artifacts`);
+    const [, { data }, catalog] = await Promise.all([
+      store.open(courseId),
+      api.get(`/courses/${courseId}/artifacts`),
+      pptTemplatesApi.getCatalog(),
+    ]);
+    pptTemplates.value = catalog.templates;
     items.value = data || [];
     if (!data || !data.length) {
       error.value = '资源仍在生成中或尚未启动。';
@@ -333,6 +343,7 @@ onMounted(loadArtifacts);
                   :slide="slide"
                   :index="sIdx"
                   :is-active="selectedSlideIndex === sIdx"
+                  :template="currentPptTemplate"
                   @select="selectedSlideIndex = $event"
                 />
               </div>
@@ -342,6 +353,7 @@ onMounted(loadArtifacts);
                   :slide="currentArtifact.content_json.slides[selectedSlideIndex]"
                   :slide-index="selectedSlideIndex"
                   :total-slides="currentArtifact.content_json.slides.length"
+                  :template="currentPptTemplate"
                 />
               </div>
             </div>
@@ -394,6 +406,7 @@ onMounted(loadArtifacts);
                 v-for="(sc, scIdx) in currentArtifact.content_json.scenes"
                 :key="scIdx"
                 :scene="sc"
+                :total-seconds="currentArtifact.content_json.production_settings?.target_duration_seconds || currentArtifact.content_json.course_info?.duration_seconds || 1"
               />
             </div>
           </template>

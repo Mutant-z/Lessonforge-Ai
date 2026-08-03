@@ -4,7 +4,6 @@ import { useAuthStore } from '../stores/auth';
 import { useCourseStore } from '../stores/courses';
 import AppSidebar from '../components/layout/AppSidebar.vue';
 import AppHeader from '../components/layout/AppHeader.vue';
-import TaskCenterDrawer from '../components/layout/TaskCenterDrawer.vue';
 
 const auth = useAuthStore();
 const courses = useCourseStore();
@@ -29,8 +28,6 @@ onMounted(async () => {
         </router-view>
       </main>
     </div>
-
-    <TaskCenterDrawer />
   </div>
 
   <div v-else class="app-guest-shell">

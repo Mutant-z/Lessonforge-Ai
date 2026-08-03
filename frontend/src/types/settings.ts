@@ -7,6 +7,9 @@ export interface ModelConfigItem {
   timeout_seconds: number;
   context_window_tokens: number;
   supports_multimodal: boolean;
+  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>;
+  api_mode: string;
+  adapter_config: Record<string, unknown>;
   api_key_configured: boolean;
   api_key_masked: string;
   is_active: boolean;
@@ -23,6 +26,9 @@ export interface ModelConfigPayload {
   timeout_seconds: number;
   context_window_tokens: number;
   supports_multimodal: boolean;
+  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>;
+  api_mode: string;
+  adapter_config: Record<string, unknown>;
   is_active?: boolean;
 }
 

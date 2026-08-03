@@ -333,9 +333,7 @@
 
                 <el-form-item label="默认 PPT 导出模板">
                   <el-select v-model="preferenceForm.default_ppt_template" class="w-full" size="default">
-                    <el-option label="Swiss Blue 商务沉稳" value="lessonforge_swiss_blue" />
-                    <el-option label="Nordic Clean 极简北欧" value="lessonforge_nordic_clean" />
-                    <el-option label="Modern Academic 现代学术" value="lessonforge_modern_academic" />
+                    <el-option v-for="item in pptTemplates" :key="item.id" :label="item.name" :value="item.id" />
                   </el-select>
                 </el-form-item>
 
@@ -345,6 +343,33 @@
                   </el-button>
                 </div>
               </el-form>
+
+              <!-- 偏好生效概览与蓝图推演规约面板 (填补左侧空白) -->
+              <div class="preference-active-summary">
+                <div class="summary-title-line">
+                  <el-icon><Lightning /></el-icon>
+                  <span>偏好生效与蓝图推演规约</span>
+                </div>
+                <div class="summary-chips-grid">
+                  <div class="summary-chip-item">
+                    <span class="chip-k">输出语言</span>
+                    <span class="chip-v">{{ preferenceForm.default_language === 'zh-CN' ? '简体中文' : 'English' }}</span>
+                  </div>
+                  <div class="summary-chip-item">
+                    <span class="chip-k">适用学段</span>
+                    <span class="chip-v">{{ getGradeLabel(preferenceForm.default_grade_level) }}</span>
+                  </div>
+                  <div class="summary-chip-item">
+                    <span class="chip-k">PPT 导出模板</span>
+                    <span class="chip-v highlight">{{ getTemplateName(preferenceForm.default_ppt_template) }}</span>
+                  </div>
+                  <div class="summary-chip-item">
+                    <span class="chip-k">画面画幅比例</span>
+                    <span class="chip-v">16:9 标准高清</span>
+                  </div>
+                </div>
+                <p class="summary-footer-tip">修改保存后，新建微课项目或 Agent 重新推演蓝图时将自动装配以上偏好。</p>
+              </div>
             </div>
 
             <!-- 右侧卡片：PPT 模板 Preview (加大 Card 高度与尺寸，充实无空白) -->
@@ -357,13 +382,14 @@
               </div>
 
               <div class="template-vertical-list">
-                <!-- 模板 1: Swiss Blue -->
                 <div
+                  v-for="item in pptTemplates"
+                  :key="item.id"
                   class="visual-tpl-card-compact"
-                  :class="{ selected: preferenceForm.default_ppt_template === 'lessonforge_swiss_blue' }"
-                  @click="preferenceForm.default_ppt_template = 'lessonforge_swiss_blue'"
+                  :class="{ selected: preferenceForm.default_ppt_template === item.id }"
+                  @click="preferenceForm.default_ppt_template = item.id"
                 >
-                  <div class="slide-thumb bg-swiss-blue">
+                  <div class="slide-thumb" :style="{ background: `linear-gradient(135deg, ${item.palette.primary} 0%, ${item.palette.secondary} 100%)` }">
                     <div class="slide-mockup">
                       <div class="mockup-header-bar"></div>
                       <div class="mockup-lines">
@@ -376,68 +402,12 @@
 
                   <div class="slide-info-wrap">
                     <div class="slide-info-top">
-                      <span class="slide-name">Swiss Blue 商务沉稳</span>
-                      <span v-if="preferenceForm.default_ppt_template === 'lessonforge_swiss_blue'" class="checked-badge-pill">
+                      <span class="slide-name">{{ item.name }}</span>
+                      <span v-if="preferenceForm.default_ppt_template === item.id" class="checked-badge-pill">
                         <el-icon><Check /></el-icon> 当前选中
                       </span>
                     </div>
-                    <p class="slide-desc">经典蓝白商务风，适合理工科、严谨教学及学术报告 presentation。</p>
-                  </div>
-                </div>
-
-                <!-- 模板 2: Nordic Clean -->
-                <div
-                  class="visual-tpl-card-compact"
-                  :class="{ selected: preferenceForm.default_ppt_template === 'lessonforge_nordic_clean' }"
-                  @click="preferenceForm.default_ppt_template = 'lessonforge_nordic_clean'"
-                >
-                  <div class="slide-thumb bg-nordic-clean">
-                    <div class="slide-mockup">
-                      <div class="mockup-header-bar"></div>
-                      <div class="mockup-lines">
-                        <div class="mockup-line w-80"></div>
-                        <div class="mockup-line w-50"></div>
-                      </div>
-                      <div class="mockup-footer-dot"></div>
-                    </div>
-                  </div>
-
-                  <div class="slide-info-wrap">
-                    <div class="slide-info-top">
-                      <span class="slide-name">Nordic Clean 极简北欧</span>
-                      <span v-if="preferenceForm.default_ppt_template === 'lessonforge_nordic_clean'" class="checked-badge-pill">
-                        <el-icon><Check /></el-icon> 当前选中
-                      </span>
-                    </div>
-                    <p class="slide-desc">薄荷绿与文本大留白，适合人文历史、语言文学与通识教育。</p>
-                  </div>
-                </div>
-
-                <!-- 模板 3: Modern Academic -->
-                <div
-                  class="visual-tpl-card-compact"
-                  :class="{ selected: preferenceForm.default_ppt_template === 'lessonforge_modern_academic' }"
-                  @click="preferenceForm.default_ppt_template = 'lessonforge_modern_academic'"
-                >
-                  <div class="slide-thumb bg-modern-academic">
-                    <div class="slide-mockup">
-                      <div class="mockup-header-bar"></div>
-                      <div class="mockup-lines">
-                        <div class="mockup-line w-80"></div>
-                        <div class="mockup-line w-50"></div>
-                      </div>
-                      <div class="mockup-footer-dot"></div>
-                    </div>
-                  </div>
-
-                  <div class="slide-info-wrap">
-                    <div class="slide-info-top">
-                      <span class="slide-name">Modern Academic 现代学术</span>
-                      <span v-if="preferenceForm.default_ppt_template === 'lessonforge_modern_academic'" class="checked-badge-pill">
-                        <el-icon><Check /></el-icon> 当前选中
-                      </span>
-                    </div>
-                    <p class="slide-desc">优雅紫罗兰与清晰逻辑层级，适合中小学示范课与公开课。</p>
+                    <p class="slide-desc">{{ item.description }}适用于{{ item.recommended_for.join('、') }}。</p>
                   </div>
                 </div>
               </div>
@@ -602,13 +572,32 @@
 
         <div class="dialog-form-row capability-switch-row">
           <el-form-item label="模型能力" class="form-col">
-            <div class="pt-1"><el-switch v-model="configForm.supports_multimodal" active-text="支持多模态" inactive-text="纯文本模型" /></div>
+            <el-checkbox-group v-model="configForm.capabilities" class="capability-checks">
+              <el-checkbox value="text_generation">文本生成</el-checkbox>
+              <el-checkbox value="structured_output">结构化输出</el-checkbox>
+              <el-checkbox value="vision_review">视觉复核</el-checkbox>
+              <el-checkbox value="image_generation">图片生成</el-checkbox>
+            </el-checkbox-group>
           </el-form-item>
 
           <el-form-item label="激活状态" class="form-col">
             <div class="pt-1"><el-switch v-model="configForm.is_active" active-text="设为当前激活" /></div>
           </el-form-item>
         </div>
+
+        <el-form-item v-if="configForm.capabilities.includes('image_generation') || configForm.capabilities.includes('vision_review')" label="图片 / 视觉接口模式">
+          <el-select v-model="configForm.api_mode" class="w-full">
+            <el-option label="OpenAI Images / Vision" value="openai_images" />
+            <el-option label="Google Gemini Image" value="google_gemini_image" />
+            <el-option label="Google Gemini Vision" value="google_vision" />
+            <el-option label="Anthropic Vision" value="anthropic_vision" />
+            <el-option label="自定义图片 HTTP" value="custom_image_http" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="configForm.api_mode === 'custom_image_http'" label="自定义接口映射（JSON）">
+          <el-input v-model="configForm.adapter_config_json_text" type="textarea" :rows="5" placeholder='{"endpoint_path":"/images/generations","prompt_field":"prompt","response_base64_path":"data.0.b64_json"}' />
+          <div class="url-hint-row">只支持字段映射，不执行脚本；远程图片 URL 必须为 HTTPS 且不能指向内网。</div>
+        </el-form-item>
 
         <div v-if="testResult" class="test-result-banner" :class="testResult.success ? 'bg-success' : 'bg-danger'">
           <div class="banner-content">
@@ -660,6 +649,8 @@ import {
   CircleCloseFilled,
 } from '@element-plus/icons-vue';
 import { settingsApi } from '../api/settings';
+import { pptTemplatesApi } from '../api/pptTemplates';
+import type { PPTTemplate } from '../types';
 import type { ModelConfigItem, UserPreferencesPayload } from '../types/settings';
 import { useModelConfigStore } from '../stores/modelConfigs';
 
@@ -676,6 +667,7 @@ const activeTab = ref<'models' | 'preferences' | 'protocols'>('models');
 const modelConfigStore = useModelConfigStore();
 const modelConfigs = ref<ModelConfigItem[]>([]);
 const activeConfigId = ref<string | null>(null);
+const pptTemplates = ref<PPTTemplate[]>([]);
 
 const preferenceForm = reactive<UserPreferencesPayload>({
   default_language: 'zh-CN',
@@ -714,6 +706,9 @@ const configForm = reactive({
   timeout_seconds: 90,
   context_window_tokens: 1_000_000,
   supports_multimodal: false,
+  capabilities: ['text_generation', 'structured_output'] as Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>,
+  api_mode: 'text_chat',
+  adapter_config_json_text: '{}',
   is_active: true,
 });
 
@@ -759,6 +754,9 @@ function cleanBaseUrl() {
 function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude') {
   configForm.context_window_tokens = 1_000_000;
   configForm.supports_multimodal = false;
+  configForm.capabilities = ['text_generation', 'structured_output'];
+  configForm.api_mode = 'text_chat';
+  configForm.adapter_config_json_text = '{}';
   if (presetType === 'deepseek') {
     configForm.name = 'DeepSeek V3 官方';
     configForm.provider = 'openai_compatible';
@@ -786,6 +784,19 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude') {
   }
 }
 
+function getGradeLabel(level: string) {
+  if (level === 'primary') return '小学';
+  if (level === 'junior_high') return '初中';
+  if (level === 'senior_high') return '高中';
+  if (level === 'higher_ed') return '大学/职业教育';
+  return '未设置 (生成时指定)';
+}
+
+function getTemplateName(id: string) {
+  const found = pptTemplates.value.find(t => t.id === id);
+  return found ? found.name : '瑞士蓝·清晰学术';
+}
+
 function handleProviderChange(val: string) {
   if (val === 'openai_compatible' && !configForm.base_url) {
     configForm.base_url = 'https://api.openai.com/v1';
@@ -803,7 +814,8 @@ async function loadSettings() {
   loading.value = true;
   fetchError.value = '';
   try {
-    const res = await settingsApi.getSettings();
+    const [res, catalog] = await Promise.all([settingsApi.getSettings(), pptTemplatesApi.getCatalog()]);
+    pptTemplates.value = catalog.templates;
     modelConfigs.value = res.configs || [];
     modelConfigStore.setConfigs(modelConfigs.value);
     activeConfigId.value = res.active_config_id || null;
@@ -859,6 +871,9 @@ function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'cla
     configForm.timeout_seconds = 90;
     configForm.context_window_tokens = 1_000_000;
     configForm.supports_multimodal = false;
+    configForm.capabilities = ['text_generation', 'structured_output'];
+    configForm.api_mode = 'text_chat';
+    configForm.adapter_config_json_text = '{}';
   }
   configForm.is_active = modelConfigs.value.length === 0;
   dialogVisible.value = true;
@@ -876,6 +891,9 @@ function handleEditConfig(config: ModelConfigItem) {
   configForm.timeout_seconds = config.timeout_seconds;
   configForm.context_window_tokens = config.context_window_tokens;
   configForm.supports_multimodal = config.supports_multimodal;
+  configForm.capabilities = [...(config.capabilities || ['text_generation', 'structured_output'])];
+  configForm.api_mode = config.api_mode || 'text_chat';
+  configForm.adapter_config_json_text = JSON.stringify(config.adapter_config || {}, null, 2);
   configForm.is_active = config.is_active;
   dialogVisible.value = true;
 }
@@ -963,6 +981,13 @@ async function handleSubmitConfig() {
       formattedUrl = 'https://' + formattedUrl;
     }
 
+    let adapterConfig: Record<string, unknown> = {};
+    try {
+      adapterConfig = JSON.parse(configForm.adapter_config_json_text || '{}');
+    } catch {
+      ElMessage.error('自定义接口映射必须是有效 JSON');
+      return;
+    }
     const payload = {
       name: configForm.name.trim() || undefined,
       provider: configForm.provider,
@@ -971,7 +996,10 @@ async function handleSubmitConfig() {
       api_key: configForm.api_key.trim() || undefined,
       timeout_seconds: configForm.timeout_seconds,
       context_window_tokens: configForm.context_window_tokens,
-      supports_multimodal: configForm.supports_multimodal,
+      supports_multimodal: configForm.capabilities.includes('vision_review'),
+      capabilities: configForm.capabilities,
+      api_mode: configForm.api_mode,
+      adapter_config: adapterConfig,
       is_active: configForm.is_active,
     };
 
@@ -1009,14 +1037,15 @@ onMounted(() => {
 </script>
 
 <style scoped>
-/* 一页式 Dashboard 容器 */
+/* 严格一页式 Single Page Viewport 容器 */
 .single-page-layout {
   height: 100%;
+  max-height: 100%;
   width: 100%;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  padding: 16px 28px;
+  padding: 12px 24px 16px;
   max-width: var(--content-max-width);
   margin: 0 auto;
   overflow: hidden;
@@ -1081,8 +1110,8 @@ onMounted(() => {
 .metrics-bar {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 14px;
   flex-shrink: 0;
 }
 
@@ -1093,37 +1122,42 @@ onMounted(() => {
 }
 
 .metric-chip {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
-  padding: 8px 12px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 10px 14px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  border-left-width: 3.5px;
-  transition: transform var(--motion-fast);
-  box-shadow: var(--shadow-xs);
+  gap: 10px;
+  border-left-width: 4px;
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
 }
 
-.metric-chip.border-indigo { border-left-color: var(--color-primary); }
-.metric-chip.border-blue { border-left-color: var(--accent-blue); }
-.metric-chip.border-emerald { border-left-color: var(--accent-mint); }
-.metric-chip.border-violet { border-left-color: var(--accent-violet); }
+.metric-chip:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+}
+
+.metric-chip.border-indigo { border-left-color: #4f46e5; }
+.metric-chip.border-blue { border-left-color: #0284c7; }
+.metric-chip.border-emerald { border-left-color: #059669; }
+.metric-chip.border-violet { border-left-color: #7c3aed; }
 
 .metric-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-xs);
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
   display: grid;
   place-items: center;
-  font-size: 15px;
+  font-size: 16px;
   flex-shrink: 0;
 }
 
-.metric-icon.bg-indigo { background: var(--primary-50); color: var(--color-primary); }
-.metric-icon.bg-blue { background: var(--accent-blue-soft); color: var(--accent-blue); }
-.metric-icon.bg-emerald { background: var(--accent-mint-soft); color: var(--accent-mint); }
-.metric-icon.bg-violet { background: var(--accent-violet-soft); color: var(--accent-violet); }
+.metric-icon.bg-indigo { background: #eef2ff; color: #4f46e5; }
+.metric-icon.bg-blue { background: #f0f9ff; color: #0284c7; }
+.metric-icon.bg-emerald { background: #ecfdf5; color: #059669; }
+.metric-icon.bg-violet { background: #f5f3ff; color: #7c3aed; }
 
 .metric-text {
   flex: 1;
@@ -1131,136 +1165,155 @@ onMounted(() => {
 }
 
 .chip-label {
-  font-size: 10px;
-  color: var(--text-muted);
+  font-size: 11px;
+  color: #64748b;
   font-weight: 700;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
 }
 
 .chip-title {
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
 }
 
 .chip-unit {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: #64748b;
 }
 
 .status-badge-wrap {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 10.5px;
+  gap: 5px;
+  font-size: 11.5px;
   font-weight: 700;
-  color: var(--text-muted);
+  color: #047857;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .status-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--border-strong);
+  background: #cbd5e1;
 }
 
 .status-dot.green {
-  background: var(--accent-mint);
-  box-shadow: 0 0 6px var(--accent-mint);
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
 }
 
 .chip-tag {
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 3px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
+
+.chip-tag.tag-blue { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
+.chip-tag.tag-emerald { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+.chip-tag.tag-purple { background: #f5f3ff; color: #7c3aed; border: 1px solid #ddd6fe; }
 
 /* 3. Tab 控制条 */
 .tab-control-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
   flex-shrink: 0;
-  gap: 10px;
+  gap: 12px;
 }
 
 .segmented-tabs {
   display: inline-flex;
-  padding: 3px;
-  background: rgba(241, 245, 249, 0.85);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
-  gap: 3px;
+  padding: 4px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  gap: 4px;
 }
 
 .tab-btn {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
+  gap: 6px;
+  padding: 6px 16px;
   border: 0;
   background: transparent;
-  border-radius: var(--radius-sm);
-  font-size: 12.5px;
+  border-radius: 999px;
+  font-size: 13.5px;
   font-weight: 700;
-  color: var(--text-secondary);
+  color: #475569;
   cursor: pointer;
-  transition: all var(--motion-fast);
+  transition: all 180ms ease;
 }
 
 .tab-btn:hover {
-  color: var(--text-primary);
+  color: #0f172a;
 }
 
 .tab-btn.active {
-  background: var(--bg-surface);
-  color: var(--color-primary);
-  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  background: #ffffff;
+  color: #4f46e5;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
 
 .tab-badge {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 800;
-  background: var(--primary-100);
-  color: var(--color-primary);
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
+  background: #eef2ff;
+  color: #4f46e5;
+  padding: 2px 8px;
+  border-radius: 999px;
 }
 
 .quick-presets-strip {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
 .strip-label {
-  font-size: 11.5px;
-  color: var(--text-muted);
+  font-size: 12.5px;
+  color: #64748b;
   font-weight: 700;
 }
 
 .mini-preset-btn {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 9px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  font-size: 11.5px;
+  gap: 5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  font-size: 12px;
   font-weight: 700;
-  color: var(--text-secondary);
+  color: #334155;
   cursor: pointer;
-  transition: all var(--motion-fast);
+  transition: all 180ms ease;
 }
 
 .mini-preset-btn:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+  border-color: #a5b4fc;
+  background: #f8fafc;
+  color: #4f46e5;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.08);
 }
 
 .btn-dot {
@@ -1279,10 +1332,16 @@ onMounted(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .tab-pane {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Tab 1: 空状态与卡片 */
@@ -1380,47 +1439,146 @@ onMounted(() => {
 }
 
 .config-card {
-  padding: 14px;
-  border-radius: var(--radius-card);
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
+  padding: 18px 20px;
+  border-radius: 16px;
+  border: 1.5px solid #e2e8f0;
+  background: #ffffff;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.03);
+  transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.config-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
 .config-card.active {
-  border-color: var(--color-primary);
-  background: linear-gradient(180deg, var(--color-primary-soft) 0%, #ffffff 100%);
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 1px #4f46e5, 0 10px 28px rgba(79, 70, 229, 0.12);
+  background: linear-gradient(180deg, #f5f3ff 0%, #ffffff 100%);
 }
 
 .config-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
 }
 
-.badge-group { display: flex; align-items: center; gap: 6px; }
-.provider-badge { font-size: 11px; font-weight: 800; padding: 2px 6px; border-radius: var(--radius-xs); }
-.active-tag { font-size: 11px; font-weight: 800; padding: 1px 7px; border-radius: var(--radius-pill); background: #dcfce7; color: #15803d; display: flex; align-items: center; gap: 4px; }
-.pulse-dot { width: 5px; height: 5px; border-radius: 50%; background: #16a34a; }
+.badge-group { display: flex; align-items: center; gap: 8px; }
+.provider-badge {
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+.active-tag {
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.pulse-dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; box-shadow: 0 0 6px #10b981; }
 
-.config-title { font-size: 14.5px; font-weight: 800; color: var(--text-primary); margin: 0 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.url-display-box { display: flex; align-items: center; gap: 4px; font-size: 11px; font-family: monospace; color: var(--text-muted); background: var(--surface-secondary); padding: 4px 7px; border-radius: var(--radius-sm); margin-bottom: 8px; }
-.url-icon { flex-shrink: 0; color: var(--text-muted); }
-.url-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
-.copy-btn { background: transparent; border: 0; color: var(--text-muted); cursor: pointer; padding: 1px; }
+.config-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: -0.01em;
+}
 
-.config-details-compact { background: var(--surface-secondary); border-radius: var(--radius-sm); padding: 7px 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px 8px; font-size: 11px; }
-.detail-item { display: flex; align-items: center; gap: 3px; min-width: 0; }
-.detail-item .lbl { color: var(--text-muted); }
-.detail-item .val { font-weight: 700; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.detail-item .val.key-ok { color: var(--accent-mint); }
-.detail-item .val.key-no { color: var(--accent-amber); }
+.url-display-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  padding: 6px 10px;
+  border-radius: 10px;
+  margin-bottom: 12px;
+}
+.url-icon { flex-shrink: 0; color: #64748b; font-size: 13px; }
+.url-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-weight: 500; }
+.copy-btn { background: transparent; border: 0; color: #64748b; cursor: pointer; padding: 2px; border-radius: 4px; display: grid; place-items: center; transition: color 150ms ease; }
+.copy-btn:hover { color: #4f46e5; }
 
-.config-card-footer { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-light); display: flex; gap: 6px; }
-.card-btn { flex: 1; }
+.config-details-compact {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 12px;
+  font-size: 12.5px;
+  margin-bottom: 14px;
+}
+.detail-item { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.detail-item .lbl { color: #64748b; font-weight: 600; flex-shrink: 0; }
+.detail-item .val { font-weight: 700; color: #0f172a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-item .val.key-ok { color: #047857; font-weight: 700; }
+.detail-item .val.key-no { color: #dc2626; font-weight: 700; }
+.detail-item .text-violet { color: #7c3aed; font-weight: 800; }
+
+.config-card-footer {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed #cbd5e1;
+  display: flex;
+  gap: 10px;
+}
+
+.config-card-footer :deep(.el-button) {
+  border-radius: 999px !important;
+  font-weight: 700 !important;
+  font-size: 12.5px !important;
+  flex: 1;
+}
+
+.config-card-footer :deep(.el-button--success.is-plain) {
+  background: #ecfdf5 !important;
+  color: #047857 !important;
+  border-color: #a7f3d0 !important;
+}
+
+.config-card-footer :deep(.el-button--success.is-plain:hover) {
+  background: #059669 !important;
+  color: #ffffff !important;
+  border-color: #059669 !important;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.25) !important;
+}
+
+.config-card-footer :deep(.el-button--primary) {
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  border: 0 !important;
+  color: #ffffff !important;
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.25) !important;
+}
+
+.config-card-footer :deep(.el-button--primary:hover) {
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35) !important;
+}
 
 /* Tab 2: 偏好 Grid (加大内部模板 bar 尺寸，饱满无长空白) */
 .preferences-grid {
@@ -1428,25 +1586,30 @@ onMounted(() => {
   grid-template-columns: repeat(2, 1fr);
   gap: 16px;
   align-items: stretch;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 @media (max-width: 860px) {
   .preferences-grid {
     grid-template-columns: 1fr;
+    overflow-y: auto;
   }
 }
 
 .pref-card {
-  padding: 16px 20px;
+  padding: 14px 18px;
   display: flex;
   flex-direction: column;
-  justify-content: flex-start;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 10px;
   box-shadow: var(--shadow-xs);
   border-radius: var(--radius-card);
   background: var(--bg-surface);
   height: 100%;
   box-sizing: border-box;
+  overflow: hidden;
 }
 
 .card-head {
@@ -1454,8 +1617,9 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
 }
 
 .pane-card-title {
@@ -1473,34 +1637,138 @@ onMounted(() => {
 .pref-form {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+}
+
+.pref-form :deep(.el-form-item) {
+  margin-bottom: 6px !important;
+}
+
+.pref-form :deep(.el-form-item__label) {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #0f172a !important;
+  margin-bottom: 4px !important;
+  line-height: 1.2 !important;
+}
+
+.pref-form :deep(.el-input__wrapper),
+.pref-form :deep(.el-select__wrapper) {
+  border-radius: 999px !important;
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
+  box-shadow: 0 0 0 1.5px #cbd5e1 inset, 0 2px 6px rgba(15, 23, 42, 0.03) !important;
+  padding: 4px 14px !important;
+  transition: all 200ms ease !important;
+  height: 38px !important;
+}
+
+.pref-form :deep(.el-input__wrapper:hover),
+.pref-form :deep(.el-select__wrapper:hover),
+.pref-form :deep(.el-input__wrapper.is-focus),
+.pref-form :deep(.el-select__wrapper.is-focused) {
+  box-shadow: 0 0 0 2px #4f46e5 inset, 0 4px 16px rgba(79, 70, 229, 0.15) !important;
+  background: #ffffff !important;
+}
+
+.pref-form :deep(.el-input__inner),
+.pref-form :deep(.el-select__placeholder),
+.pref-form :deep(.el-select__selected-item) {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #0f172a !important;
 }
 
 .form-btn-row {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
-/* 纵向模板列表：充实加大，消除间距空白 */
+/* 左侧卡片实时偏好规约面板 */
+.preference-active-summary {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.summary-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #4338ca;
+}
+
+.summary-chips-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.summary-chip-item {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.summary-chip-item .chip-k {
+  font-size: 10.5px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.summary-chip-item .chip-v {
+  font-size: 12px;
+  color: #0f172a;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-chip-item .chip-v.highlight {
+  color: #4f46e5;
+}
+
+.summary-footer-tip {
+  margin: 0;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+/* 纵向模板列表：内嵌可滚动，充满卡片高度，主视图绝对无全屏滚动 */
 .template-vertical-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .visual-tpl-card-compact {
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
+  border: 1.5px solid #e2e8f0;
+  border-radius: 12px;
   overflow: hidden;
   cursor: pointer;
   transition: all var(--motion-normal) var(--ease-out-smooth);
-  background: var(--bg-surface);
+  background: #ffffff;
   display: flex;
   align-items: center;
-  padding: 14px 16px; /* 加大 Padding，让小 bar 变大变饱满 */
-  gap: 14px;
-  flex: 1; /* 均匀充满卡片高度 */
-  min-height: 68px;
+  padding: 10px 14px;
+  gap: 12px;
+  flex-shrink: 0;
+  min-height: 56px;
 }
 
 .visual-tpl-card-compact:hover {

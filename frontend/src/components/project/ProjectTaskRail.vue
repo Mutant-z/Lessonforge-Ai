@@ -56,104 +56,115 @@ function openTask(type: string) {
 .pipeline-track {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   background: #f1f5f9;
-  padding: 3px 4px;
-  border-radius: var(--radius-pill, 999px);
+  padding: 4px 6px;
+  border-radius: 999px;
   border: 1px solid #e2e8f0;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .pipeline-step-item {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
 }
 
 .pipeline-btn {
-  height: 32px;
+  height: 30px;
   padding: 0 10px;
   display: flex;
   align-items: center;
   gap: 6px;
   position: relative;
-  border: 0;
-  border-radius: var(--radius-pill, 999px);
+  border: 1px solid transparent;
+  border-radius: 999px;
   background: transparent;
   color: #475569;
   text-align: left;
   cursor: pointer;
-  transition: all 180ms ease;
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
   white-space: nowrap;
   font-size: 12px;
 }
 
 .pipeline-btn:hover {
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--text-primary, #0f172a);
+  background: rgba(255, 255, 255, 0.85);
+  color: #0f172a;
 }
 
 .pipeline-btn.active {
   background: #ffffff;
-  color: var(--primary-700, #4338ca);
+  color: #4338ca;
   font-weight: 800;
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.16), 0 0 0 1px rgba(79, 70, 229, 0.12);
+  border-color: #c7d2fe;
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.14), 0 0 0 1px rgba(79, 70, 229, 0.08);
 }
 
 .step-num {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  color: var(--primary-600, #4f46e5);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #4f46e5;
   background: #e0e7ff;
-  padding: 1px 5px;
+  padding: 1.5px 6px;
   border-radius: 999px;
   flex-shrink: 0;
 }
 
 .pipeline-btn.active .step-num {
   color: #ffffff;
-  background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--accent-violet, #7c3aed) 100%);
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.3);
 }
 
 .step-name {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .step-badge {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  font-size: 10px;
-  font-weight: 600;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
   color: #64748b;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: 999px;
+  transition: all 180ms ease;
 }
 
 .step-badge.approved:not(.active) {
-  color: #059669;
+  color: #047857;
   background: #ecfdf5;
+  border: 1px solid #a7f3d0;
 }
 
 .step-badge.review:not(.active) {
   color: #2563eb;
   background: #eff6ff;
+  border: 1px solid #bfdbfe;
 }
 
 .step-badge.stale:not(.active) {
   color: #d97706;
   background: #fffbeb;
+  border: 1px solid #fde68a;
 }
 
 .step-badge.running:not(.active) {
   color: #4f46e5;
   background: #eef2ff;
+  border: 1px solid #c7d2fe;
 }
 
 .step-badge.failed:not(.active) {
   color: #dc2626;
   background: #fef2f2;
+  border: 1px solid #fecdd3;
 }
 
 .step-badge.active {
@@ -163,17 +174,17 @@ function openTask(type: string) {
 
 .step-chevron {
   color: #cbd5e1;
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 800;
   user-select: none;
 }
 
 .step-mini-bar {
   position: absolute;
-  left: 8px;
-  right: 8px;
-  bottom: 1px;
-  height: 2px;
+  left: 10px;
+  right: 10px;
+  bottom: 2px;
+  height: 2.5px;
   background: #dbe4ff;
   border-radius: 999px;
   overflow: hidden;
@@ -182,7 +193,7 @@ function openTask(type: string) {
 .step-mini-bar i {
   display: block;
   height: 100%;
-  background: var(--primary-600, #4f46e5);
+  background: linear-gradient(90deg, #4f46e5 0%, #7c3aed 100%);
   transition: width 240ms ease;
 }
 

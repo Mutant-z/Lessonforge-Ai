@@ -3,7 +3,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.generators import generate_structured, make_blueprint, make_exercises, make_lesson_plan, make_ppt, make_task_sheet, make_verbatim, make_video_script
 from app.models.entities import CourseProject
-from app.schemas.artifact import PPTContent, VideoScriptContent
+from app.schemas.artifact import LessonPlanContent, PPTContent, VideoScriptContent
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.workflows.state import CourseGraphState
 
@@ -35,9 +35,11 @@ async def exercise_node(state: CourseGraphState):
 
 
 async def video_node(state: CourseGraphState):
-    bp, ppt = CourseBlueprintSchema.model_validate(state["blueprint"]), PPTContent.model_validate(state["ppt"])
-    mock = make_video_script(bp, ppt)
-    value = await generate_structured("Video Script Agent", {"course_id": state["course_id"], "blueprint": state["blueprint"], "ppt": state["ppt"]}, VideoScriptContent, mock)
+    bp = CourseBlueprintSchema.model_validate(state["blueprint"])
+    lesson_plan = LessonPlanContent.model_validate(state["lesson_plan"])
+    ppt = PPTContent.model_validate(state["ppt"])
+    mock = make_video_script(bp, lesson_plan, ppt)
+    value = await generate_structured("Video Script Agent", {"course_id": state["course_id"], "blueprint": state["blueprint"], "lesson_plan": state["lesson_plan"], "ppt": state["ppt"]}, VideoScriptContent, mock)
     return {"video_script": value.model_dump(), "completed_nodes": ["video_script_agent"]}
 
 
@@ -132,7 +134,7 @@ def build_course_graph():
     graph.add_edge("supervisor_agent", "ppt_agent")
     graph.add_edge("supervisor_agent", "task_sheet_agent")
     graph.add_edge("supervisor_agent", "exercise_agent")
-    graph.add_edge("ppt_agent", "video_script_agent")
+    graph.add_edge(["lesson_plan_agent", "ppt_agent"], "video_script_agent")
     graph.add_edge("video_script_agent", "verbatim_agent")
     graph.add_edge(["lesson_plan_agent", "task_sheet_agent", "exercise_agent", "verbatim_agent"], "quality_assurance_agent")
     graph.add_conditional_edges("quality_assurance_agent", route_quality, {"rework": "targeted_rework_router", "human": "final_teacher_review", "pass": "final_teacher_review"})

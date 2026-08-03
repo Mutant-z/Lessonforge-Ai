@@ -30,17 +30,17 @@ async def test_full_api_generation_and_export(client, auth_headers):
     assert blueprint.status_code == 201, blueprint.text
     approved = await client.post(f"/api/v1/blueprints/{blueprint.json()['id']}/approve", headers=auth_headers)
     assert approved.status_code == 200, approved.text
-    started = await client.post(f"/api/v1/courses/{course['id']}/generations", headers=auth_headers)
-    assert started.status_code == 202, started.text
-    run_id = started.json()["id"]
-    stream_token = await client.post(f"/api/v1/generations/{run_id}/stream-token", headers=auth_headers)
-    assert stream_token.status_code == 200 and stream_token.json()["token"]
-    for _ in range(100):
-        run = (await client.get(f"/api/v1/generations/{run_id}", headers=auth_headers)).json()
-        if run["status"] in {"waiting_human", "failed"}:
+    project_response = await client.get(f"/api/v1/courses/{course['id']}/project", headers=auth_headers)
+    assert project_response.status_code == 200, project_response.text
+    from app.services.course_task_service import schedule_ready_tasks
+    await schedule_ready_tasks(course["id"])
+    for _ in range(200):
+        project = (await client.get(f"/api/v1/courses/{course['id']}/project", headers=auth_headers)).json()
+        if all(task["status"] in {"review", "approved", "stale", "failed"} for task in project["tasks"]):
             break
         await asyncio.sleep(0.02)
-    assert run["status"] == "waiting_human", run
+    assert all(task["status"] in {"review", "approved", "stale"} for task in project["tasks"]), project
+    assert project["quality"]["score"] is not None, project
     artifacts = await client.get(f"/api/v1/courses/{course['id']}/artifacts", headers=auth_headers)
     assert {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report", "citation_report"} <= {x["artifact_type"] for x in artifacts.json()}
     assert next(x for x in artifacts.json() if x["artifact_type"] == "ppt")["model_name"] == "mock-course"

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, owned_course
 from app.core.database import get_db
-from app.models.entities import AgentChatSession, AgentMessage, Artifact, ArtifactLock, CourseTask, CourseTaskAgentProfile, User
+from app.models.entities import AgentChatSession, AgentMessage, Artifact, ArtifactAsset, ArtifactLock, CourseBlueprint, CourseTask, CourseTaskAgentProfile, User
 from app.providers.llm.mock import MockProvider
 from app.schemas.artifact import (
     AgentArtifactRevision,
@@ -20,6 +20,7 @@ from app.schemas.artifact import (
     LessonPlanContent,
     LockRequest,
     PPTContent,
+    PPTTemplateApplyRequest,
     QualityReportContent,
     RegenerateRequest,
     TaskSheetContent,
@@ -29,6 +30,10 @@ from app.schemas.artifact import (
 from app.services.model_config_service import owned_model_config, resolve_provider, resolved_model_name
 from app.services.course_task_service import register_artifact_version
 from app.services.agent_prompt_service import build_runtime_prompts
+from app.agents.generators import make_exercises, make_task_sheet, to_markdown
+from app.schemas.blueprint import CourseBlueprintSchema
+from app.services.quality_service import validate_exercise, validate_video_script
+from app.services.ppt_template_service import get_ppt_template, resolve_ppt_template
 
 router = APIRouter(tags=["课程资源"])
 MODULES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report", "citation_report"}
@@ -45,7 +50,7 @@ MODULE_SCHEMAS = {
 
 
 def serialize(item: Artifact) -> dict:
-    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "agent_profile_id", "created_at", "approved_at")}
+    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "source_versions_json", "agent_profile_id", "created_at", "approved_at")}
 
 
 def _locked_value(content: dict, path: str):
@@ -121,14 +126,156 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
     if not source:
         raise HTTPException(404, "资源不存在")
     await owned_course(source.course_id, user, db)
+    content_json = payload.content_json
+    content_markdown = payload.content_markdown
+    if source.artifact_type == "task_sheet":
+        try:
+            validated = TaskSheetContent.model_validate(payload.content_json)
+        except ValidationError as exc:
+            raise HTTPException(422, detail=exc.errors()) from exc
+        content_json = validated.model_dump()
+        content_markdown = to_markdown("task_sheet", validated)
+    elif source.artifact_type == "exercise":
+        try:
+            validated = ExerciseContent.model_validate(payload.content_json)
+        except ValidationError as exc:
+            raise HTTPException(422, detail=exc.errors()) from exc
+        blueprint = await db.scalar(select(CourseBlueprint).where(
+            CourseBlueprint.course_id == source.course_id,
+            CourseBlueprint.version == source.blueprint_version,
+        ))
+        if not blueprint:
+            raise HTTPException(409, "课后练习对应的课程蓝图不存在")
+        issues = validate_exercise(CourseBlueprintSchema.model_validate(blueprint.content_json), validated.model_dump())
+        blocking = [item for item in issues if item["severity"] in {"critical", "major"}]
+        if blocking:
+            raise HTTPException(422, detail=blocking)
+        asset_ids = {
+            stimulus.visual.asset_id
+            for section in validated.sections
+            for block in section.blocks
+            if getattr(block, "kind", "") == "question_group"
+            for stimulus in block.stimuli
+            if stimulus.visual and stimulus.visual.asset_id
+        }
+        for asset_id in asset_ids:
+            asset = await db.scalar(select(ArtifactAsset).where(
+                ArtifactAsset.id == asset_id,
+                ArtifactAsset.course_id == source.course_id,
+                ArtifactAsset.owner_id == user.id,
+                ArtifactAsset.status == "approved",
+            ))
+            if not asset:
+                raise HTTPException(422, f"配图资源 {asset_id} 不属于当前课程或尚未通过复核")
+        content_json = validated.model_dump()
+        content_markdown = to_markdown("exercise", validated)
+    elif source.artifact_type == "video_script":
+        try:
+            validated = VideoScriptContent.model_validate(payload.content_json)
+        except ValidationError as exc:
+            raise HTTPException(422, detail=exc.errors()) from exc
+        blueprint = await db.scalar(select(CourseBlueprint).where(
+            CourseBlueprint.course_id == source.course_id,
+            CourseBlueprint.version == source.blueprint_version,
+        ))
+        if not blueprint:
+            raise HTTPException(409, "视频脚本对应的课程蓝图不存在")
+        source_versions = source.source_versions_json or {}
+        lesson_query = select(Artifact).where(
+            Artifact.course_id == source.course_id, Artifact.artifact_type == "lesson_plan",
+        )
+        ppt_query = select(Artifact).where(
+            Artifact.course_id == source.course_id, Artifact.artifact_type == "ppt",
+        )
+        if source_versions.get("lesson_plan"):
+            lesson_query = lesson_query.where(Artifact.version == source_versions["lesson_plan"])
+        else:
+            lesson_query = lesson_query.order_by(Artifact.version.desc())
+        if source_versions.get("ppt"):
+            ppt_query = ppt_query.where(Artifact.version == source_versions["ppt"])
+        else:
+            ppt_query = ppt_query.order_by(Artifact.version.desc())
+        lesson_artifact = await db.scalar(lesson_query)
+        ppt_artifact = await db.scalar(ppt_query)
+        if not lesson_artifact or not ppt_artifact:
+            raise HTTPException(409, "视频脚本对应的教学设计或 PPT 版本不存在")
+        issues = validate_video_script(
+            CourseBlueprintSchema.model_validate(blueprint.content_json), validated.model_dump(),
+            lesson_artifact.content_json, ppt_artifact.content_json,
+        )
+        blocking = [item for item in issues if item["severity"] in {"critical", "major"}]
+        if blocking:
+            raise HTTPException(422, detail=blocking)
+        content_json = validated.model_dump()
+        content_markdown = to_markdown("video_script", validated)
     version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == source.course_id, Artifact.artifact_type == source.artifact_type)) or 0) + 1
-    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=payload.content_json, content_markdown=payload.content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary, agent_profile_id=source.agent_profile_id)
+    item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=content_json, content_markdown=content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary, source_versions_json=source.source_versions_json, agent_profile_id=source.agent_profile_id)
     db.add(item)
     await db.flush()
     await register_artifact_version(db, item)
     await db.commit()
     await db.refresh(item)
     return serialize(item)
+
+
+@router.post("/artifacts/{artifact_id}/apply-template")
+async def apply_ppt_template(
+    artifact_id: str,
+    payload: PPTTemplateApplyRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    source = await db.get(Artifact, artifact_id)
+    if not source:
+        raise HTTPException(404, "资源不存在")
+    await owned_course(source.course_id, user, db)
+    if source.artifact_type != "ppt":
+        raise HTTPException(422, "只有 PPT 课件可以切换模板")
+    template = get_ppt_template(payload.template_id)
+    if not template:
+        raise HTTPException(422, "PPT 模板不存在或已停用")
+    if source.version != payload.expected_version:
+        raise HTTPException(409, "当前 PPT 版本已变化，请刷新后重试")
+    task = await db.scalar(select(CourseTask).where(
+        CourseTask.course_id == source.course_id,
+        CourseTask.task_type == "ppt",
+    ))
+    if task and task.current_artifact_id != source.id:
+        raise HTTPException(409, "当前 PPT 已有新版本，请刷新后重试")
+    if task and task.status in {"queued", "running"}:
+        raise HTTPException(409, "PPT Agent 正在生成新版本，请完成后再切换模板")
+    if source.is_locked:
+        raise HTTPException(409, "当前 PPT 已锁定，无法切换模板")
+    current_template = resolve_ppt_template((source.content_json or {}).get("theme"))
+    if current_template["id"] == template["id"]:
+        return {"artifact": serialize(source), "changed": False}
+
+    content_json = json.loads(json.dumps(source.content_json or {}, ensure_ascii=False))
+    content_json["theme"] = template["id"]
+    version = (await db.scalar(select(func.max(Artifact.version)).where(
+        Artifact.course_id == source.course_id,
+        Artifact.artifact_type == "ppt",
+    )) or 0) + 1
+    item = Artifact(
+        course_id=source.course_id,
+        artifact_type="ppt",
+        version=version,
+        blueprint_version=source.blueprint_version,
+        content_json=content_json,
+        content_markdown=source.content_markdown,
+        status="draft",
+        model_name=source.model_name,
+        prompt_version=source.prompt_version,
+        change_summary=f"切换 PPT 模板：{template['name']}",
+        source_versions_json=source.source_versions_json,
+        agent_profile_id=source.agent_profile_id,
+    )
+    db.add(item)
+    await db.flush()
+    await register_artifact_version(db, item, invalidate_dependents=False)
+    await db.commit()
+    await db.refresh(item)
+    return {"artifact": serialize(item), "changed": True}
 
 
 @router.post("/artifacts/{artifact_id}/regenerate", status_code=201)
@@ -263,7 +410,17 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
     if module_type in {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"} and (not profile or profile.status != "ready"):
         raise HTTPException(409, "项目专属 Agent 尚未初始化完成")
     if isinstance(provider, MockProvider):
-        content = dict(source.content_json)
+        if module_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
+            blueprint = await db.scalar(select(CourseBlueprint).where(
+                CourseBlueprint.course_id == course_id,
+                CourseBlueprint.version == source.blueprint_version,
+            ))
+            if not blueprint:
+                raise HTTPException(409, "课程蓝图不存在，无法升级旧版产物")
+            bp = CourseBlueprintSchema.model_validate(blueprint.content_json)
+            content = (make_task_sheet(bp) if module_type == "task_sheet" else make_exercises(bp)).model_dump()
+        else:
+            content = dict(source.content_json)
         content["revision_note"] = {"path": payload.path or "all", "instruction": payload.instruction}
         revision = AgentArtifactRevision(
             content_json=content,
@@ -308,6 +465,11 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
         raise HTTPException(502, "模型返回内容不符合当前模块结构，未创建新版本") from exc
     _validate_locked_content(source.content_json, validated_content, locks)
     _validate_report_invariants(module_type, source.content_json, validated_content)
+    rendered_markdown = (
+        to_markdown(module_type, MODULE_SCHEMAS[module_type].model_validate(validated_content))
+        if module_type in {"task_sheet", "exercise"}
+        else revision.content_markdown
+    )
     user_message = AgentMessage(course_id=course_id, module_type=module_type, role="user", content=payload.instruction)
     db.add(user_message)
     artifact = Artifact(
@@ -316,7 +478,7 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
         version=version,
         blueprint_version=source.blueprint_version,
         content_json=validated_content,
-        content_markdown=revision.content_markdown,
+        content_markdown=rendered_markdown,
         model_name=resolved_model_name(provider, config),
         prompt_version=source.prompt_version,
         change_summary=f"Agent 对话修改：{payload.instruction[:80]}",

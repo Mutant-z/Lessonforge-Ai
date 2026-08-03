@@ -24,12 +24,17 @@ def test_mock_initializer_returns_six_distinct_typed_profiles():
         audience="八年级学生", duration_minutes=10, scenario="课堂讲解", language="中文",
         settings_json={"style_requirements": "生动、直观"},
     )
-    bundle = deterministic_bundle(make_blueprint(course), course)
+    bundle = deterministic_bundle(make_blueprint(course), course, source={
+        "confirmed_requirement": {"raw_teacher_intent": "突出浮力来源", "fields": {"duration": 10}},
+        "materials": [{"filename": "教材.pdf", "summary": "液体压强与浮力关系"}],
+    })
     validated = AgentInitializationBundle.model_validate(bundle.model_dump())
     assert {item.task_type for item in validated.profiles} == {
         "lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim",
     }
     assert len({item.mission for item in validated.profiles}) == 6
+    assert all(item.project_requirement_summary for item in validated.profiles)
+    assert all(item.material_summaries == ["教材.pdf：液体压强与浮力关系"] for item in validated.profiles)
 
 
 @pytest.mark.asyncio
@@ -126,6 +131,11 @@ async def test_profiles_gate_generation_are_traceable_and_version_on_context_cha
     assert project["agent_initialization"]["version"] == 1
     assert all(task["agent_profile_status"] == "ready" for task in project["tasks"])
     assert all(task["agent_profile_summary"]["mission"] for task in project["tasks"])
+    video_task = next(task for task in project["tasks"] if task["task_type"] == "video_script")
+    assert video_task["dependency_types"] == ["lesson_plan", "ppt"]
+    assert video_task["current_artifact"]["content_json"]["schema_version"] == "2.0"
+    assert video_task["current_artifact"]["prompt_version"] == "v2"
+    assert video_task["current_artifact"]["source_versions_json"].keys() >= {"lesson_plan", "ppt"}
     artifacts = (await client.get(
         f"/api/v1/courses/{course['id']}/artifacts", headers=auth_headers,
     )).json()

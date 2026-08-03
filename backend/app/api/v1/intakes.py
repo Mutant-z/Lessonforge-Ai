@@ -32,7 +32,7 @@ from app.schemas.intake import (
     IntakeModelUpdate,
     REQUIRED_INTAKE_FIELDS,
 )
-from app.services.generation_service import start_blueprint_run
+from app.services.project_planning_service import start_blueprint_run
 from app.services.course_task_service import ensure_course_tasks, task_payload
 from app.services.intake_service import start_intake_turn
 from app.services.material_service import extract_text, safe_filename, save_upload

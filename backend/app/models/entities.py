@@ -282,6 +282,32 @@ class FileRecord(Base, TimestampMixin):
     checksum: Mapped[str] = mapped_column(String(64))
 
 
+class ArtifactAsset(Base, TimestampMixin):
+    __tablename__ = "artifact_assets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    course_id: Mapped[str] = mapped_column(ForeignKey("course_projects.id", ondelete="CASCADE"), index=True)
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    json_path: Mapped[str] = mapped_column(String(500), default="")
+    asset_type: Mapped[str] = mapped_column(String(40), default="generated_image")
+    relative_path: Mapped[str] = mapped_column(String(500))
+    preview_relative_path: Mapped[str] = mapped_column(String(500), default="")
+    mime_type: Mapped[str] = mapped_column(String(100), default="image/png")
+    width: Mapped[int] = mapped_column(Integer, default=0)
+    height: Mapped[int] = mapped_column(Integer, default=0)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(50), default="")
+    model_name: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    review_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class PromptTemplate(Base, TimestampMixin):
     __tablename__ = "prompt_templates"
     __table_args__ = (UniqueConstraint("agent_type", "version"),)
@@ -306,6 +332,9 @@ class ModelConfig(Base, TimestampMixin):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=90)
     context_window_tokens: Mapped[int] = mapped_column(Integer, default=1_000_000)
     supports_multimodal: Mapped[bool] = mapped_column(Boolean, default=False)
+    capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    api_mode: Mapped[str] = mapped_column(String(50), default="text_chat")
+    adapter_config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     preferences_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
@@ -319,6 +348,12 @@ class AgentChatSession(Base, TimestampMixin):
     )
     module_type: Mapped[str] = mapped_column(String(40), index=True)
     model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    image_model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    vision_model_config_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
     )
 

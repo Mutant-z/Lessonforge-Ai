@@ -333,6 +333,60 @@ def _video_role(page_type: str) -> str:
     }.get(page_type, "过渡")
 
 
+def _pedagogical_action(page_type: str) -> str:
+    return {
+        "cover": "hook", "objectives": "objective_guide", "scenario": "scenario_connect",
+        "concept": "metaphor_explain", "comparison": "metaphor_explain",
+        "process": "step_demonstration", "case": "step_demonstration",
+        "question": "check_in", "exercise": "check_in",
+        "summary": "summary_recap", "homework": "summary_recap",
+    }.get(page_type, "metaphor_explain")
+
+
+def recalculate_scene_timelines(
+    scenes: list[VideoScene],
+    chars_per_minute: int = 240,
+    min_duration_seconds: float = 3.0,
+) -> list[VideoScene]:
+    """按口播字数与停顿时长重算分镜时间轴，使旁白、字幕与停顿精秒对齐。
+
+    每镜所需时长 = 口播时长(字数 / 每秒字数) + 停顿 Cue 时长 + 互动等待时长，
+    不足 min_duration_seconds 时取下限。分镜首尾无缝衔接；字幕块与各类 Cue
+    被重新裁剪到新时长内，避免触发 VideoScene 的越界校验。
+    """
+    chars_per_second = max(1.0, chars_per_minute / 60.0)
+    cursor = 0.0
+    for scene in scenes:
+        narration_len = len((scene.audio_track.narration_text or "").strip())
+        speech = narration_len / chars_per_second
+        pauses = sum(cue.duration_seconds for cue in scene.audio_track.pause_cues)
+        if scene.interaction:
+            pauses += scene.interaction.wait_seconds
+        duration = max(min_duration_seconds, speech + pauses)
+        scene.start_seconds = round(cursor, 1)
+        scene.end_seconds = round(cursor + duration, 1)
+        cursor = scene.end_seconds
+
+        chunk_count = len(scene.text_track.subtitle_chunks)
+        if chunk_count:
+            chunk_duration = duration / chunk_count
+            for index, chunk in enumerate(scene.text_track.subtitle_chunks):
+                chunk.start_offset_seconds = round(index * chunk_duration, 2)
+                chunk.end_offset_seconds = round(min(duration, (index + 1) * chunk_duration), 2)
+        scene.visual_track.animation_cues = [
+            cue for cue in scene.visual_track.animation_cues if cue.offset_seconds <= duration
+        ]
+        scene.audio_track.pause_cues = [
+            cue for cue in scene.audio_track.pause_cues if cue.offset_seconds + cue.duration_seconds <= duration
+        ]
+        scene.audio_track.sound_cues = [
+            cue for cue in scene.audio_track.sound_cues if cue.offset_seconds <= duration
+        ]
+        if scene.interaction and scene.interaction.wait_seconds > duration:
+            scene.interaction.wait_seconds = duration
+    return scenes
+
+
 def _scene_narration(bp: CourseBlueprintSchema, slide: Slide) -> str:
     body = "、".join(slide.body[:3])
     if slide.page_type == "cover":
@@ -398,6 +452,7 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
             visual_track=VideoVisualTrack(composition=f"以 {slide.id} 为主画面；{slide.visual_suggestion}", animation_cues=animation_cues),
             audio_track=VideoAudioTrack(
                 narration_text=narration, delivery_tone="清晰、自然、重点处稍放慢",
+                pedagogical_action=_pedagogical_action(slide.page_type), speaking_rate_cps=4.0,
                 emphasis_terms=[slide.title],
                 pause_cues=[PauseCue(offset_seconds=pause_offset, duration_seconds=pause_duration, purpose="留出独立判断时间")] if interactive else [],
                 sound_cues=[SoundCue(offset_seconds=0, description="轻提示音进入互动问题")] if interactive else [],
@@ -430,11 +485,16 @@ def make_verbatim(bp: CourseBlueprintSchema, ppt: PPTContent, script: VideoScrip
         required = scene.audio_track.narration_text
         if scene.interaction:
             required += f" {scene.interaction.prompt} {scene.interaction.feedback_transition}"
+        narration_len = len(scene.audio_track.narration_text)
         sections.append(VerbatimSection(
-            id=f"VB-{index+1:02d}", slide_ids=[scene.slide_id],
+            id=f"VB-{index+1:02d}", scene_id=scene.id, slide_ids=[scene.slide_id],
             time_range=f"{fmt(scene.start_seconds)}—{fmt(scene.end_seconds)}",
+            pedagogical_action=scene.audio_track.pedagogical_action or "metaphor_explain",
             required_text=required,
             optional_text=f"如果时间允许，可以结合{bp.course_identity.audience}熟悉的情境补充说明“{slide.title}”。",
+            key_emphasis=scene.audio_track.emphasis_terms,
+            word_count=narration_len,
+            estimated_duration_seconds=round(narration_len / 4.0, 1),
             interaction=scene.interaction.prompt if scene.interaction else "邀请学生用一句话概括当前要点。",
         ))
     return VerbatimContent(sections=sections)

@@ -269,6 +269,9 @@ export interface ExerciseContent {
 }
 
 export type VideoPedagogicalRole = '导入' | '目标' | '情境' | '概念讲解' | '示范' | '练习' | '检查点' | '总结' | '过渡';
+export type VideoPedagogicalAction =
+  | 'hook' | 'objective_guide' | 'scenario_connect' | 'metaphor_explain'
+  | 'misconception_alert' | 'step_demonstration' | 'check_in' | 'summary_recap';
 export type VideoAnimationAction = '显示' | '高亮' | '缩放' | '平移' | '标注' | '转场';
 
 export interface VideoAnimationCue {
@@ -321,6 +324,8 @@ export interface VideoScene {
   audio_track: {
     narration_text: string;
     delivery_tone: string;
+    pedagogical_action?: VideoPedagogicalAction;
+    speaking_rate_cps?: number;
     emphasis_terms: string[];
     pause_cues: VideoPauseCue[];
     sound_cues: VideoSoundCue[];

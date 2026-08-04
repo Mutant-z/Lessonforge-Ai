@@ -28,3 +28,77 @@ def test_every_page_type_has_layouts_from_library():
     for page_type, guidance in knowledge["page_type_guidance"].items():
         assert guidance["layouts"], f"{page_type} 缺少建议版式"
         assert set(guidance["layouts"]) <= library, f"{page_type} 引用了版式库外的版式"
+
+
+from app.services.ppt_knowledge_service import check_ppt_against_knowledge
+
+
+def compliant_ppt_content():
+    return {
+        "theme": "lessonforge_swiss_blue",
+        "slides": [
+            {
+                "id": "S01", "page_type": "cover", "title": "阿基米德原理",
+                "purpose": "建立课程主题", "body": ["物理", "八年级"], "layout": "cover",
+                "visual_suggestion": "封面左侧放置课程主题大标题，右侧留白，用一条主题色细线建立视觉锚点。",
+                "speaker_notes": "围绕本课主题建立情境与期待，说明本节将回答的核心问题，用提问唤起学生的既有经验。",
+                "duration_seconds": 20,
+            },
+            {
+                "id": "S02", "page_type": "objectives", "title": "本课学习目标：可观察、可检验",
+                "purpose": "明确可观察成果", "body": ["OBJ-01：解释浮力原理", "OBJ-02：完成浮力计算"],
+                "layout": "bullet",
+                "visual_suggestion": "用编号列表按目标顺序纵向排列，目标编号使用主题色圆形徽章。",
+                "speaker_notes": "逐一说明每条学习目标，指出目标与课堂环节的对应关系，检查学生是否明确本课要达成的结果。",
+                "duration_seconds": 40,
+            },
+        ],
+    }
+
+
+def violating_ppt_content():
+    return {
+        "theme": "lessonforge_swiss_blue",
+        "slides": [
+            {
+                "id": "S01", "page_type": "objectives", "title": "学习目标",
+                "purpose": "x", "body": ["这是一条非常长的正文条目内容，长度明显超过了单条二十五字的上限要求"],
+                "layout": "numbered", "visual_suggestion": "简单", "speaker_notes": "太短",
+                "duration_seconds": 0,
+            },
+        ],
+    }
+
+
+def test_compliant_ppt_passes_all_rules():
+    assert check_ppt_against_knowledge(compliant_ppt_content()) == []
+
+
+def test_violating_ppt_reports_expected_rules():
+    violations = check_ppt_against_knowledge(violating_ppt_content())
+    assert {item.rule_id for item in violations} == {
+        "title.conclusion", "density.item_chars", "density.speaker_notes",
+        "layout.valid", "visual.suggestion_length", "duration.positive",
+    }
+    assert {item.slide_id for item in violations} == {"S01"}
+
+
+def test_cover_title_exempt_from_conclusion_rule():
+    content = compliant_ppt_content()
+    content["slides"][0]["title"] = "学习目标"
+    assert check_ppt_against_knowledge(content) == []
+
+
+def test_layout_page_type_mismatch_reported():
+    content = compliant_ppt_content()
+    content["slides"][1]["layout"] = "steps"
+    rules = {item.rule_id for item in check_ppt_against_knowledge(content)}
+    assert "layout.valid" not in rules
+    assert "layout.page_type_match" in rules
+
+
+def test_unknown_page_type_reported():
+    content = compliant_ppt_content()
+    content["slides"][0]["page_type"] = "diagram"
+    rules = {item.rule_id for item in check_ppt_against_knowledge(content)}
+    assert "page_type.unknown" in rules

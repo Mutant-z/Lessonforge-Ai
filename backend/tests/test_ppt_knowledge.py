@@ -102,3 +102,48 @@ def test_unknown_page_type_reported():
     content["slides"][0]["page_type"] = "diagram"
     rules = {item.rule_id for item in check_ppt_against_knowledge(content)}
     assert "page_type.unknown" in rules
+
+
+import pytest
+from sqlalchemy import select
+
+from app.agents.generators import make_blueprint
+from app.core.database import SessionLocal
+from app.models.entities import CourseProject, PromptTemplate
+from app.services.agent_initialization_service import deterministic_bundle
+from app.services.agent_prompt_service import (
+    active_prompt_template, ensure_prompt_templates, prepare_profile_prompts,
+)
+
+
+def sample_course():
+    return CourseProject(
+        owner_id="u", title="牛顿第二定律", subject="高中物理", grade_level="高一",
+        audience="已学习运动学基础的学生", duration_minutes=15, scenario="课堂讲解",
+        language="中文", settings_json={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_ppt_agent_v2_active_and_knowledge_injected(client):
+    async with SessionLocal() as db:
+        await ensure_prompt_templates(db)
+        v2 = await db.scalar(select(PromptTemplate).where(
+            PromptTemplate.agent_type == "ppt_agent", PromptTemplate.version == "v2"))
+        assert v2 is not None, "ppt_agent 缺少 v2 模板"
+        active = await active_prompt_template(db, "ppt_agent")
+        assert active.version == "v2", "ppt_agent 激活版本应为 v2"
+        v1 = await db.scalar(select(PromptTemplate).where(
+            PromptTemplate.agent_type == "ppt_agent", PromptTemplate.version == "v1"))
+        course = sample_course()
+        bp = make_blueprint(course)
+        context = next(
+            profile for profile in deterministic_bundle(bp, course, {}, {}).profiles
+            if profile.task_type == "ppt"
+        ).model_dump()
+        sys_v2, _, _ = prepare_profile_prompts(v2, context, course, bp.model_dump(), 1)
+        assert "ppt_design_knowledge" in sys_v2
+        assert load_ppt_design_knowledge()["version"] in sys_v2
+        sys_v1, _, _ = prepare_profile_prompts(v1, context, course, bp.model_dump(), 1)
+        assert "ppt_design_knowledge" not in sys_v1
+        assert "设计知识" in sys_v2

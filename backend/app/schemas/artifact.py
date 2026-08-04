@@ -400,9 +400,23 @@ class VideoVisualTrack(BaseModel):
     animation_cues: list[AnimationCue] = Field(default_factory=list)
 
 
+PedagogicalActionType = Literal[
+    "hook",
+    "objective_guide",
+    "scenario_connect",
+    "metaphor_explain",
+    "misconception_alert",
+    "step_demonstration",
+    "check_in",
+    "summary_recap",
+]
+
+
 class VideoAudioTrack(BaseModel):
     narration_text: str = Field(min_length=1)
+    pedagogical_action: PedagogicalActionType | None = None
     delivery_tone: str = Field(min_length=1)
+    speaking_rate_cps: float = Field(default=4.0, gt=0)
     emphasis_terms: list[str] = Field(default_factory=list)
     pause_cues: list[PauseCue] = Field(default_factory=list)
     sound_cues: list[SoundCue] = Field(default_factory=list)
@@ -495,10 +509,15 @@ class VideoScriptContent(BaseModel):
 
 class VerbatimSection(BaseModel):
     id: str
+    scene_id: str | None = None
     slide_ids: list[str]
     time_range: str
+    pedagogical_action: PedagogicalActionType | None = None
     required_text: str
     optional_text: str
+    key_emphasis: list[str] = Field(default_factory=list)
+    word_count: int | None = None
+    estimated_duration_seconds: float | None = None
     interaction: str
 
 

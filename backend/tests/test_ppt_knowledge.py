@@ -1,4 +1,8 @@
-from app.schemas.artifact import Slide
+import json
+import os
+
+from app.providers.llm.openai_compatible import OpenAICompatibleProvider
+from app.schemas.artifact import PPTContent, Slide
 from app.services.ppt_knowledge_service import load_ppt_design_knowledge
 
 
@@ -172,3 +176,43 @@ def test_mock_ppt_passes_rules_with_long_blueprint_content():
     content = make_ppt(make_blueprint(course)).model_dump()
     violations = check_ppt_against_knowledge(content)
     assert violations == []
+
+
+_NEEDS_EVAL_KEY = os.getenv("PPT_EVAL_API_KEY")
+
+
+@pytest.mark.skipif(not _NEEDS_EVAL_KEY, reason="设置 PPT_EVAL_API_KEY 后运行 v1/v2 对比评测")
+@pytest.mark.asyncio
+async def test_v2_prompt_improves_rule_compliance(client):
+    course = sample_course()
+    bp = make_blueprint(course)
+    provider = OpenAICompatibleProvider(
+        api_key=_NEEDS_EVAL_KEY,
+        base_url=os.getenv("PPT_EVAL_BASE_URL"),
+        model_name=os.getenv("PPT_EVAL_MODEL"),
+    )
+    async with SessionLocal() as db:
+        await ensure_prompt_templates(db)
+        v1 = await db.scalar(select(PromptTemplate).where(
+            PromptTemplate.agent_type == "ppt_agent", PromptTemplate.version == "v1"))
+        v2 = await db.scalar(select(PromptTemplate).where(
+            PromptTemplate.agent_type == "ppt_agent", PromptTemplate.version == "v2"))
+        context = next(
+            profile for profile in deterministic_bundle(bp, course, {}, {}).profiles
+            if profile.task_type == "ppt"
+        ).model_dump()
+        prompts = []
+        for template in (v1, v2):
+            system, task, _ = prepare_profile_prompts(template, context, course, bp.model_dump(), 1)
+            task = (task.replace("{{upstream_json}}", "{}")
+                        .replace("{{teacher_instruction}}", "生成本任务文件首稿。")
+                        .replace("{{output_schema_json}}", json.dumps(
+                            PPTContent.model_json_schema(), ensure_ascii=False)))
+            prompts.append((system, task))
+    results = []
+    for version, (system, task) in zip(("v1", "v2"), prompts):
+        content = await provider.structured(system, task, PPTContent)
+        violations = check_ppt_against_knowledge(content)
+        results.append((version, len(violations)))
+        print(f"[PPT_EVAL {version}] 违规 {len(violations)} 条")
+    assert results[1][1] <= results[0][1], f"v2 违规数未优于 v1：{results}"

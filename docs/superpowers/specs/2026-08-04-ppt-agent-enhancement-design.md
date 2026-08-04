@@ -28,9 +28,9 @@ PPT Agent 当前通过通用 v1 系统提示词 + 单薄的四组 profile 要求
 
 | 区块 | 内容 |
 |---|---|
-| `version` | 知识库版本号（如 "1.0.0"） |
+| `version` | 知识库版本号，固定 "1.0.0" |
 | `design_principles` | 顶层设计原则（每页一个核心信息层级、标题传达结论、视觉服务于教学目的等） |
-| `page_type_guidance` | 11 种页面类型（cover/objectives/scenario/concept/process/exercise/summary/comparison/transition/diagram/case）各自的叙事目标、建议内容、典型版式 |
+| `page_type_guidance` | 11 种页面类型（与 Slide schema 的 page_type Literal 完全一致：cover/objectives/scenario/concept/process/comparison/case/question/exercise/summary/homework）各自的叙事目标、建议内容、典型版式 |
 | `density_limits` | 密度上限：标题 ≤30 字；正文每页 ≤120 字；条目 ≤6 条；单条 ≤25 字；speaker_notes ≥30 字 |
 | `layout_library` | 版式库（title/steps/process/split/comparison/bullet/question/exercise/summary/cover），每种版式的适用页面类型与结构 |
 | `visual_suggestion_guidelines` | 视觉建议可执行性要求（指明图形类型、位置与信息关系） |
@@ -113,6 +113,8 @@ class RuleViolation:
 
 def check_ppt_against_knowledge(content) -> list[RuleViolation]
 ```
+
+边界说明：`quality_checklist` 是注入给 Agent 的**提示性**自检项（如"叙事完整、时长合理"），不要求机器判定；`check_ppt_against_knowledge` 只执行**可机器判定**的规则（密度、条数、单条字数、speaker_notes 长度、layout 合法性、visual_suggestion 可执行性、标题结论式措辞检查）。
 
 **测试**（新建 `backend/tests/test_ppt_knowledge.py`）：
 

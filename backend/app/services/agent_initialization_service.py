@@ -81,10 +81,13 @@ def deterministic_bundle(
             "board_and_homework_requirements": ["板书突出核心关系", "作业直接覆盖课程目标"],
         },
         "ppt": {
-            "narrative_requirements": ["按照情境导入、概念建构、应用检查和总结组织页面"],
-            "visual_hierarchy_requirements": ["每页只有一个核心信息层级"],
-            "information_density_requirements": ["控制每页文字密度并保留讲解空间"],
-            "animation_and_diagram_requirements": ["优先使用能解释抽象关系的图示或过程动画"],
+            "narrative_requirements": ["按照情境导入、概念建构、应用检查与总结组织页面", "页面顺序与教学环节一一对应，不跳环节"],
+            "visual_hierarchy_requirements": ["每页只有一个核心信息层级", "标题表达结论而不是页面主题"],
+            "information_density_requirements": ["遵守 PPT 设计知识库的密度上限：标题不超过 30 字，正文每页不超过 120 字、最多 6 条、单条不超过 25 字", "正文只保留关键结论，细节放入 speaker_notes"],
+            "animation_and_diagram_requirements": ["抽象关系（流程、对比、因果、层级、数据变化）必须指明对应图示方式", "优先使用能解释关系的图示或过程动画，而非装饰性动画"],
+            "layout_requirements": ["每页 layout 必须从知识库版式库中选择，且属于该页面类型的建议版式"],
+            "typography_requirements": ["标题与正文字号层级清晰，避免全页同字号", "编号与短句优先于长段落"],
+            "visual_suggestion_requirements": ["视觉建议必须指明图形类型、位置与信息关系，例如“左侧概念框图、右侧箭头图表示因果关系”", "禁止只写“简洁大方”等风格形容词，必须给出可执行的画面构成"],
         },
         "task_sheet": {
             "learner_action_requirements": ["使用可观察动作描述任务"],

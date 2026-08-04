@@ -73,6 +73,9 @@ class PPTProfile(AgentProfileBase):
     visual_hierarchy_requirements: list[str]
     information_density_requirements: list[str]
     animation_and_diagram_requirements: list[str]
+    layout_requirements: list[str]
+    typography_requirements: list[str]
+    visual_suggestion_requirements: list[str]
 
 
 class TaskSheetProfile(AgentProfileBase):

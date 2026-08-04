@@ -64,6 +64,24 @@ async def test_initializer_recovers_from_retryable_provider_failure_without_gene
     assert len({item.mission for item in bundle.profiles}) == 6
 
 
+def test_ppt_profile_has_seven_requirement_groups():
+    course = CourseProject(
+        owner_id="u", title="牛顿第二定律", subject="高中物理", grade_level="高一",
+        audience="已学习运动学基础的学生", duration_minutes=15, scenario="课堂讲解",
+        language="中文", settings_json={},
+    )
+    bundle = deterministic_bundle(make_blueprint(course), course, source={})
+    ppt = next(profile for profile in bundle.profiles if profile.task_type == "ppt")
+    for field in (
+        "narrative_requirements", "visual_hierarchy_requirements",
+        "information_density_requirements", "animation_and_diagram_requirements",
+        "layout_requirements", "typography_requirements", "visual_suggestion_requirements",
+    ):
+        assert getattr(ppt, field), f"{field} 为空"
+    assert any("版式库" in item for item in ppt.layout_requirements)
+    assert any("图形类型" in item for item in ppt.visual_suggestion_requirements)
+
+
 @pytest.mark.asyncio
 async def test_initializer_does_not_hide_non_retryable_schema_failures():
     class InvalidStructuredOutputProvider:

@@ -147,3 +147,28 @@ async def test_ppt_agent_v2_active_and_knowledge_injected(client):
         sys_v1, _, _ = prepare_profile_prompts(v1, context, course, bp.model_dump(), 1)
         assert "ppt_design_knowledge" not in sys_v1
         assert "设计知识" in sys_v2
+
+
+from app.agents.generators import make_blueprint, make_ppt
+
+
+def test_mock_ppt_passes_all_knowledge_rules():
+    content = make_ppt(make_blueprint(sample_course())).model_dump()
+    violations = check_ppt_against_knowledge(content)
+    assert violations == []
+
+
+def test_mock_ppt_passes_rules_with_long_blueprint_content():
+    course = CourseProject(
+        owner_id="u", title="牛顿第二定律的应用场景与解题方法研究",
+        subject="高中物理", grade_level="高一",
+        audience="已学习运动学基础的学生", duration_minutes=15, scenario="课堂讲解",
+        language="中文",
+        settings_json={
+            "course_task": "解释力、质量与加速度的关系及其在复杂情境中的应用",
+            "key_points": "牛顿第二定律的核心概念及其适用条件在复杂情境中的应用方法",
+        },
+    )
+    content = make_ppt(make_blueprint(course)).model_dump()
+    violations = check_ppt_against_knowledge(content)
+    assert violations == []

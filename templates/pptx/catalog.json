@@ -138,6 +138,144 @@
         "body": "Microsoft YaHei",
         "latin": "Arial"
       }
+    },
+    {
+      "id": "lessonforge_deck_academic",
+      "file": "../PPT_template/Academic_Template.pptx",
+      "name": "学术科研·成品微课",
+      "short_name": "学术科研",
+      "description": "15 页成品微课模板，agent 生成内容直接填入，保留模板视觉设计。",
+      "recommended_for": ["科研", "学术", "深度课程"],
+      "composition": "deck",
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F4F7FB",
+        "primary": "#1F4E79",
+        "secondary": "#D6E4F0",
+        "text": "#1A1A1A",
+        "muted": "#6B7280",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_deck_ai_future",
+      "file": "../PPT_template/AI_Future_Template.pptx",
+      "name": "AI 未来·成品微课",
+      "short_name": "AI 未来",
+      "description": "15 页 AI 主题成品微课模板，适合前沿科技类课程。",
+      "recommended_for": ["AI", "科技", "前沿课程"],
+      "composition": "deck",
+      "palette": {
+        "background": "#F5F8FF",
+        "surface": "#EEF3FF",
+        "primary": "#0B3D91",
+        "secondary": "#D6E4FF",
+        "text": "#0A0F1E",
+        "muted": "#5A6478",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_deck_business",
+      "file": "../PPT_template/Business_Template.pptx",
+      "name": "商务培训·成品微课",
+      "short_name": "商务培训",
+      "description": "15 页商务培训成品微课模板，适合职场与管理课程。",
+      "recommended_for": ["商务", "管理", "培训课程"],
+      "composition": "deck",
+      "palette": {
+        "background": "#FFFFFF",
+        "surface": "#F5F7FA",
+        "primary": "#0F2B4C",
+        "secondary": "#E3E8EE",
+        "text": "#14181F",
+        "muted": "#6A7280",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_deck_cartoon",
+      "file": "../PPT_template/Cartoon_Template.pptx",
+      "name": "卡通启蒙·成品微课",
+      "short_name": "卡通启蒙",
+      "description": "15 页卡通成品微课模板，适合低龄与趣味课程。",
+      "recommended_for": ["小学", "启蒙", "趣味课程"],
+      "composition": "deck",
+      "palette": {
+        "background": "#FFFDFB",
+        "surface": "#FFF1EB",
+        "primary": "#FF6B35",
+        "secondary": "#FFE3D6",
+        "text": "#2D2A26",
+        "muted": "#8A857E",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_deck_chinese_culture",
+      "file": "../PPT_template/Chinese_Culture_Template.pptx",
+      "name": "中国文化·成品微课",
+      "short_name": "中国文化",
+      "description": "15 页中国文化主题成品微课模板，适合人文与国学课程。",
+      "recommended_for": ["人文", "国学", "文化课程"],
+      "composition": "deck",
+      "palette": {
+        "background": "#FBF7F0",
+        "surface": "#F7EFE2",
+        "primary": "#8C2D2D",
+        "secondary": "#F0DFC8",
+        "text": "#2B2118",
+        "muted": "#8A7A63",
+        "on_primary": "#FFF6E8"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
+    },
+    {
+      "id": "lessonforge_deck_smart_ai",
+      "file": "../PPT_template/Smart_AI_Template.pptx",
+      "name": "智慧课堂·成品微课",
+      "short_name": "智慧课堂",
+      "description": "15 页智慧课堂成品微课模板，适合个性化学习与智能教学。",
+      "recommended_for": ["智慧课堂", "个性化学习", "AI 教学"],
+      "composition": "deck",
+      "palette": {
+        "background": "#F9F8FF",
+        "surface": "#F1EEFF",
+        "primary": "#5B3DF5",
+        "secondary": "#E2DBFF",
+        "text": "#1B1830",
+        "muted": "#6E6A8A",
+        "on_primary": "#FFFFFF"
+      },
+      "typography": {
+        "heading": "Microsoft YaHei",
+        "body": "Microsoft YaHei",
+        "latin": "Arial"
+      }
     }
   ]
 }

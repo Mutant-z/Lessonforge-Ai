@@ -36,6 +36,62 @@ export interface LessonPlanContent {
   reflection_notes: string;
 }
 
+export interface PPTBulletItem {
+  text: string;
+  emphasize?: boolean;
+}
+export interface PPTLeadBlock {
+  kind: 'lead';
+  text: string;
+  sub?: string;
+}
+export interface PPTBulletsBlock {
+  kind: 'bullets';
+  items: PPTBulletItem[];
+  numbered?: boolean;
+}
+export interface PPTStep {
+  title: string;
+  detail?: string;
+}
+export interface PPTStepsBlock {
+  kind: 'steps';
+  steps: PPTStep[];
+}
+export interface PPTCompareColumn {
+  heading?: string;
+  items: string[];
+}
+export interface PPTCompareBlock {
+  kind: 'compare';
+  left: PPTCompareColumn;
+  right: PPTCompareColumn;
+}
+export interface PPTQuoteBlock {
+  kind: 'quote';
+  text: string;
+  citation?: string;
+}
+export interface PPTVisualBlock {
+  kind: 'visual';
+  diagram?: string;
+  image_id?: string;
+  caption?: string;
+  alt_text?: string;
+}
+export interface PPTNoteBlock {
+  kind: 'note';
+  text: string;
+}
+export type PPTBlock =
+  | PPTLeadBlock
+  | PPTBulletsBlock
+  | PPTStepsBlock
+  | PPTCompareBlock
+  | PPTQuoteBlock
+  | PPTVisualBlock
+  | PPTNoteBlock;
+
 export interface PPTSlide {
   id?: string;
   slide_number?: number;
@@ -49,6 +105,7 @@ export interface PPTSlide {
   visual_suggestion: string;
   speaker_notes: string;
   duration_seconds?: number;
+  blocks?: PPTBlock[];
 }
 
 export interface PPTContent {

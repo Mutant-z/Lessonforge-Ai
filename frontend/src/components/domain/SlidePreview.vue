@@ -22,6 +22,8 @@ let resizeObserver: ResizeObserver | null = null;
 
 const activeTemplate = computed(() => props.template || DEFAULT_PPT_TEMPLATE);
 const bullets = computed(() => props.slide.bullet_points || props.slide.body || []);
+const blocks = computed(() => props.slide.blocks || []);
+const hasBlocks = computed(() => blocks.value.length > 0);
 const pageType = computed(() => props.slide.page_type || 'concept');
 const slideLayout = computed(() => props.slide.layout || props.slide.layout_type || '');
 const isCover = computed(() => pageType.value === 'cover' || ['title', 'cover'].includes(slideLayout.value));
@@ -76,6 +78,51 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
             <p v-if="slide.purpose" class="cover-purpose">{{ slide.purpose }}</p>
             <span v-if="isCover" class="ppt-brand">LESSONFORGE</span>
           </template>
+
+          <div v-else-if="hasBlocks" class="blocks-area">
+            <div v-for="(block, bIdx) in blocks" :key="bIdx" :class="`block-${block.kind}`" class="ppt-block">
+              <template v-if="block.kind === 'lead'">
+                <p class="block-lead">{{ block.text }}</p>
+                <p v-if="block.sub" class="block-sub">{{ block.sub }}</p>
+              </template>
+
+              <ul v-else-if="block.kind === 'bullets'" class="block-bullets" :class="{ numbered: block.numbered }">
+                <li v-for="(item, i) in block.items" :key="i" :class="{ 'is-emphasis': item.emphasize }">{{ item.text }}</li>
+              </ul>
+
+              <div v-else-if="block.kind === 'steps'" class="block-steps">
+                <div v-for="(step, i) in block.steps" :key="i" class="block-step">
+                  <span class="step-num">{{ String(i + 1).padStart(2, '0') }}</span>
+                  <i class="step-rule" />
+                  <p class="step-title">{{ step.title }}</p>
+                  <p v-if="step.detail" class="step-detail">{{ step.detail }}</p>
+                </div>
+              </div>
+
+              <div v-else-if="block.kind === 'compare'" class="block-compare">
+                <div class="compare-col">
+                  <p v-if="block.left.heading" class="compare-heading">{{ block.left.heading }}</p>
+                  <p v-for="(t, i) in block.left.items" :key="i" class="compare-item">{{ t }}</p>
+                </div>
+                <div class="compare-col is-second">
+                  <p v-if="block.right.heading" class="compare-heading">{{ block.right.heading }}</p>
+                  <p v-for="(t, i) in block.right.items" :key="i" class="compare-item">{{ t }}</p>
+                </div>
+              </div>
+
+              <blockquote v-else-if="block.kind === 'quote'" class="block-quote">
+                <p class="quote-text">{{ block.text }}</p>
+                <cite v-if="block.citation">{{ block.citation }}</cite>
+              </blockquote>
+
+              <div v-else-if="block.kind === 'visual'" class="block-visual">
+                <p class="visual-label">图示占位：{{ block.diagram || 'visual' }}</p>
+                <p v-if="block.caption" class="visual-caption">{{ block.caption }}</p>
+              </div>
+
+              <p v-else-if="block.kind === 'note'" class="block-note">{{ block.text }}</p>
+            </div>
+          </div>
 
           <div v-else-if="isProcess" class="process-layout">
             <div v-for="(bullet, bIdx) in bullets.slice(0, 4)" :key="bIdx" class="process-step">
@@ -196,6 +243,44 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .slide-bullets-area { position: absolute; top: 144px; left: 0; width: 100%; margin: 0; padding: 0; list-style: none; }
 .slide-bullets-area li { position: relative; padding-left: 24px; margin-bottom: 15px; font: 400 21px/1.4 var(--ppt-body-font); color: var(--ppt-text); }
 .slide-bullets-area li::before { content: '•'; position: absolute; left: 0; color: var(--ppt-text); }
+
+/* 3b. 结构化内容块（blocks）设计系统 */
+.blocks-area { position: absolute; top: 144px; left: 0; width: 100%; display: flex; flex-direction: column; gap: 20px; overflow: hidden; }
+.ppt-block { min-width: 0; }
+
+.block-lead { margin: 0; font: 700 24px/1.4 var(--ppt-body-font); color: var(--ppt-primary); }
+.block-sub { margin: 4px 0 0; font: 400 16px/1.4 var(--ppt-body-font); color: var(--ppt-muted); }
+
+.block-bullets { margin: 0; padding: 0; list-style: none; }
+.block-bullets li { position: relative; padding-left: 24px; margin-bottom: 12px; font: 400 20px/1.4 var(--ppt-body-font); color: var(--ppt-text); }
+.block-bullets li::before { content: '•'; position: absolute; left: 0; color: var(--ppt-text); }
+.block-bullets.numbered li { list-style: decimal; padding-left: 4px; margin-left: 24px; }
+.block-bullets.numbered li::before { content: none; }
+.block-bullets li.is-emphasis { font-weight: 700; color: var(--ppt-primary); }
+
+.block-steps { display: flex; gap: 16px; }
+.block-step { flex: 1; min-width: 0; }
+.block-step .step-num { font: 800 26px/1 var(--ppt-latin-font); color: var(--ppt-primary); }
+.block-step .step-rule { display: block; height: 3px; margin: 12px 0 10px; background: var(--ppt-secondary); }
+.block-step .step-title { margin: 0 0 4px; font: 700 20px/1.4 var(--ppt-body-font); color: var(--ppt-text); }
+.block-step .step-detail { margin: 0; font: 400 14px/1.5 var(--ppt-body-font); color: var(--ppt-muted); }
+
+.block-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+.compare-col { min-width: 0; }
+.compare-col::before { content: ''; display: block; height: 4px; background: var(--ppt-primary); margin-bottom: 14px; }
+.compare-col.is-second::before { background: var(--ppt-secondary); }
+.compare-heading { margin: 0 0 8px; font: 700 18px/1.3 var(--ppt-body-font); color: var(--ppt-primary); }
+.compare-item { margin: 0 0 10px; font: 400 20px/1.35 var(--ppt-body-font); color: var(--ppt-text); }
+
+.block-quote { margin: 0; padding: 4px 0 4px 18px; border-left: 4px solid var(--ppt-primary); }
+.block-quote .quote-text { margin: 0 0 4px; font: 500 22px/1.45 var(--ppt-body-font); color: var(--ppt-text); }
+.block-quote cite { font: 400 13px/1.4 var(--ppt-body-font); color: var(--ppt-muted); font-style: normal; }
+
+.block-visual { padding: 16px 18px; border: 2px dashed var(--ppt-secondary); border-radius: 10px; background: var(--ppt-surface); }
+.visual-label { margin: 0 0 4px; font: 700 16px/1.4 var(--ppt-body-font); color: var(--ppt-primary); }
+.visual-caption { margin: 0; font: 400 13px/1.4 var(--ppt-body-font); color: var(--ppt-muted); }
+
+.block-note { margin: 0; font: 400 13px/1.4 var(--ppt-body-font); color: var(--ppt-muted); }
 
 /* 4. 配图建议条 */
 .ppt-visual-hint { position: absolute; left: 97.2px; top: 443.5px; width: 763.2px; height: 36px; box-sizing: border-box; display: flex; align-items: center; padding: 0 11.5px; background: var(--ppt-surface); font: 400 10px/1 var(--ppt-body-font); color: var(--ppt-muted); z-index: 2; }

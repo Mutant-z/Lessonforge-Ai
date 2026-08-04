@@ -34,12 +34,12 @@ def sample_ppt_content(theme=DEFAULT_PPT_TEMPLATE_ID):
     }
 
 
-def test_template_catalog_has_six_valid_unique_templates():
+def test_template_catalog_has_twelve_valid_unique_templates():
     catalog = load_ppt_template_catalog()
     assert catalog["version"]
-    assert len(catalog["templates"]) == 6
+    assert len(catalog["templates"]) == 12
     ids = [item["id"] for item in catalog["templates"]]
-    assert len(set(ids)) == 6
+    assert len(set(ids)) == 12
     assert get_ppt_template(DEFAULT_PPT_TEMPLATE_ID)
     assert all(len(item["recommended_for"]) == 3 for item in catalog["templates"])
     template_dir = Path(__file__).resolve().parents[2] / "templates" / "pptx"
@@ -47,7 +47,8 @@ def test_template_catalog_has_six_valid_unique_templates():
         template_path = template_dir / item["file"]
         assert template_path.is_file()
         deck = Presentation(template_path)
-        assert len(deck.slides) == 6
+        expected_slides = 15 if item["composition"] == "deck" else 6
+        assert len(deck.slides) == expected_slides
         assert deck.slide_width / deck.slide_height == pytest.approx(16 / 9, rel=0.01)
 
 
@@ -134,7 +135,7 @@ async def test_apply_template_creates_visual_only_version_without_staling_depend
 async def test_template_catalog_endpoint_and_preference_validation(client, auth_headers):
     catalog = await client.get("/api/v1/ppt-templates", headers=auth_headers)
     assert catalog.status_code == 200
-    assert len(catalog.json()["templates"]) == 6
+    assert len(catalog.json()["templates"]) == 12
 
     invalid = await client.patch(
         "/api/v1/settings/preferences",

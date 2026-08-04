@@ -5,9 +5,14 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.agents.generators import make_deck
 from app.renderers.docx_renderer import render_exercise_docx, render_markdown_docx, render_task_sheet_docx, render_video_script_docx
+from app.renderers.deck_renderer import render_deck
 from app.renderers.pptx_renderer import render_pptx
+from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.ppt_template_service import ppt_template_catalog_version, resolve_ppt_template
+
+CATALOG_DIR = Path(__file__).resolve().parents[3] / "templates" / "pptx"
 
 
 def safe_package_name(title: str) -> str:
@@ -66,8 +71,14 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         add(markdown_path, "task_sheet_markdown", task_sheet["version"])
     if "ppt" in artifacts:
         ppt_content = artifacts["ppt"]["content_json"]
-        template = resolve_ppt_template(ppt_content.get("theme"))
-        path = render_pptx(title, ppt_content, folder / "02_课件.pptx")
+        theme = ppt_content.get("theme")
+        template = resolve_ppt_template(theme)
+        if template.get("composition") == "deck":
+            deck_path = (CATALOG_DIR / str(template["file"])).resolve()
+            deck = make_deck(CourseBlueprintSchema.model_validate(blueprint))
+            path = render_deck(deck_path, deck, folder / "02_课件.pptx")
+        else:
+            path = render_pptx(title, ppt_content, folder / "02_课件.pptx")
         add(
             path,
             "ppt",

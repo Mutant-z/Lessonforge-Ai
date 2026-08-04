@@ -216,3 +216,100 @@ async def test_v2_prompt_improves_rule_compliance(client):
         results.append((version, len(violations)))
         print(f"[PPT_EVAL {version}] 违规 {len(violations)} 条")
     assert results[1][1] <= results[0][1], f"v2 违规数未优于 v1：{results}"
+
+
+def compliant_blocks_content():
+    return {
+        "theme": "lessonforge_swiss_blue",
+        "slides": [
+            {
+                "id": "S01", "page_type": "cover", "title": "阿基米德原理",
+                "purpose": "建立课程主题", "body": ["物理", "八年级"], "layout": "cover",
+                "visual_suggestion": "封面左侧放置课程主题大标题，右侧留白，用一条主题色细线建立视觉锚点。",
+                "speaker_notes": "围绕本课主题建立情境与期待，说明本节将回答的核心问题，用提问唤起学生的既有经验。",
+                "duration_seconds": 20,
+            },
+            {
+                "id": "S05", "page_type": "process", "title": "应用三步：识别、选择、检查",
+                "purpose": "形成可迁移方法",
+                "body": ["第一步：识别任务与条件", "第二步：选择核心概念", "第三步：完成推理并检查结论"],
+                "layout": "steps",
+                "visual_suggestion": "用三步横向流程线展示应用步骤，每一步配编号与短句。",
+                "speaker_notes": "以一道完整例题示范三步应用过程，逐步标注识别、选择与检查动作，强调检查环节的作用。",
+                "duration_seconds": 40,
+                "blocks": [
+                    {"kind": "lead", "text": "先识别任务与条件", "sub": "再选择核心概念"},
+                    {"kind": "steps", "steps": [
+                        {"title": "识别任务与条件", "detail": "找出已知与所求"},
+                        {"title": "选择核心概念", "detail": "匹配适用概念"},
+                        {"title": "完成推理并检查", "detail": "验证结论合理性"},
+                    ]},
+                    {"kind": "note", "text": "检查环节不可省略"},
+                ],
+            },
+        ],
+    }
+
+
+def test_compliant_blocks_pass_all_rules():
+    assert check_ppt_against_knowledge(compliant_blocks_content()) == []
+
+
+def test_blocks_density_takes_precedence_over_body():
+    content = compliant_blocks_content()
+    content["slides"][1]["body"] = ["x" * 40] * 10
+    assert check_ppt_against_knowledge(content) == []
+
+
+def test_blocks_density_violations_reported():
+    content = {
+        "theme": "lessonforge_swiss_blue",
+        "slides": [
+            {
+                "id": "S01", "page_type": "objectives", "title": "学习目标",
+                "purpose": "x", "body": ["a"], "layout": "numbered",
+                "visual_suggestion": "简单", "speaker_notes": "太短",
+                "duration_seconds": 0,
+                "blocks": [
+                    {"kind": "bullets", "items": [{"text": "这是一条非常长的正文条目内容，长度明显超过了单条二十五字的上限要求"}]},
+                ],
+            },
+        ],
+    }
+    violations = check_ppt_against_knowledge(content)
+    assert {item.rule_id for item in violations} == {
+        "title.conclusion", "density.item_chars", "density.speaker_notes",
+        "layout.valid", "visual.suggestion_length", "duration.positive",
+    }
+    assert {item.slide_id for item in violations} == {"S01"}
+
+
+def test_blocks_steps_count_and_compare_items_reported():
+    content = compliant_blocks_content()
+    content["slides"][1]["blocks"] = [
+        {"kind": "steps", "steps": [{"title": f"第{i}步", "detail": "细节"} for i in range(6)]},
+        {"kind": "compare", "left": {"heading": "左", "items": [f"项{i}" for i in range(6)]}, "right": {"heading": "右", "items": ["a", "b"]}},
+    ]
+    rules = {item.rule_id for item in check_ppt_against_knowledge(content)}
+    assert "blocks.steps_count" in rules
+    assert "blocks.compare_items" in rules
+
+
+from app.agents.generators import _blocks_flat_text
+
+
+def test_mock_ppt_emits_structured_blocks():
+    content = make_ppt(make_blueprint(sample_course())).model_dump()
+    for slide in content["slides"]:
+        if slide["page_type"] == "cover":
+            assert slide["blocks"] == []
+        else:
+            assert slide["blocks"], f"{slide['id']} 缺少 blocks"
+
+
+def test_mock_ppt_body_is_flat_projection_of_blocks():
+    content = make_ppt(make_blueprint(sample_course())).model_dump()
+    for slide in content["slides"]:
+        if slide["page_type"] == "cover":
+            continue
+        assert _blocks_flat_text(slide["blocks"]) == slide["body"], f"{slide['id']} body 与 blocks 投影不一致"

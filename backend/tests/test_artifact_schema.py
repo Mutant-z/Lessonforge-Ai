@@ -87,3 +87,63 @@ def test_pedagogical_action_type_values():
             pedagogical_action=action,
         )
         assert track.pedagogical_action == action
+
+
+from app.schemas.artifact import Slide
+
+
+def test_slide_blocks_discriminated_union():
+    slide = Slide(
+        id="S05", page_type="process", title="应用三步",
+        purpose="形成可迁移方法", body=["第一步", "第二步", "第三步"], layout="steps",
+        visual_suggestion="用三步横向流程线展示应用步骤。", speaker_notes="逐步示范。",
+        duration_seconds=40,
+        blocks=[
+            {"kind": "lead", "text": "先识别任务与条件", "sub": "再选择核心概念"},
+            {"kind": "steps", "steps": [{"title": "识别", "detail": "找出已知与所求"}, {"title": "选择", "detail": "匹配核心概念"}]},
+            {"kind": "note", "text": "检查结论是否合理"},
+        ],
+    )
+    assert slide.blocks[0].kind == "lead"
+    assert slide.blocks[1].kind == "steps"
+    assert slide.blocks[2].kind == "note"
+    assert slide.blocks[1].steps[0].title == "识别"
+
+
+def test_slide_blocks_default_empty_and_body_kept():
+    slide = Slide(
+        id="S01", page_type="cover", title="阿基米德原理",
+        purpose="建立课程主题", body=["物理", "八年级"], layout="cover",
+        visual_suggestion="封面左侧放置课程主题大标题。", speaker_notes="围绕主题建立情境。",
+        duration_seconds=20,
+    )
+    assert slide.blocks == []
+    assert slide.body == ["物理", "八年级"]
+
+
+def test_slide_block_unknown_kind_rejected():
+    with pytest.raises(Exception):
+        Slide(
+            id="S01", page_type="concept", title="核心概念", purpose="p",
+            body=["a"], layout="split", visual_suggestion="x" * 12, speaker_notes="y" * 30,
+            duration_seconds=20,
+            blocks=[{"kind": "video", "text": "不该存在"}],
+        )
+
+
+def test_slide_compare_quote_visual_blocks_parse():
+    slide = Slide(
+        id="S06", page_type="concept", title="概念与关系", purpose="p",
+        body=["a"], layout="split", visual_suggestion="x" * 12, speaker_notes="y" * 30,
+        duration_seconds=20,
+        blocks=[
+            {"kind": "compare", "left": {"heading": "适用时", "items": ["A"]}, "right": {"heading": "不适用", "items": ["B"]}},
+            {"kind": "quote", "text": "先判断，再说明依据", "citation": "课堂任务"},
+            {"kind": "visual", "diagram": "flow", "caption": "推理路径"},
+        ],
+    )
+    assert slide.blocks[0].kind == "compare"
+    assert slide.blocks[0].left.items == ["A"]
+    assert slide.blocks[1].kind == "quote"
+    assert slide.blocks[2].kind == "visual"
+    assert slide.blocks[2].diagram == "flow"

@@ -27,6 +27,76 @@ class LessonPlanContent(BaseModel):
     reflection_placeholder: str = "课后由教师填写教学反思。"
 
 
+class PPTLead(BaseModel):
+    """开篇结论/引导块：大字 + 可选副行。"""
+    kind: Literal["lead"] = "lead"
+    text: str
+    sub: str = ""
+
+
+class PPTBulletItem(BaseModel):
+    text: str
+    emphasize: bool = False
+
+
+class PPTBulletsBlock(BaseModel):
+    """要点列表：圆点或编号；emphasize 项渲染为主色高亮。"""
+    kind: Literal["bullets"] = "bullets"
+    items: list[PPTBulletItem]
+    numbered: bool = False
+
+
+class PPTStep(BaseModel):
+    title: str
+    detail: str = ""
+
+
+class PPTStepsBlock(BaseModel):
+    """递进步骤卡片：编号 + 标题 + 细节。"""
+    kind: Literal["steps"] = "steps"
+    steps: list[PPTStep]
+
+
+class PPTCompareColumn(BaseModel):
+    heading: str = ""
+    items: list[str]
+
+
+class PPTCompareBlock(BaseModel):
+    """左右对比分栏：两栏各含标题与要点。"""
+    kind: Literal["compare"] = "compare"
+    left: PPTCompareColumn
+    right: PPTCompareColumn
+
+
+class PPTQuoteBlock(BaseModel):
+    """重点引用/待判断句：大字 + 出处。"""
+    kind: Literal["quote"] = "quote"
+    text: str
+    citation: str = ""
+
+
+class PPTVisualBlock(BaseModel):
+    """视觉元素占位：图示类型或图片引用，渲染为图示区。"""
+    kind: Literal["visual"] = "visual"
+    diagram: Literal["flow", "comparison", "causality", "hierarchy", "data_change"] | None = None
+    image_id: str | None = None
+    caption: str = ""
+    alt_text: str = ""
+
+
+class PPTNoteBlock(BaseModel):
+    """小字注释/提示。"""
+    kind: Literal["note"] = "note"
+    text: str
+
+
+PPTBlock = Annotated[
+    PPTLead | PPTBulletsBlock | PPTStepsBlock | PPTCompareBlock | PPTQuoteBlock | PPTVisualBlock | PPTNoteBlock,
+    Field(discriminator="kind"),
+]
+
+
 class Slide(BaseModel):
     id: str
     page_type: Literal["cover", "objectives", "scenario", "concept", "process", "comparison", "case", "question", "exercise", "summary", "homework"]
@@ -38,6 +108,7 @@ class Slide(BaseModel):
     speaker_notes: str
     duration_seconds: int
     script_segment_ids: list[str] = []
+    blocks: list[PPTBlock] = []
 
 
 class PPTContent(BaseModel):

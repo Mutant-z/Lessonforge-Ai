@@ -151,6 +151,101 @@ def _render_process(slide, body: list[str], colors: dict, fonts: dict, x: float,
         )
 
 
+def _render_blocks(slide, blocks: list[dict], colors: dict, fonts: dict, x: float, width: float):
+    """按内容块 kind 绘制结构化页面（与前端设计系统一致）。"""
+    cursor_y = 2.0
+    for block in blocks:
+        kind = block.get("kind")
+        if kind == "lead":
+            _textbox(
+                slide, block.get("text", ""), x, cursor_y, width, .62,
+                font=fonts["body"], size=24, color=colors["primary"], bold=True,
+            )
+            sub = block.get("sub")
+            if sub:
+                _textbox(slide, sub, x, cursor_y + .66, width, .4,
+                         font=fonts["body"], size=16, color=colors["muted"])
+                cursor_y += 1.12
+            else:
+                cursor_y += .72
+        elif kind == "bullets":
+            items = block.get("items") or []
+            numbered = bool(block.get("numbered"))
+            box = slide.shapes.add_textbox(Inches(x), Inches(cursor_y), Inches(width), Inches(min(3.6, len(items) * .6)))
+            frame = box.text_frame
+            frame.clear()
+            frame.word_wrap = True
+            frame.margin_left = Inches(.05)
+            for idx, item in enumerate(items):
+                paragraph = frame.paragraphs[0] if idx == 0 else frame.add_paragraph()
+                text = str(item.get("text", ""))
+                paragraph.text = f"{idx + 1}.  {text}" if numbered else f"•  {text}"
+                paragraph.font.name = fonts["body"]
+                paragraph.font.size = Pt(20)
+                paragraph.font.color.rgb = colors["primary"] if item.get("emphasize") else colors["text"]
+                paragraph.font.bold = bool(item.get("emphasize"))
+                paragraph.space_after = Pt(12)
+            cursor_y += min(3.6, len(items) * .6) + .15
+        elif kind == "steps":
+            steps = (block.get("steps") or [])[:4]
+            count = max(1, len(steps))
+            gap = .22
+            block_width = (width - gap * (count - 1)) / count
+            for idx, step in enumerate(steps):
+                left = x + idx * (block_width + gap)
+                _textbox(slide, f"{idx + 1:02d}", left, cursor_y, block_width, .55,
+                         font=fonts["latin"], size=26, color=colors["primary"], bold=True)
+                _shape(slide, MSO_SHAPE.RECTANGLE, left, cursor_y + .73, block_width, .04, colors["secondary"])
+                _textbox(slide, step.get("title", ""), left, cursor_y + .9, block_width, .5,
+                         font=fonts["body"], size=20, color=colors["text"], bold=True)
+                detail = step.get("detail")
+                if detail:
+                    _textbox(slide, detail, left, cursor_y + 1.45, block_width, .5,
+                             font=fonts["body"], size=14, color=colors["muted"])
+            cursor_y += 2.1
+        elif kind == "compare":
+            columns = (block.get("left") or {}, block.get("right") or {})
+            for column_idx, column in enumerate(columns):
+                left = x + column_idx * (width / 2 + .12)
+                column_width = width / 2 - .18
+                _shape(slide, MSO_SHAPE.RECTANGLE, left, cursor_y, column_width, .06,
+                       colors["primary"] if column_idx == 0 else colors["secondary"])
+                heading = column.get("heading")
+                if heading:
+                    _textbox(slide, heading, left, cursor_y + .22, column_width, .4,
+                             font=fonts["body"], size=18, color=colors["primary"], bold=True)
+                for item_idx, text in enumerate((column.get("items") or [])[:4]):
+                    _textbox(slide, text, left, cursor_y + .66 + item_idx * .6, column_width, .5,
+                             font=fonts["body"], size=20, color=colors["text"])
+            max_items = max((len(column.get("items") or []) for column in columns), default=1)
+            cursor_y += .66 + max(1, max_items) * .6 + .2
+        elif kind == "quote":
+            _shape(slide, MSO_SHAPE.RECTANGLE, x, cursor_y + .06, .06, .5, colors["primary"])
+            _textbox(slide, block.get("text", ""), x + .22, cursor_y, width - .4, .62,
+                     font=fonts["body"], size=22, color=colors["text"])
+            citation = block.get("citation")
+            if citation:
+                _textbox(slide, citation, x + .22, cursor_y + .62, width - .4, .3,
+                         font=fonts["body"], size=12, color=colors["muted"])
+                cursor_y += 1.0
+            else:
+                cursor_y += .72
+        elif kind == "visual":
+            _shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, x, cursor_y, width, 1.1,
+                   colors["surface"], colors["secondary"], radius=True)
+            _textbox(slide, f"图示占位：{block.get('diagram') or 'visual'}", x + .3, cursor_y + .2, width - .6, .4,
+                     font=fonts["body"], size=16, color=colors["primary"], bold=True)
+            caption = block.get("caption")
+            if caption:
+                _textbox(slide, caption, x + .3, cursor_y + .62, width - .6, .3,
+                         font=fonts["body"], size=12, color=colors["muted"])
+            cursor_y += 1.25
+        elif kind == "note":
+            _textbox(slide, block.get("text", ""), x, cursor_y, width, .35,
+                     font=fonts["body"], size=13, color=colors["muted"])
+            cursor_y += .45
+
+
 def _render_standard(slide, item: dict, template: dict, colors: dict, fonts: dict):
     mode = template["composition"]
     x = 2.55 if mode == "academic_offset" else 1.35
@@ -163,7 +258,10 @@ def _render_standard(slide, item: dict, template: dict, colors: dict, fonts: dic
     body = [str(value) for value in (item.get("body") or [])]
     page_type = item.get("page_type", "concept")
     layout = item.get("layout", "")
-    if page_type == "process" or layout == "steps":
+    blocks = item.get("blocks") or []
+    if blocks:
+        _render_blocks(slide, blocks, colors, fonts, x, width)
+    elif page_type == "process" or layout == "steps":
         _render_process(slide, body, colors, fonts, x, width)
     elif page_type in {"question", "exercise"}:
         _shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, x, 2.0, width, 3.8, colors["surface"], colors["secondary"], radius=True)

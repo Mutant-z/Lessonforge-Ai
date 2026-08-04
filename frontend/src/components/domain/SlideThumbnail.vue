@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { PPTSlide, PPTTemplate } from '../../types';
+import type { PPTSlide, PPTBlock, PPTTemplate } from '../../types';
 import { DEFAULT_PPT_TEMPLATE, pptTemplateStyle } from '../../utils/pptTemplate';
 
 const props = defineProps<{
@@ -20,7 +20,27 @@ const slideLayout = computed(() => props.slide.layout || props.slide.layout_type
 const isCover = computed(() => pageType.value === 'cover' || ['title', 'cover'].includes(slideLayout.value));
 const isProcess = computed(() => pageType.value === 'process' || slideLayout.value === 'steps');
 const isSplit = computed(() => pageType.value === 'comparison' || slideLayout.value === 'split');
+function blockPreviewText(blocks: PPTBlock[]): string[] {
+  const out: string[] = [];
+  for (const block of blocks) {
+    switch (block.kind) {
+      case 'lead': out.push(block.text); break;
+      case 'bullets': out.push(...block.items.slice(0, 2).map((item) => item.text)); break;
+      case 'steps': out.push(...block.steps.slice(0, 2).map((step) => step.title)); break;
+      case 'compare': out.push(block.left.items[0] || ''); out.push(block.right.items[0] || ''); break;
+      case 'quote': out.push(block.text); break;
+      case 'visual': out.push(`图示：${block.diagram || 'visual'}`); break;
+      case 'note': break;
+    }
+  }
+  return out.filter(Boolean).slice(0, 2);
+}
+
 const previewBullets = computed(() => {
+  const structured = props.slide.blocks || [];
+  if (structured.length) {
+    return blockPreviewText(structured);
+  }
   if (isSplit.value) {
     const half = Math.ceil(bullets.value.length / 2);
     return half > 0 ? [bullets.value[0], bullets.value[half]].filter(Boolean) : [];

@@ -1,5 +1,5 @@
 {
-  "version": "2.1.0",
+  "version": "2.2.0",
   "design_principles": [
     "每一页只承载一个核心信息层级，其他内容作为辅助说明。",
     "标题表达结论而不是页面主题，让学生一眼看出本页要传达的判断。",
@@ -192,6 +192,7 @@
   "quality_checklist": [
     "叙事完整：页面按情境导入、概念建构、应用检查与总结组织，没有缺失环节。",
     "密度达标：标题与正文遵守 density_limits 的上限，正文只保留关键结论。",
+    "结构清晰：页面用语义化内容块（lead/bullets/steps/compare/quote/visual/note）表达，避免平铺长文本。",
     "版式匹配：每页 layout 来自该页面类型的建议版式列表。",
     "视觉可执行：每条 visual_suggestion 指明图形类型、位置与信息关系。",
     "无 AI 装饰痕迹：视觉建议不得包含装饰下划线、侧边线或填充装饰条，遵守 anti_patterns 反模式指南。",
@@ -210,5 +211,29 @@
     "min_element_gap_inches": 0.3,
     "text_overflow_slack_ratio": 0.1,
     "default_canvas": "16:9 (13.333 x 7.5 inches)"
+  },
+  "block_guidance": {
+    "cover": {"blocks": [], "note": "封面不使用内容块，由 title/purpose/body 副标题构成。"},
+    "objectives": {"blocks": ["bullets"], "note": "编号要点，每条一个可观察行为。"},
+    "scenario": {"blocks": ["lead", "quote"], "note": "lead 提出真实问题，quote 给出先判断再说明依据的提示。"},
+    "concept": {"blocks": ["lead", "bullets"], "note": "lead 给出概念结论，bullets 呈现关键点与条件关系。"},
+    "process": {"blocks": ["steps"], "note": "steps 呈现 3~4 步递进应用步骤，每步含 title 与 detail。"},
+    "comparison": {"blocks": ["compare"], "note": "compare 左右两栏对照，各栏含 heading 与 items。"},
+    "case": {"blocks": ["lead", "steps", "bullets"], "note": "lead 给出案例结论，steps 示范过程，bullets 检查结论。"},
+    "question": {"blocks": ["lead", "quote"], "note": "lead 提出问题，quote 预留判断空间。"},
+    "exercise": {"blocks": ["bullets", "note"], "note": "bullets 为任务清单（可 emphasize），note 为自检提示。"},
+    "summary": {"blocks": ["bullets"], "note": "三条结论短句。"},
+    "homework": {"blocks": ["bullets", "note"], "note": "作业任务与完成要求。"}
+  },
+  "typography": {
+    "scale": {
+      "display": {"size_px": 42, "weight": 800, "usage": "封面标题"},
+      "title": {"size_px": 34, "weight": 800, "usage": "页面标题"},
+      "lead": {"size_px": 24, "weight": 700, "usage": "开篇结论/引导"},
+      "body": {"size_px": 20, "weight": 400, "usage": "正文/要点"},
+      "quote": {"size_px": 22, "weight": 500, "usage": "重点引用"},
+      "note": {"size_px": 13, "weight": 400, "usage": "注释/提示"}
+    },
+    "spacing": {"grid_px": 8, "block_gap_px": 20, "content_margin_px": 54}
   }
 }

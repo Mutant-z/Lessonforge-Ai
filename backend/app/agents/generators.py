@@ -100,44 +100,156 @@ def _clip(text: str, max_chars: int) -> str:
     return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
 
 
+def _blocks_flat_text(blocks: list[dict]) -> list[str]:
+    """把结构化 blocks 展平为扁平文本（body 字段的投影），供下游摘要/高亮读取。"""
+    text: list[str] = []
+    for block in blocks:
+        kind = block["kind"]
+        if kind == "lead":
+            if block.get("text"):
+                text.append(block["text"])
+            if block.get("sub"):
+                text.append(block["sub"])
+        elif kind == "bullets":
+            text.extend(item["text"] for item in block.get("items", []))
+        elif kind == "steps":
+            text.extend(step["title"] for step in block.get("steps", []))
+        elif kind == "compare":
+            for column in (block.get("left"), block.get("right")):
+                if not column:
+                    continue
+                if column.get("heading"):
+                    text.append(column["heading"])
+                text.extend(column.get("items", []))
+        elif kind == "quote":
+            if block.get("text"):
+                text.append(block["text"])
+        elif kind == "visual":
+            if block.get("caption"):
+                text.append(block["caption"])
+        elif kind == "note":
+            if block.get("text"):
+                text.append(block["text"])
+    return text
+
+
 def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_swiss_blue") -> PPTContent:
     seconds = bp.course_identity.duration_minutes * 60
+    key_points = [_clip(item, 24) for item in bp.key_points[:3]]
+    if len(key_points) == 1:
+        key_points.append("把握适用条件与前提")
     specs = [
         ("S01", "cover", _clip(bp.course_identity.title, 30), "建立课程主题",
          [_clip(bp.course_identity.subject, 24), _clip(bp.course_identity.grade_level, 24)], "cover",
          "封面左侧放置课程主题大标题，右侧留白，用一条主题色细线建立视觉锚点。",
-         f"围绕“{_clip(bp.course_identity.title, 20)}”建立情境与期待，说明本节将回答的核心问题，用提问唤起学生的既有经验。", 20),
+         f"围绕“{_clip(bp.course_identity.title, 20)}”建立情境与期待，说明本节将回答的核心问题，用提问唤起学生的既有经验。",
+         20, []),
         ("S02", "objectives", "本课学习目标：可观察、可检验", "明确可观察成果",
          [_clip(f"{o.id}：{o.behavior}", 24) for o in bp.objectives[:6]], "bullet",
          "用编号列表按目标顺序纵向排列，目标编号使用主题色圆形徽章。",
-         "逐一说明每条学习目标，指出目标与课堂环节的对应关系，检查学生是否明确本课要达成的结果。", 40),
+         "逐一说明每条学习目标，指出目标与课堂环节的对应关系，检查学生是否明确本课要达成的结果。",
+         40,
+         [{"kind": "bullets", "numbered": True, "items": [
+             {"text": _clip(f"{o.id}：{o.behavior}", 24)} for o in bp.objectives[:6]
+         ]}]),
         ("S03", "scenario", "从一个真实问题开始判断", "激活经验",
          [_clip(bp.timeline[0].teacher_action, 24), "先作出判断，再说明依据"], "question",
          "页面上方保留大面积留白作为问题区，下方用虚线框提示学生写下初步判断。",
-         "呈现真实问题情境，先请学生独立作出初步判断并说明依据，再进入正式讲解，保留学生的原有认识。", max(40, int(seconds * .15))),
+         "呈现真实问题情境，先请学生独立作出初步判断并说明依据，再进入正式讲解，保留学生的原有认识。",
+         max(40, int(seconds * .15)),
+         [{"kind": "lead", "text": _clip(bp.timeline[0].teacher_action, 24), "sub": ""},
+          {"kind": "quote", "text": "先作出判断，再说明依据", "citation": "课堂提示"}]),
         ("S04", "concept", "理解概念才能正确应用", "建立准确理解",
-         [_clip(item, 24) for item in bp.key_points[:3]], "split",
+         key_points, "split",
          "左侧放置概念框图，右侧用箭头图表示概念之间的关键关系，底部保留留白。",
-         "围绕关键关系讲解核心概念，用箭头图示连接概念与应用条件，设置一个检查问题确认学生理解。", max(60, int(seconds * .30))),
+         "围绕关键关系讲解核心概念，用箭头图示连接概念与应用条件，设置一个检查问题确认学生理解。",
+         max(60, int(seconds * .30)),
+         [{"kind": "lead", "text": key_points[0], "sub": ""},
+          {"kind": "bullets", "items": [{"text": item} for item in key_points[1:]]}]),
         ("S05", "process", "应用三步：识别、选择、检查", "形成可迁移方法",
          ["识别任务与条件", "选择核心概念", "完成推理并检查结论"], "steps",
          "用三步横向流程线展示应用步骤，每一步配编号与短句。",
-         "以一道完整例题示范三步应用过程，逐步标注识别、选择与检查动作，强调检查环节的作用。", max(60, int(seconds * .25))),
+         "以一道完整例题示范三步应用过程，逐步标注识别、选择与检查动作，强调检查环节的作用。",
+         max(60, int(seconds * .25)),
+         [{"kind": "steps", "steps": [
+             {"title": "识别任务与条件", "detail": "找出已知条件与所求目标"},
+             {"title": "选择核心概念", "detail": "匹配适用的核心概念"},
+             {"title": "完成推理并检查", "detail": "验证结论与条件一致"},
+         ]}]),
         ("S06", "exercise", "现在试一试：完成并检查", "收集学习证据",
          ["完成一个基础任务", "写出关键判断依据", "对照标准自我检查"], "exercise",
          "题目与作答区分栏，左侧题目区，右侧作答区，底部留出自我检查提示条。",
-         "布置一个基础任务，要求学生完成并写出关键依据，再对照标准自我检查，收集本课的学习证据。", max(50, int(seconds * .15))),
+         "布置一个基础任务，要求学生完成并写出关键依据，再对照标准自我检查，收集本课的学习证据。",
+         max(50, int(seconds * .15)),
+         [{"kind": "bullets", "items": [
+             {"text": "完成一个基础任务", "emphasize": True},
+             {"text": "写出关键判断依据", "emphasize": False},
+             {"text": "对照标准自我检查", "emphasize": False},
+         ]},
+          {"kind": "note", "text": "完成后对照评分标准核对"}]),
         ("S07", "summary", "本课小结：概念到应用", "巩固核心结构",
          ["核心概念", "应用条件", "解决问题的步骤"], "summary",
          "用三条结论短句收束本课，下方用时间轴示意环节之间的推进关系。",
-         "带领学生回顾核心概念、应用条件与解决步骤，用提问确认三条结论，并预告下一课的联系。", max(30, int(seconds * .10))),
+         "带领学生回顾核心概念、应用条件与解决步骤，用提问确认三条结论，并预告下一课的联系。",
+         max(30, int(seconds * .10)),
+         [{"kind": "bullets", "items": [
+             {"text": "核心概念"},
+             {"text": "应用条件"},
+             {"text": "解决问题的步骤"},
+         ]}]),
     ]
-    total = sum(item[-1] for item in specs)
-    specs[-1] = (*specs[-1][:-1], max(20, specs[-1][-1] + seconds - total))
-    return PPTContent(theme=theme, slides=[Slide(
-        id=item_id, page_type=page_type, title=title, purpose=purpose, body=body,
-        layout=layout, visual_suggestion=visual, speaker_notes=notes, duration_seconds=duration,
-    ) for item_id, page_type, title, purpose, body, layout, visual, notes, duration in specs])
+    total = sum(item[8] for item in specs)
+    specs[-1] = (*specs[-1][:8], max(20, specs[-1][8] + seconds - total), specs[-1][9])
+    slides = []
+    for item_id, page_type, title, purpose, fallback_body, layout, visual, notes, duration, blocks in specs:
+        flat_body = _blocks_flat_text(blocks) if blocks else fallback_body
+        slides.append(Slide(
+            id=item_id, page_type=page_type, title=title, purpose=purpose, body=flat_body,
+            layout=layout, visual_suggestion=visual, speaker_notes=notes, duration_seconds=duration,
+            blocks=blocks,
+        ))
+    return PPTContent(theme=theme, slides=slides)
+
+
+def make_deck(bp: CourseBlueprintSchema) -> list[dict]:
+    """为真实 PPT 模板 deck 生成 15 页角色化内容。
+
+    返回每页 {title, body}，body 的条目顺序与 templates/ppt_decks/deck_slots.json
+    中对应角色的 content 槽位一一对应；渲染时由 deck_renderer 填入模板。
+    """
+    identity = bp.course_identity
+    objectives = [f"{o.id}：{o.behavior}——{o.criterion}" for o in bp.objectives[:4]]
+    while len(objectives) < 4:
+        objectives.append("OBJ-0X：补充目标——达成可观察成果")
+    key_points = [kp for kp in bp.key_points[:4]]
+    while len(key_points) < 4:
+        key_points.append("延伸知识点")
+    difficulty = (bp.difficulty_points or ["在新情境中迁移应用"])[0]
+    title = identity.title
+    subtitle = " · ".join(filter(None, [identity.subject, identity.grade_level]))
+    motivation = f"围绕“{title}”展开，理解核心概念并能在真实情境中应用。"
+    core_modules = []
+    for n in range(1, 5):
+        core_modules.append({
+            "title": f"核心知识0{n}",
+            "body": [f"MODULE {n}", f"要点：{key_points[n - 1]}"]
+            + [f"要点{n}-{i + 1}" for i in range(3)]
+            + ["核心公式"],
+        })
+    return [
+        {"title": title, "body": [subtitle]},
+        {"title": "课程导入", "body": [f"为什么学习{title}？", motivation] + [f"{i + 1}. {kp}" for i, kp in enumerate(key_points[:4])]},
+        {"title": "学习目标", "body": ["完成本节后，你能够："] + objectives[:4]},
+        {"title": "知识地图", "body": ["核心问题", *key_points[:4]]},
+        {"title": "知识导入", "body": [motivation, *key_points[:4], "核心判断", f"关键：{key_points[0]}；难点：{difficulty}"]},
+        *core_modules,
+        {"title": "案例分析", "body": [f"{i + 1}. {step}" for i, step in enumerate(["问题定义", "方案执行", "数据收集", "结果评价"])] + ["案例复盘", f"通过{title}案例理解应用条件"]},
+        {"title": "互动讨论", "body": [f"讨论：{difficulty}", "独立判断", "同伴交换", "全班分享"]},
+        {"title": "本课总结", "body": ["用一句话记住四个关键点", *key_points[:4], *[f"详解：{kp}" for kp in key_points[:4]], "理解框架只是起点，真正的掌握来自应用、反馈与修正"]},
+        {"title": "即时测验", "body": [f"Q1  {key_points[0]}的核心是什么？", "选择或写出你的答案", f"Q2  {key_points[1]}如何应用？", "选择或写出你的答案", f"Q3  适用条件是什么？", "选择或写出你的答案", "建议：先隐藏答案，完成后再揭示"]},
+        {"title": "课后任务", "body": ["任务说明", f"围绕{title}完成一个应用任务", *[f"✓ {item}" for item in ["明确的问题或目标", "可验证的证据或指标", "具体行动步骤", "风险与反馈机制"]]]},
+        {"title": f"结课：{title}", "body": ["把今天的一个关键观点，用在下一个真实问题上"]},
+    ]
 
 
 def make_task_sheet(bp: CourseBlueprintSchema) -> TaskSheetContent:

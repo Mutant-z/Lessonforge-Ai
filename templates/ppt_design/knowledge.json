@@ -1,0 +1,61 @@
+{
+  "version": "1.0.0",
+  "design_principles": [
+    "每一页只承载一个核心信息层级，其他内容作为辅助说明。",
+    "标题表达结论而不是页面主题，让学生一眼看出本页要传达的判断。",
+    "视觉元素服务于教学目的：图示用于解释关系，留白用于引导思考。",
+    "页面之间保持一致的叙事节奏，从情境导入推进到应用与总结。"
+  ],
+  "page_type_guidance": {
+    "cover": {"narrative_goal": "建立课程主题并唤起学习期待", "suggested_content": "课程标题、学科与学段", "layouts": ["cover", "title"]},
+    "objectives": {"narrative_goal": "明确本课可观察的学习成果", "suggested_content": "编号的学习目标，每条一个可观察行为", "layouts": ["bullet"]},
+    "scenario": {"narrative_goal": "用真实问题激活学生既有经验", "suggested_content": "情境描述、学生先作出判断的提示", "layouts": ["question", "bullet"]},
+    "concept": {"narrative_goal": "建立准确的核心概念与关键关系", "suggested_content": "概念要点、概念之间的条件关系", "layouts": ["split", "bullet"]},
+    "process": {"narrative_goal": "形成可迁移的应用步骤与方法", "suggested_content": "按顺序编号的应用步骤，每步一条短句", "layouts": ["steps", "process"]},
+    "comparison": {"narrative_goal": "对比两组概念或情境的异同", "suggested_content": "左右或上下对照的两组要点", "layouts": ["comparison", "split"]},
+    "case": {"narrative_goal": "用具体案例示范概念或方法的应用", "suggested_content": "案例条件、示范过程、检查结论", "layouts": ["steps", "split"]},
+    "question": {"narrative_goal": "提出驱动思考的问题并预留判断空间", "suggested_content": "问题描述、作答或判断提示", "layouts": ["question", "bullet"]},
+    "exercise": {"narrative_goal": "布置任务并收集学习证据", "suggested_content": "任务要求、作答提示、自检标准", "layouts": ["exercise", "question"]},
+    "summary": {"narrative_goal": "收束本课并巩固核心结构", "suggested_content": "核心概念、应用条件、解决步骤三条结论", "layouts": ["summary", "bullet"]},
+    "homework": {"narrative_goal": "把学习延伸到课后并保持目标一致", "suggested_content": "作业任务、完成要求、提交方式", "layouts": ["bullet", "summary"]}
+  },
+  "density_limits": {
+    "title_chars": 30,
+    "body_chars": 120,
+    "body_items": 6,
+    "item_chars": 25,
+    "speaker_notes_chars": 30
+  },
+  "layout_library": {
+    "cover": {"suitable_page_types": ["cover"], "structure": "大标题居中或左侧，副标题与留白"},
+    "title": {"suitable_page_types": ["cover"], "structure": "大标题加一行副标题"},
+    "steps": {"suitable_page_types": ["process", "case"], "structure": "横向编号步骤条，每步配短句"},
+    "process": {"suitable_page_types": ["process", "case"], "structure": "横向流程线与步骤说明"},
+    "split": {"suitable_page_types": ["concept", "comparison", "case"], "structure": "左右分栏对照，左概念右关系"},
+    "comparison": {"suitable_page_types": ["comparison", "concept"], "structure": "两栏对照表，突出差异点"},
+    "bullet": {"suitable_page_types": ["objectives", "scenario", "concept", "question", "summary", "homework"], "structure": "纵向要点列表，每条一行"},
+    "question": {"suitable_page_types": ["question", "scenario", "exercise"], "structure": "上方问题区，下方作答或判断提示"},
+    "exercise": {"suitable_page_types": ["exercise"], "structure": "左题目右作答分栏，底部自检提示"},
+    "summary": {"suitable_page_types": ["summary", "homework"], "structure": "三条结论短句，下方时间轴或收束线"}
+  },
+  "visual_suggestion_guidelines": [
+    "视觉建议必须指明图形类型、位置与表达的信息关系，例如“左侧概念框图、右侧箭头图表示因果关系”。",
+    "禁止只写风格形容词（如“简洁大方”），必须给出可执行的画面构成。",
+    "抽象关系（流程、对比、因果、层级、数据变化）必须指定对应的图示方式。"
+  ],
+  "diagram_guidance": {
+    "flow": "用于步骤与过程：横向流程线或编号步骤条，箭头表示推进顺序。",
+    "comparison": "用于两组内容的异同：左右分栏或对照表，用相同结构对齐两列。",
+    "causality": "用于因果或条件关系：箭头图或鱼骨图，箭头从原因指向结果。",
+    "hierarchy": "用于概念层级：树形图或嵌套框图，上级在下级之上。",
+    "data_change": "用于数值或趋势变化：折线图、柱状图或区间刻度线，标注关键转折。"
+  },
+  "quality_checklist": [
+    "叙事完整：页面按情境导入、概念建构、应用检查与总结组织，没有缺失环节。",
+    "密度达标：标题与正文遵守 density_limits 的上限，正文只保留关键结论。",
+    "版式匹配：每页 layout 来自该页面类型的建议版式列表。",
+    "视觉可执行：每条 visual_suggestion 指明图形类型、位置与信息关系。",
+    "讲解充分：每页 speaker_notes 覆盖环节目的、讲解动作与提问检查，不少于 30 字。",
+    "时长合理：总时长与课程时长一致，重点环节分配更长页面时长。"
+  ]
+}

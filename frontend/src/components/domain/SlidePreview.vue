@@ -22,15 +22,21 @@ let resizeObserver: ResizeObserver | null = null;
 
 const activeTemplate = computed(() => props.template || DEFAULT_PPT_TEMPLATE);
 const bullets = computed(() => props.slide.bullet_points || props.slide.body || []);
-const layoutName = computed(() => props.slide.layout_type || props.slide.layout || '标准演示页');
 const pageType = computed(() => props.slide.page_type || 'concept');
-const isCover = computed(() => pageType.value === 'cover' || ['title', 'cover'].includes(props.slide.layout || ''));
-const isProcess = computed(() => pageType.value === 'process' || props.slide.layout === 'steps');
-const isSplit = computed(() => pageType.value === 'comparison' || props.slide.layout === 'split');
+const slideLayout = computed(() => props.slide.layout || props.slide.layout_type || '');
+const isCover = computed(() => pageType.value === 'cover' || ['title', 'cover'].includes(slideLayout.value));
+const isProcess = computed(() => pageType.value === 'process' || slideLayout.value === 'steps');
+const isSplit = computed(() => pageType.value === 'comparison' || slideLayout.value === 'split');
+const isQa = computed(() => pageType.value === 'question' || pageType.value === 'exercise');
+const coverSubtitle = computed(() => bullets.value.slice(0, 2).join(' · '));
+const splitColumns = computed(() => {
+  const half = Math.ceil(bullets.value.length / 2);
+  return [bullets.value.slice(0, half), bullets.value.slice(half)];
+});
 const canvasClasses = computed(() => [
   `theme-${activeTemplate.value.composition}`,
   `page-${pageType.value}`,
-  { 'is-cover': isCover.value, 'is-process': isProcess.value, 'is-split': isSplit.value },
+  { 'is-cover': isCover.value, 'is-process': isProcess.value, 'is-split': isSplit.value, 'is-qa': isQa.value },
 ]);
 
 function syncCanvasScale(width: number) {
@@ -53,35 +59,55 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
   <div class="slide-preview-container animate-fade-in" :style="pptTemplateStyle(activeTemplate)">
     <div ref="canvasFrame" class="ppt-canvas-frame">
       <div class="ppt-canvas" :class="canvasClasses" :style="{ transform: `scale(${canvasScale})` }">
-        <div class="composition-decoration" aria-hidden="true"><i /><i /><i /></div>
-        <div class="ppt-header">
-          <span class="slide-num-badge">PAGE {{ slide.slide_number || slideIndex + 1 }} / {{ totalSlides }}</span>
-          <span class="layout-badge">{{ layoutName }}</span>
+        <!-- 1. 模板装饰形状（对齐 pptx_renderer._decorate） -->
+        <div class="ppt-decoration" aria-hidden="true">
+          <i class="dec-main" /><i class="dec-accent" /><i class="dec-dot" /><i class="dec-ticks" />
         </div>
 
-        <div class="slide-content">
-          <h2 class="slide-title">{{ slide.title || '无标题幻灯片' }}</h2>
-          <p v-if="isCover && slide.purpose" class="cover-purpose">{{ slide.purpose }}</p>
+        <!-- 2. 页眉页码 -->
+        <span class="ppt-folio">{{ String(slideIndex + 1).padStart(2, '0') }}</span>
 
-          <div v-if="isProcess" class="process-layout">
+        <!-- 3. 页面主体 -->
+        <div class="ppt-body">
+          <h2 class="slide-title">{{ slide.title || '无标题幻灯片' }}</h2>
+
+          <template v-if="isCover">
+            <p v-if="coverSubtitle" class="cover-subtitle">{{ coverSubtitle }}</p>
+            <p v-if="slide.purpose" class="cover-purpose">{{ slide.purpose }}</p>
+            <span v-if="isCover" class="ppt-brand">LESSONFORGE</span>
+          </template>
+
+          <div v-else-if="isProcess" class="process-layout">
             <div v-for="(bullet, bIdx) in bullets.slice(0, 4)" :key="bIdx" class="process-step">
-              <span>{{ String(bIdx + 1).padStart(2, '0') }}</span>
+              <span class="step-num">{{ String(bIdx + 1).padStart(2, '0') }}</span>
+              <i class="step-rule" />
               <p>{{ bullet }}</p>
             </div>
           </div>
-          <div v-else-if="isSplit" class="split-layout">
-            <ul v-for="column in 2" :key="column">
-              <li v-for="(bullet, bIdx) in bullets.filter((_, index) => index % 2 === column - 1)" :key="bIdx">{{ bullet }}</li>
-            </ul>
+
+          <div v-else-if="isQa" class="qa-box">
+            <div v-for="(bullet, bIdx) in bullets.slice(0, 4)" :key="bIdx" class="qa-row">
+              <span class="qa-badge">{{ bIdx + 1 }}</span>
+              <p>{{ bullet }}</p>
+            </div>
           </div>
+
+          <div v-else-if="isSplit" class="split-layout">
+            <div v-for="(column, cIdx) in splitColumns" :key="cIdx" class="split-column" :class="{ 'is-second': cIdx === 1 }">
+              <p v-for="(bullet, bIdx) in column" :key="bIdx">{{ bullet }}</p>
+            </div>
+          </div>
+
           <ul v-else class="slide-bullets-area">
             <li v-for="(bullet, bIdx) in bullets" :key="bIdx">{{ bullet }}</li>
           </ul>
         </div>
 
-        <div v-if="slide.visual_suggestion && !isCover" class="slide-visual-hint">
-          <strong>视觉展示建议：</strong>{{ slide.visual_suggestion }}
-        </div>
+        <!-- 4. 配图建议条 -->
+        <div v-if="slide.visual_suggestion && !isCover" class="ppt-visual-hint">{{ slide.visual_suggestion }}</div>
+
+        <!-- 5. 页脚页码 -->
+        <span class="ppt-footer">{{ slideIndex + 1 }} / {{ totalSlides }}</span>
       </div>
     </div>
 
@@ -100,57 +126,86 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .ppt-canvas-frame { width: 100%; aspect-ratio: 16 / 9; position: relative; overflow: hidden; background: var(--ppt-bg); }
 .ppt-canvas {
   width: 960px; height: 540px; box-sizing: border-box; position: absolute; inset: 0 auto auto 0;
-  overflow: hidden; transform-origin: top left; will-change: transform; padding: 40px 54px 36px 72px;
-  color: var(--ppt-text); background: var(--ppt-bg); border: 1px solid color-mix(in srgb, var(--ppt-muted) 28%, transparent);
-  font-family: var(--ppt-body-font); display: flex; flex-direction: column;
+  overflow: hidden; transform-origin: top left; will-change: transform;
+  background: var(--ppt-bg); color: var(--ppt-text); font-family: var(--ppt-body-font);
 }
-.ppt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; position: relative; z-index: 2; }
-.slide-num-badge { font: 800 12px/1 var(--ppt-latin-font); letter-spacing: .1em; color: var(--ppt-primary); }
-.layout-badge { font-size: 12px; color: var(--ppt-muted); }
-.slide-content { position: relative; z-index: 2; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.slide-title { font-family: var(--ppt-heading-font); font-size: 32px; font-weight: 800; margin: 0 0 24px; line-height: 1.2; color: var(--ppt-text); }
-.cover-purpose { margin: auto 0 0; color: var(--ppt-primary); font-size: 17px; font-weight: 700; }
-.slide-bullets-area { flex: 1; overflow: hidden; margin: 0; padding-left: 24px; }
-.slide-bullets-area li { font-size: 18px; line-height: 1.7; color: var(--ppt-text); margin-bottom: 10px; }
-.slide-bullets-area li::marker { color: var(--ppt-primary); }
-.slide-visual-hint { position: relative; z-index: 2; margin-top: 14px; padding: 10px 14px; background: var(--ppt-surface); border-left: 3px solid var(--ppt-primary); font-size: 12px; color: var(--ppt-muted); }
-.slide-visual-hint strong { color: var(--ppt-text); }
-.process-layout { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 14px; }
-.process-step { min-width: 0; border-top: 4px solid var(--ppt-secondary); padding-top: 14px; }
-.process-step span { font: 800 25px/1 var(--ppt-latin-font); color: var(--ppt-primary); }
-.process-step p { margin: 16px 0 0; font-size: 17px; line-height: 1.45; font-weight: 700; }
-.split-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
-.split-layout ul { margin: 0; padding: 18px 20px 18px 38px; border-top: 4px solid var(--ppt-primary); background: var(--ppt-surface); }
-.split-layout ul + ul { border-top-color: var(--ppt-secondary); }
-.split-layout li { margin-bottom: 14px; font-size: 17px; line-height: 1.5; }
-.composition-decoration { position: absolute; inset: 0; pointer-events: none; }
 
-.theme-swiss_rail { border-top: 8px solid var(--ppt-primary); }
-.theme-swiss_rail::before { content: ''; position: absolute; left: 32px; top: 34px; bottom: 34px; width: 6px; background: var(--ppt-primary); }
-.theme-nordic_field { padding-left: 62px; }
-.theme-nordic_field .composition-decoration i:first-child { position: absolute; width: 250px; height: 250px; right: -90px; top: -110px; border-radius: 50%; background: var(--ppt-secondary); }
-.theme-nordic_field .slide-visual-hint { border-left: 0; border-radius: 18px; }
-.theme-academic_offset { padding-left: 190px; }
-.theme-academic_offset::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 150px; background: var(--ppt-primary); }
-.theme-academic_offset .slide-num-badge { position: absolute; left: -145px; color: var(--ppt-on-primary); }
-.theme-academic_offset .slide-title { color: var(--ppt-primary); }
-.theme-editorial_margin { padding-left: 84px; border: 12px solid var(--ppt-bg); outline: 1px solid var(--ppt-secondary); outline-offset: -24px; }
-.theme-editorial_margin::before { content: ''; position: absolute; left: 44px; top: 36px; bottom: 36px; width: 2px; background: var(--ppt-primary); }
-.theme-editorial_margin .slide-title { font-weight: 700; letter-spacing: .04em; }
-.theme-science_signal { border-top: 7px solid var(--ppt-primary); }
-.theme-science_signal::before { content: ''; position: absolute; left: 38px; top: 34px; bottom: 34px; width: 3px; background: var(--ppt-primary); box-shadow: 7px 0 0 var(--ppt-secondary); }
-.theme-science_signal .slide-title { color: var(--ppt-text); text-shadow: 0 0 18px color-mix(in srgb, var(--ppt-primary) 30%, transparent); }
-.theme-science_signal .slide-visual-hint { border: 1px solid var(--ppt-secondary); }
-.theme-primary_blocks::before { content: ''; position: absolute; width: 170px; height: 170px; left: -75px; top: -72px; border-radius: 50%; background: var(--ppt-secondary); }
-.theme-primary_blocks::after { content: ''; position: absolute; width: 145px; height: 145px; right: -66px; bottom: -62px; border-radius: 50%; background: var(--ppt-primary); }
-.theme-primary_blocks .slide-title { font-size: 35px; }
-.theme-primary_blocks .slide-num-badge { color: var(--ppt-on-primary); }
-.theme-primary_blocks .slide-visual-hint { border-left: 0; border-radius: 18px; }
-.is-cover .ppt-header { margin-bottom: 82px; }
-.is-cover .slide-title { max-width: 760px; font-size: 44px; line-height: 1.16; }
-.is-cover .slide-bullets-area { display: flex; flex: initial; gap: 10px; padding: 0; list-style: none; }
-.is-cover .slide-bullets-area li { color: var(--ppt-muted); }
+/* 1. 模板装饰形状（对齐 pptx_renderer._decorate，坐标按 72px/英寸换算） */
+.ppt-decoration { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.ppt-decoration i { position: absolute; display: block; }
 
+.theme-swiss_rail .dec-main { left: 39.6px; top: 39.6px; width: 5.8px; height: 459.4px; background: var(--ppt-primary); }
+.theme-swiss_rail .dec-accent { left: 129.6px; top: 39.6px; width: 781.2px; height: 1.5px; background: var(--ppt-secondary); }
+
+.theme-nordic_field .dec-dot { left: 802.8px; top: 13px; width: 133.2px; height: 133.2px; border-radius: 50%; background: var(--ppt-secondary); }
+.theme-nordic_field .dec-main { left: 50.4px; bottom: 14px; width: 223.2px; height: 5.8px; background: var(--ppt-primary); }
+
+.theme-academic_offset .dec-main { left: 0; top: 0; width: 144px; height: 540px; background: var(--ppt-primary); }
+.theme-academic_offset .dec-accent { left: 144px; top: 0; width: 8.6px; height: 540px; background: var(--ppt-secondary); }
+
+.theme-editorial_margin .dec-main { left: 51.8px; top: 46.8px; width: 2.2px; height: 442.8px; background: var(--ppt-primary); }
+.theme-editorial_margin .dec-accent { left: 72px; top: 95px; width: 831.6px; height: 1.5px; background: var(--ppt-secondary); }
+.theme-editorial_margin .dec-dot { left: 72px; top: 476.6px; width: 831.6px; height: 1.5px; background: var(--ppt-secondary); }
+
+.theme-science_signal .dec-main { left: 0; top: 0; width: 960px; height: 8px; background: var(--ppt-primary); }
+.theme-science_signal .dec-accent { left: 51.8px; top: 49px; width: 4.3px; height: 428.4px; background: var(--ppt-primary); }
+.theme-science_signal .dec-ticks { left: 655.2px; top: 493.2px; width: 30.2px; height: 2.5px; background: var(--ppt-secondary); box-shadow: 50.4px 0 0 var(--ppt-secondary), 100.8px 0 0 var(--ppt-secondary), 151.2px 0 0 var(--ppt-secondary), 201.6px 0 0 var(--ppt-secondary); }
+
+.theme-primary_blocks .dec-dot { left: 5.8px; top: 5.8px; width: 85px; height: 85px; border-radius: 50%; background: var(--ppt-secondary); }
+.theme-primary_blocks .dec-main { left: 877px; top: 459.4px; width: 64.8px; height: 64.8px; border-radius: 50%; background: var(--ppt-primary); }
+
+/* 2. 页眉页码 */
+.ppt-folio { position: absolute; left: 59px; top: 44.6px; font: 800 16px/1 var(--ppt-latin-font); color: var(--ppt-primary); z-index: 3; }
+.theme-academic_offset .ppt-folio { left: 27.4px; color: var(--ppt-on-primary); }
+.theme-primary_blocks .ppt-folio { left: 31.7px; color: var(--ppt-on-primary); }
+
+/* 3. 页面主体 */
+.ppt-body { position: absolute; left: 97.2px; top: 0; width: 763.2px; height: 540px; z-index: 2; }
+.theme-academic_offset .ppt-body { left: 183.6px; width: 698.4px; }
+
+.slide-title { position: absolute; top: 66px; left: 0; width: 100%; margin: 0; font: 800 34px/1.15 var(--ppt-heading-font); color: var(--ppt-text); }
+
+.is-cover .slide-title { top: 157px; font-size: 42px; }
+.cover-subtitle { position: absolute; top: 246.2px; left: 0; width: 100%; margin: 0; font: 400 22px/1.3 var(--ppt-body-font); color: var(--ppt-muted); }
+.cover-purpose { position: absolute; top: 404.6px; left: 0; margin: 0; font: 700 16px/1.3 var(--ppt-body-font); color: var(--ppt-primary); }
+
+.ppt-brand { display: none; }
+.theme-academic_offset .ppt-brand { display: block; position: absolute; left: 28px; top: 428px; font: 800 10px/1 var(--ppt-latin-font); letter-spacing: .04em; color: var(--ppt-on-primary); z-index: 3; }
+
+/* 流程步骤卡片 */
+.process-layout { position: absolute; top: 152.6px; left: 0; width: 100%; display: flex; gap: 15.8px; }
+.process-step { flex: 1; min-width: 0; }
+.process-step .step-num { font: 800 26px/1 var(--ppt-latin-font); color: var(--ppt-primary); }
+.process-step .step-rule { display: block; height: 2.9px; margin: 13px 0 12px; background: var(--ppt-secondary); }
+.process-step p { margin: 0; font: 700 20px/1.4 var(--ppt-body-font); color: var(--ppt-text); }
+
+/* 问答/练习徽章框 */
+.qa-box { position: absolute; top: 144px; left: 0; width: 100%; height: 273.6px; box-sizing: border-box; border-radius: 12px; background: var(--ppt-surface); border: 1px solid var(--ppt-secondary); padding: 25.2px 24px 0; }
+.qa-row { display: flex; align-items: center; gap: 16px; margin-bottom: 26px; }
+.qa-badge { flex: none; width: 30.2px; height: 30.2px; border-radius: 50%; background: var(--ppt-primary); color: var(--ppt-on-primary); display: flex; align-items: center; justify-content: center; font: 800 15px/1 var(--ppt-latin-font); }
+.qa-row p { margin: 0; font: 400 20px/1.3 var(--ppt-body-font); color: var(--ppt-text); }
+
+/* 对比分栏 */
+.split-layout { position: absolute; top: 149.8px; left: 0; width: 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 21.6px; }
+.split-column { min-width: 0; }
+.split-column::before { content: ''; display: block; height: 4.3px; background: var(--ppt-primary); margin-bottom: 24px; }
+.split-column.is-second::before { background: var(--ppt-secondary); }
+.split-column p { margin: 0 0 20px; font: 400 20px/1.35 var(--ppt-body-font); color: var(--ppt-text); }
+
+/* 标准要点列表 */
+.slide-bullets-area { position: absolute; top: 144px; left: 0; width: 100%; margin: 0; padding: 0; list-style: none; }
+.slide-bullets-area li { position: relative; padding-left: 24px; margin-bottom: 15px; font: 400 21px/1.4 var(--ppt-body-font); color: var(--ppt-text); }
+.slide-bullets-area li::before { content: '•'; position: absolute; left: 0; color: var(--ppt-text); }
+
+/* 4. 配图建议条 */
+.ppt-visual-hint { position: absolute; left: 97.2px; top: 443.5px; width: 763.2px; height: 36px; box-sizing: border-box; display: flex; align-items: center; padding: 0 11.5px; background: var(--ppt-surface); font: 400 10px/1 var(--ppt-body-font); color: var(--ppt-muted); z-index: 2; }
+.theme-academic_offset .ppt-visual-hint { left: 183.6px; width: 698.4px; }
+
+/* 5. 页脚页码 */
+.ppt-footer { position: absolute; right: 71px; bottom: 13px; font: 400 9px/1 var(--ppt-latin-font); color: var(--ppt-muted); z-index: 3; }
+.theme-primary_blocks .ppt-footer { right: 103px; }
+
+/* 底部教师讲解备注面板 */
 .ppt-footer-panel { background: var(--bg-surface); border: 1px solid var(--border-default); padding: 20px; }
 .notes-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .notes-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #002fa7; }

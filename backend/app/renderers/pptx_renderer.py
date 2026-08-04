@@ -204,7 +204,8 @@ def _render_standard(slide, item: dict, template: dict, colors: dict, fonts: dic
             paragraph.font.size = Pt(21)
             paragraph.font.color.rgb = colors["text"]
             paragraph.space_after = Pt(15)
-            paragraph.text = f"•  {text}"
+            clean_text = text.lstrip("•-*123456789. ").strip()
+            paragraph.text = f"•  {clean_text}"
 
     suggestion = item.get("visual_suggestion")
     if suggestion:

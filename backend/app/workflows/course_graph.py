@@ -1,3 +1,7 @@
+from app.services.ppt_validation_service import PPTXPackageValidator
+from app.renderers.ppt_visual_qa import PPTVisualQARenderer
+from app.renderers.pptx_renderer import render_pptx
+from pathlib import Path
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -51,7 +55,45 @@ async def verbatim_node(state: CourseGraphState):
 
 
 async def qa_node(state: CourseGraphState):
-    return {"quality_report": {"score": 100, "summary": "结构化资源已完成确定性检查"}, "quality_issues": [], "completed_nodes": ["quality_assurance_agent"], "status": "teacher_review"}
+    issues = list(state.get("quality_issues", []))
+    if state.get("ppt"):
+        try:
+            ppt_content = PPTContent.model_validate(state["ppt"]).model_dump()
+            temp_dir = Path("/tmp/lessonforge_qa") / str(state.get("course_id", "default"))
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            pptx_path = temp_dir / "course_deck.pptx"
+            render_pptx(title=state.get("requirements", {}).get("title", "PPT"), content=ppt_content, output=pptx_path)
+            package_issues = PPTXPackageValidator.validate_pptx(pptx_path)
+            for issue in package_issues:
+                issues.append({
+                    "severity": "critical" if issue.severity == "error" else "warning",
+                    "field": "ppt_ooxml_package",
+                    "description": f"PPTX 包校验问题 [{issue.component}]: {issue.message}"
+                })
+            if PPTVisualQARenderer.is_available():
+                try:
+                    slide_imgs = PPTVisualQARenderer.convert_pptx_to_images(pptx_path, temp_dir / "thumbnails")
+                    state["ppt_slide_thumbnails"] = [str(p) for p in slide_imgs]
+                except Exception as e:
+                    issues.append({
+                        "severity": "warning",
+                        "field": "ppt_visual_qa",
+                        "description": f"Visual QA 缩略图渲染警告: {str(e)}"
+                    })
+        except Exception as e:
+            issues.append({
+                "severity": "critical",
+                "field": "ppt_render",
+                "description": f"PPTX 渲染及校验失败: {str(e)}"
+            })
+
+    score = 100 if not any(x.get("severity") == "critical" for x in issues) else 60
+    return {
+        "quality_report": {"score": score, "summary": "结构化资源已完成设计与包格式审查"},
+        "quality_issues": issues,
+        "completed_nodes": ["quality_assurance_agent"],
+        "status": "teacher_review"
+    }
 
 
 def route_quality(state: CourseGraphState) -> str:

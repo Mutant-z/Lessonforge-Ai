@@ -150,12 +150,8 @@ const store = useProjectStore();
 }
 
 .workspace-rail-row {
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.workspace-rail-row::-webkit-scrollbar {
-  display: none;
+  width: 100%;
+  overflow: hidden;
 }
 
 .project-content {

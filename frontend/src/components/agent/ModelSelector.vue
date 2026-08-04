@@ -24,9 +24,11 @@ const emit = defineEmits<{
 
 const store = useModelConfigStore();
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
-const availableConfigs = computed(() => props.capability
-  ? store.configs.filter(item => item.capabilities?.includes(props.capability!))
-  : store.configs);
+const availableConfigs = computed(() => {
+  if (!props.capability) return store.configs;
+  const filtered = store.configs.filter(item => item.capabilities?.includes(props.capability!));
+  return filtered.length > 0 ? filtered : store.configs;
+});
 
 function formatTokens(value: number) {
   if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
@@ -267,6 +269,8 @@ onMounted(() => {
   background: #f1f5f9;
   padding: 4px 10px;
   border-radius: var(--radius-pill, 999px);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .system-default a {

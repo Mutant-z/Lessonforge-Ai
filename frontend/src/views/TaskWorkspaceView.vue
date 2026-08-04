@@ -523,11 +523,11 @@ onUnmounted(() => {
               </div>
               <span class="role-name">{{ message.role === 'user' ? '教师' : task.agent_name }}</span>
             </div>
-            <p class="message-content">
+            <div class="message-content">
               <span v-if="message.status === 'streaming' && !message.content" class="reply-placeholder">正在组织回复</span>
-              <template v-else>{{ message.content }}</template>
+              <MarkdownRenderer v-else :content="message.content" :is-streaming="message.status === 'streaming'" />
               <i v-if="message.status === 'streaming'" class="streaming-caret" aria-hidden="true" />
-            </p>
+            </div>
             <small v-if="message.status === 'pending'" class="status-hint">等待 Agent 处理...</small>
             <small v-else-if="message.status === 'failed'" class="status-hint error">本次修改未完成</small>
           </article>
@@ -610,24 +610,6 @@ onUnmounted(() => {
                 label=""
                 :disabled="isRunning"
                 @change="setModel"
-              />
-              <ModelSelector
-                v-if="taskType === 'exercise'"
-                :model-value="task.image_model_config_id || null"
-                compact
-                label="配图"
-                capability="image_generation"
-                :disabled="isRunning"
-                @change="setImageModel"
-              />
-              <ModelSelector
-                v-if="taskType === 'exercise'"
-                :model-value="task.vision_model_config_id || null"
-                compact
-                label="审图"
-                capability="vision_review"
-                :disabled="isRunning"
-                @change="setVisionModel"
               />
             </div>
             <div class="footer-right">

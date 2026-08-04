@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 import httpx
@@ -146,14 +147,16 @@ class OpenAICompatibleProvider(LLMProvider):
     @staticmethod
     def _strip_json_fence(content: str) -> str:
         clean = content.strip()
-        if not clean.startswith("```"):
-            return clean
-        lines = clean.splitlines()
-        if lines and lines[0].lstrip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        return "\n".join(lines).strip()
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean, re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start != -1 and end != -1 and start < end:
+            return clean[start : end + 1].strip()
+
+        return clean
 
     async def _structured_request(
         self,

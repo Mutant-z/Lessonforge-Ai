@@ -54,61 +54,71 @@ function openTask(type: string) {
 
 <style scoped>
 .pipeline-track {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  width: 100%;
+  gap: 2px;
   background: #f1f5f9;
-  padding: 4px 6px;
+  padding: 3px 4px;
   border-radius: 999px;
   border: 1px solid #e2e8f0;
   box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-sizing: border-box;
 }
 
 .pipeline-step-item {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
 
 .pipeline-btn {
-  height: 30px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 6px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 4px;
   position: relative;
-  border: 1px solid transparent;
+  border: 1.5px solid transparent;
   border-radius: 999px;
   background: transparent;
   color: #475569;
   text-align: left;
   cursor: pointer;
-  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11.5px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .pipeline-btn:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: #ffffff;
   color: #0f172a;
+  border-color: #cbd5e1;
 }
 
 .pipeline-btn.active {
   background: #ffffff;
-  color: #4338ca;
+  color: #4f46e5;
   font-weight: 800;
   border-color: #c7d2fe;
-  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.14), 0 0 0 1px rgba(79, 70, 229, 0.08);
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.14);
 }
 
 .step-num {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #4f46e5;
   background: #e0e7ff;
-  padding: 1.5px 6px;
+  padding: 1px 5px;
   border-radius: 999px;
   flex-shrink: 0;
 }
@@ -120,21 +130,27 @@ function openTask(type: string) {
 }
 
 .step-name {
-  font-size: 12.5px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 800;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
 }
 
 .step-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 10.5px;
+  gap: 3px;
+  font-size: 10px;
   font-weight: 700;
   color: #64748b;
-  padding: 2px 7px;
+  padding: 1.5px 6px;
   border-radius: 999px;
   transition: all 180ms ease;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .step-badge.approved:not(.active) {
@@ -174,17 +190,19 @@ function openTask(type: string) {
 
 .step-chevron {
   color: #cbd5e1;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 800;
   user-select: none;
+  flex-shrink: 0;
+  margin: 0 1px;
 }
 
 .step-mini-bar {
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 2px;
-  height: 2.5px;
+  left: 6px;
+  right: 6px;
+  bottom: 1.5px;
+  height: 2px;
   background: #dbe4ff;
   border-radius: 999px;
   overflow: hidden;

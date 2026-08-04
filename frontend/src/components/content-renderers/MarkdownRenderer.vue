@@ -19,23 +19,29 @@ const renderedHtml = computed(() => {
 
   const katex = (window as any).katex;
 
-  if (katex) {
-    text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+  // Handle $$ display math $$
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+    if (katex) {
       try {
         return katex.renderToString(math, { displayMode: true, throwOnError: false });
       } catch {
-        return `<pre class="math-block">${math}</pre>`;
+        // fallback
       }
-    });
+    }
+    return `<div class="math-display-fallback">$$ ${math.trim()} $$</div>`;
+  });
 
-    text = text.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+  // Handle $ inline math $
+  text = text.replace(/\$([^\$\n]+?)\$/g, (_, math) => {
+    if (katex) {
       try {
         return katex.renderToString(math, { displayMode: false, throwOnError: false });
       } catch {
-        return `<code>${math}</code>`;
+        // fallback
       }
-    });
-  }
+    }
+    return `<code class="math-inline-fallback">${math.trim()}</code>`;
+  });
 
   return md.render(text);
 });
@@ -47,9 +53,9 @@ const renderedHtml = computed(() => {
 
 <style>
 .markdown-rendered-body {
-  font-size: 15px;
-  line-height: 1.8;
-  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-primary, #0f172a);
 }
 
 .markdown-rendered-body h1,
@@ -57,63 +63,96 @@ const renderedHtml = computed(() => {
 .markdown-rendered-body h3,
 .markdown-rendered-body h4 {
   font-weight: 800;
-  letter-spacing: -0.02em;
-  color: var(--text-primary);
-  margin-top: 1.6em;
+  letter-spacing: -0.01em;
+  color: #0f172a;
+  margin-top: 1.2em;
+  margin-bottom: 0.5em;
+}
+
+.markdown-rendered-body h1 { font-size: 20px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+.markdown-rendered-body h2 { font-size: 17px; }
+.markdown-rendered-body h3 { font-size: 15px; }
+
+.markdown-rendered-body p {
   margin-bottom: 0.6em;
 }
 
-.markdown-rendered-body h1 { font-size: 24px; border-bottom: 1px solid var(--border-default); padding-bottom: 8px; }
-.markdown-rendered-body h2 { font-size: 20px; }
-.markdown-rendered-body h3 { font-size: 17px; }
+.markdown-rendered-body p:last-child {
+  margin-bottom: 0;
+}
 
-.markdown-rendered-body p {
-  margin-bottom: 1.2em;
+.markdown-rendered-body strong {
+  font-weight: 800;
+  color: #0f172a;
 }
 
 .markdown-rendered-body ul,
 .markdown-rendered-body ol {
-  padding-left: 24px;
-  margin-bottom: 1.2em;
+  padding-left: 20px;
+  margin-top: 0.4em;
+  margin-bottom: 0.6em;
 }
 
 .markdown-rendered-body li {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .markdown-rendered-body blockquote {
-  border-left: 4px solid var(--color-primary);
-  background: var(--color-primary-soft);
-  padding: 12px 18px;
-  margin: 1.2em 0;
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  color: var(--text-secondary);
+  border-left: 3.5px solid #4f46e5;
+  background: #f5f3ff;
+  padding: 10px 14px;
+  margin: 0.8em 0;
+  border-radius: 0 10px 10px 0;
+  color: #4338ca;
 }
 
 .markdown-rendered-body code {
-  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 13px;
-  background: var(--bg-subtle);
-  padding: 2px 6px;
-  border-radius: var(--radius-xs);
-  color: var(--color-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #4f46e5;
+}
+
+.markdown-rendered-body .math-inline-fallback {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #ecfdf5 !important;
+  color: #047857 !important;
+  border: 1px solid #a7f3d0 !important;
+  padding: 1px 6px !important;
+  border-radius: 6px !important;
+  font-weight: 700 !important;
+}
+
+.markdown-rendered-body .math-display-fallback {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #ecfdf5 !important;
+  color: #047857 !important;
+  border: 1px solid #a7f3d0 !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+  font-weight: 700 !important;
+  margin: 8px 0;
+  text-align: center;
 }
 
 .markdown-rendered-body table {
   width: 100%;
   border-collapse: collapse;
-  margin: 1.2em 0;
+  margin: 0.8em 0;
 }
 
 .markdown-rendered-body th,
 .markdown-rendered-body td {
-  border: 1px solid var(--border-default);
-  padding: 10px 14px;
+  border: 1px solid #e2e8f0;
+  padding: 8px 12px;
   text-align: left;
 }
 
 .markdown-rendered-body th {
-  background: var(--bg-subtle);
+  background: #f8fafc;
   font-weight: 700;
 }
 </style>

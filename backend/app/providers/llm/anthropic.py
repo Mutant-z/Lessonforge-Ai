@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import json
+import re
 from typing import TypeVar
 import httpx
 from pydantic import BaseModel
@@ -53,13 +54,14 @@ class AnthropicProvider(LLMProvider):
                     raw_text += item.get("text", "")
             
             clean = raw_text.strip()
-            if clean.startswith("```"):
-                lines = clean.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                clean = "\n".join(lines).strip()
+            fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean, re.IGNORECASE)
+            if fence_match:
+                clean = fence_match.group(1).strip()
+            else:
+                start = clean.find("{")
+                end = clean.rfind("}")
+                if start != -1 and end != -1 and start < end:
+                    clean = clean[start : end + 1].strip()
             
             return schema.model_validate_json(clean)
 

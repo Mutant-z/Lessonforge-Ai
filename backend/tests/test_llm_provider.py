@@ -99,6 +99,15 @@ async def test_structured_reports_stable_content_errors(monkeypatch, response_fa
 
 
 @pytest.mark.asyncio
+async def test_strip_json_fence_extracts_embedded_json():
+    content = "Here is the result:\n```json\n{\"ok\": true}\n```\nHope this helps!"
+    assert OpenAICompatibleProvider._strip_json_fence(content) == '{"ok": true}'
+
+    content_text_around = "Sure! {\"ok\": true} Thank you."
+    assert OpenAICompatibleProvider._strip_json_fence(content_text_around) == '{"ok": true}'
+
+
+@pytest.mark.asyncio
 async def test_connection_probe_rejects_empty_success_response(monkeypatch):
     provider = provider_with_handler(monkeypatch, lambda _request: httpx.Response(200, content=b""))
 

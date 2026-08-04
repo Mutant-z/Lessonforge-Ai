@@ -260,7 +260,9 @@ onMounted(loadArtifacts);
         <div class="chat-viewport">
           <div v-for="(msg, mIdx) in chatMessages" :key="mIdx" class="chat-bubble" :class="[msg.role]">
             <span class="bubble-role">{{ msg.role === 'user' ? '教师' : 'Agent' }}</span>
-            <p class="bubble-text">{{ msg.content }}</p>
+            <div class="bubble-text">
+              <MarkdownRenderer :content="msg.content" />
+            </div>
           </div>
         </div>
 

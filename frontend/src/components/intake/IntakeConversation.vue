@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Cpu, DataAnalysis, MagicStick, DocumentCopy, Reading, Aim } from '@element-plus/icons-vue';
 import type { IntakeMessage } from '../../types';
+import MarkdownRenderer from '../content-renderers/MarkdownRenderer.vue';
 
 defineProps<{
   messages: IntakeMessage[];
@@ -110,7 +111,7 @@ const starterTemplates = [
           <span class="message-role">{{ message.role === 'user' ? '教师' : '需求 Agent' }}</span>
         </div>
         <div class="message-bubble">
-          <p>{{ message.content }}</p>
+          <MarkdownRenderer :content="message.content" />
         </div>
       </div>
     </template>
@@ -124,7 +125,10 @@ const starterTemplates = [
         <span class="message-role">需求 Agent 分析中...</span>
       </div>
       <div class="message-bubble">
-        <p v-if="streamedText">{{ streamedText }}<span class="stream-cursor" /></p>
+        <div v-if="streamedText">
+          <MarkdownRenderer :content="streamedText" is-streaming />
+          <span class="stream-cursor" />
+        </div>
         <p v-else class="activity">
           <span class="activity-dot animate-ping" />
           <span>{{ activityMessage }}</span>

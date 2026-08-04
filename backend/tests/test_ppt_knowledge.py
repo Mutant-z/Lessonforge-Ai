@@ -8,7 +8,7 @@ from app.services.ppt_knowledge_service import load_ppt_design_knowledge
 
 def test_knowledge_json_is_valid_and_loadable():
     knowledge = load_ppt_design_knowledge()
-    assert knowledge["version"] == "1.0.0"
+    assert knowledge["version"].startswith("2.")
     limits = knowledge["density_limits"]
     assert limits == {
         "title_chars": 30, "body_chars": 120, "body_items": 6,

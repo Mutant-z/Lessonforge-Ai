@@ -394,17 +394,17 @@ const starterTemplates = [
 
 .message-bubble {
   position: relative;
-}
-
-.message-bubble p {
-  margin: 0;
   padding: 12px 18px;
   font-size: 14.5px;
   line-height: 1.65;
-  white-space: pre-wrap;
+  /* 由 MarkdownRenderer 统一排版，禁止保留块级标签之间的换行造成大段空白 */
+  white-space: normal;
+  min-width: 0;
+  max-width: 100%;
 }
 
-.message.assistant .message-bubble p {
+/* 整条消息一个气泡，而不是 markdown 里每个段落各成一个气泡 */
+.message.assistant .message-bubble {
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 18px 18px 18px 4px;
@@ -412,13 +412,29 @@ const starterTemplates = [
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
 }
 
-.message.user .message-bubble p {
+.message.user .message-bubble {
   background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
   border: 0;
   color: #ffffff;
   border-radius: 18px 18px 4px 18px;
   box-shadow: 0 4px 14px rgba(79, 70, 229, 0.22);
   font-weight: 500;
+}
+
+/* 用户气泡内 markdown 文字继承白色，保证在渐变底上可读 */
+.message.user .message-bubble :deep(.markdown-rendered-body),
+.message.user .message-bubble :deep(.markdown-rendered-body) strong {
+  color: #ffffff;
+}
+
+.message.user .message-bubble :deep(.markdown-rendered-body code) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.28);
+  color: #ffffff;
+}
+
+.message.user .message-bubble :deep(.markdown-rendered-body a) {
+  color: #dbeafe;
 }
 
 .activity {

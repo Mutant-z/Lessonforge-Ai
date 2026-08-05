@@ -7,7 +7,12 @@ from app.models.entities import CourseProject
 from app.providers.llm.base import LLMProviderError
 from app.schemas.agent_profile import AgentInitializationBundle
 from app.services.agent_initialization_service import deterministic_bundle, generate_initialization_bundle
-from app.services.agent_prompt_service import prompt_hash, render_template
+from app.services.agent_prompt_service import (
+    OUTPUT_PRESENTATION_RULES,
+    apply_output_rules,
+    prompt_hash,
+    render_template,
+)
 
 
 def test_prompt_renderer_is_deterministic_and_rejects_unknown_tokens():
@@ -16,6 +21,16 @@ def test_prompt_renderer_is_deterministic_and_rejects_unknown_tokens():
     assert prompt_hash("system", rendered) == prompt_hash("system", rendered)
     with pytest.raises(ValueError, match="未知占位符"):
         render_template("{{unsafe_expression}}", {})
+
+
+def test_apply_output_rules_appends_presentation_constraints():
+    system = apply_output_rules("你是教学设计 Agent。")
+    assert "输出呈现规范" in system
+    assert "禁止输出 HTML 标签源码" in system
+    assert "禁止输出连续多个空行" in system
+    assert system.endswith(OUTPUT_PRESENTATION_RULES)
+    # 幂等：重复注入不会叠加
+    assert apply_output_rules(system) == system
 
 
 def test_mock_initializer_returns_six_distinct_typed_profiles():

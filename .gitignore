@@ -77,3 +77,6 @@ temp/
 *.log
 logs/
 .runtime/
+
+# Claude Code local settings
+.claude/

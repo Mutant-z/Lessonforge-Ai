@@ -1093,7 +1093,8 @@ onUnmounted(() => {
   padding: 9px 13px;
   font-size: 13px;
   line-height: 1.55;
-  white-space: pre-wrap;
+  /* 由 MarkdownRenderer 统一排版，禁止保留块级标签之间的换行造成大段空白 */
+  white-space: normal;
 }
 
 .message.assistant .message-content {

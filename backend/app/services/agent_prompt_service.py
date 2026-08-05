@@ -76,6 +76,24 @@ TASK_TEMPLATE = (
     "教师本次指令：\n{{teacher_instruction}}\n"
     "只返回符合以下 JSON Schema 的 JSON：\n{{output_schema_json}}"
 )
+
+# Agent 输出呈现规范：保证前端可正确渲染，不把源码标记直接暴露给用户。
+OUTPUT_PRESENTATION_RULES = (
+    "\n\n【输出呈现规范】\n"
+    "· 只输出用户可读的内容，禁止输出 HTML 标签源码（如 <code>、<div>、<span>）或 Markdown 标记源码。\n"
+    "· 除非用户明确要求代码，否则不要使用 ``` 代码围栏；正文中的代码用反引号行内代码表示。\n"
+    "· 普通回复中相邻段落之间最多保留一个空行，禁止输出连续多个空行。\n"
+    "· 数学符号请使用系统支持的公式格式（$...$ 行内公式、$$...$$ 独立公式）；若无法用公式表达，"
+    "改为自然语言描述，不要输出 LaTeX 源码。\n"
+    "· 不要输出“处理中”“执行结果”“内部分析”等系统日志或过程性说明。"
+)
+
+
+def apply_output_rules(system_prompt: str) -> str:
+    """把输出呈现规范追加到系统提示词末尾，存量与新建 profile 均生效。"""
+    if OUTPUT_PRESENTATION_RULES in system_prompt:
+        return system_prompt
+    return system_prompt.rstrip() + OUTPUT_PRESENTATION_RULES
 ALLOWED_PLACEHOLDERS = {
     "agent_name", "agent_context_json", "course_identity_json", "blueprint_version",
     "blueprint_json", "upstream_json", "teacher_instruction", "output_schema_json",
@@ -198,4 +216,6 @@ def build_runtime_prompts(
         "teacher_instruction": teacher_instruction,
         "output_schema_json": json.dumps(output_schema, ensure_ascii=False),
     })
+    # 注意：输出呈现规范只面向“展示给用户的文字回复”，不得注入结构化 JSON 生成提示词，
+    # 否则会与“只返回符合 Schema 的 JSON”冲突，导致模型返回非 JSON 而校验失败。
     return profile.rendered_system_prompt, task

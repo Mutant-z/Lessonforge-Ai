@@ -24,12 +24,19 @@
 
 ## 内容映射
 
-`export_service` 导出 PPT 时使用 `make_deck`：依据已批准蓝图生成与 15 页槽位一一对应的
-完整内容（封面/导入/目标/知识地图/核心知识/案例/讨论/总结/测验/课后任务/结课），
-由 `deck_renderer` 填入成品模板。模板槽位宽松并支持填字时自动缩放字号，避免内容溢出。
+`export_service` 导出 PPT 时使用 `make_deck(bp, template_id)`：依据已批准蓝图生成与模板槽位
+一一对应的内容，并按所选模板的槽位数整形（卡片模板条目更少、列表模板更多）；
+由 `deck_renderer` 按模板 id 读取各自的槽位几何并填字。每套模板是**独立的视觉设计系统**
+（封面/分栏/卡片/装饰/排版都不同），而不是只换配色。
 
 ## 模板重建
 
-六套模板由 `scripts/build_generic_decks.py` 统一生成（仅配色不同），几何与
-`templates/ppt_decks/deck_slots.json` 的锚点一一对应。修改版式后需重新执行
+六套模板由 `scripts/build_generic_decks.py` 生成，每套使用独立设计系统，几何与
+`templates/ppt_decks/deck_slots.json`（按模板存储）的锚点一一对应。修改版式后需重新执行
 `.venv/bin/python scripts/build_generic_decks.py` 以同步槽位定义。
+
+## PPT 设计技能
+
+PPT Agent 的设计知识在 `templates/ppt_design/knowledge.json`，其中 `ppt_skills` 提供了
+封面模式、版式模式、视觉技法、数据图示，以及每套模板的版式说明；Agent 依据所选模板
+生成与之匹配的页面结构、layout 与 visual_suggestion。

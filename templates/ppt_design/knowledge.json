@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
+  "version": "2.3.0",
   "design_principles": [
     "每一页只承载一个核心信息层级，其他内容作为辅助说明。",
     "标题表达结论而不是页面主题，让学生一眼看出本页要传达的判断。",
@@ -213,27 +213,246 @@
     "default_canvas": "16:9 (13.333 x 7.5 inches)"
   },
   "block_guidance": {
-    "cover": {"blocks": [], "note": "封面不使用内容块，由 title/purpose/body 副标题构成。"},
-    "objectives": {"blocks": ["bullets"], "note": "编号要点，每条一个可观察行为。"},
-    "scenario": {"blocks": ["lead", "quote"], "note": "lead 提出真实问题，quote 给出先判断再说明依据的提示。"},
-    "concept": {"blocks": ["lead", "bullets"], "note": "lead 给出概念结论，bullets 呈现关键点与条件关系。"},
-    "process": {"blocks": ["steps"], "note": "steps 呈现 3~4 步递进应用步骤，每步含 title 与 detail。"},
-    "comparison": {"blocks": ["compare"], "note": "compare 左右两栏对照，各栏含 heading 与 items。"},
-    "case": {"blocks": ["lead", "steps", "bullets"], "note": "lead 给出案例结论，steps 示范过程，bullets 检查结论。"},
-    "question": {"blocks": ["lead", "quote"], "note": "lead 提出问题，quote 预留判断空间。"},
-    "exercise": {"blocks": ["bullets", "note"], "note": "bullets 为任务清单（可 emphasize），note 为自检提示。"},
-    "summary": {"blocks": ["bullets"], "note": "三条结论短句。"},
-    "homework": {"blocks": ["bullets", "note"], "note": "作业任务与完成要求。"}
+    "cover": {
+      "blocks": [],
+      "note": "封面不使用内容块，由 title/purpose/body 副标题构成。"
+    },
+    "objectives": {
+      "blocks": [
+        "bullets"
+      ],
+      "note": "编号要点，每条一个可观察行为。"
+    },
+    "scenario": {
+      "blocks": [
+        "lead",
+        "quote"
+      ],
+      "note": "lead 提出真实问题，quote 给出先判断再说明依据的提示。"
+    },
+    "concept": {
+      "blocks": [
+        "lead",
+        "bullets"
+      ],
+      "note": "lead 给出概念结论，bullets 呈现关键点与条件关系。"
+    },
+    "process": {
+      "blocks": [
+        "steps"
+      ],
+      "note": "steps 呈现 3~4 步递进应用步骤，每步含 title 与 detail。"
+    },
+    "comparison": {
+      "blocks": [
+        "compare"
+      ],
+      "note": "compare 左右两栏对照，各栏含 heading 与 items。"
+    },
+    "case": {
+      "blocks": [
+        "lead",
+        "steps",
+        "bullets"
+      ],
+      "note": "lead 给出案例结论，steps 示范过程，bullets 检查结论。"
+    },
+    "question": {
+      "blocks": [
+        "lead",
+        "quote"
+      ],
+      "note": "lead 提出问题，quote 预留判断空间。"
+    },
+    "exercise": {
+      "blocks": [
+        "bullets",
+        "note"
+      ],
+      "note": "bullets 为任务清单（可 emphasize），note 为自检提示。"
+    },
+    "summary": {
+      "blocks": [
+        "bullets"
+      ],
+      "note": "三条结论短句。"
+    },
+    "homework": {
+      "blocks": [
+        "bullets",
+        "note"
+      ],
+      "note": "作业任务与完成要求。"
+    }
   },
   "typography": {
     "scale": {
-      "display": {"size_px": 42, "weight": 800, "usage": "封面标题"},
-      "title": {"size_px": 34, "weight": 800, "usage": "页面标题"},
-      "lead": {"size_px": 24, "weight": 700, "usage": "开篇结论/引导"},
-      "body": {"size_px": 20, "weight": 400, "usage": "正文/要点"},
-      "quote": {"size_px": 22, "weight": 500, "usage": "重点引用"},
-      "note": {"size_px": 13, "weight": 400, "usage": "注释/提示"}
+      "display": {
+        "size_px": 42,
+        "weight": 800,
+        "usage": "封面标题"
+      },
+      "title": {
+        "size_px": 34,
+        "weight": 800,
+        "usage": "页面标题"
+      },
+      "lead": {
+        "size_px": 24,
+        "weight": 700,
+        "usage": "开篇结论/引导"
+      },
+      "body": {
+        "size_px": 20,
+        "weight": 400,
+        "usage": "正文/要点"
+      },
+      "quote": {
+        "size_px": 22,
+        "weight": 500,
+        "usage": "重点引用"
+      },
+      "note": {
+        "size_px": 13,
+        "weight": 400,
+        "usage": "注释/提示"
+      }
     },
-    "spacing": {"grid_px": 8, "block_gap_px": 20, "content_margin_px": 54}
+    "spacing": {
+      "grid_px": 8,
+      "block_gap_px": 20,
+      "content_margin_px": 54
+    }
+  },
+  "ppt_skills": {
+    "intro": "这是面向 PPT 页面设计的技能库（参考主流 AI PPT 工具的做法）。生成每一页时，先确定该页的叙事目标，再从 cover_patterns / layout_patterns / visual_techniques 中选择与所选主题模板匹配的模式，并给出可执行的 visual_suggestion。",
+    "cover_patterns": {
+      "hero": "整页大标题居左或居中，副标题与大量留白，适合封面与章节页",
+      "split": "左右分栏：左侧主标题，右侧色块/图形，适合强调主题的封面",
+      "centered": "标题居中、上下留白对称，适合庄重或学术封面",
+      "minimal": "极简大标题 + 细线装饰，适合商务/学术封面",
+      "framed": "标题置于主色块或边框内，视觉焦点集中",
+      "gradient": "渐变底色 + 白色标题，适合科技/现代主题",
+      "geometric": "几何图形（圆/三角/条形）点缀 + 大标题，适合活泼/启蒙主题",
+      "photo": "全幅图片 + 半透明遮罩 + 标题，适合叙事/人文主题"
+    },
+    "layout_patterns": {
+      "list": "纵向编号或圆点列表，信息密度高，适合学术与系统讲解",
+      "cards": "卡片网格（2×2 / 2×3），每条内容独立成卡，适合科技/商务/启蒙",
+      "two_column": "左右两栏并列，适合对比、并列要点",
+      "three_column": "三栏并列，适合要点分组与展示",
+      "timeline": "横向时间轴排布，适合过程、演进、历史",
+      "flow": "流程箭头图（横向步骤），适合操作流程、方法步骤",
+      "matrix": "2×2 矩阵 / 象限图，适合分类与坐标关系",
+      "pyramid": "金字塔层级，适合层次与包含关系",
+      "comparison": "两栏对照表，突出差异点",
+      "before_after": "前后对照布局，适合变化、改进、对比",
+      "quote": "引言式大字 + 出处标注，适合观点强调与金句",
+      "stat": "大数字/指标突出 + 说明，适合数据强调",
+      "agenda": "议程/目录页，纵向罗列章节与要点",
+      "section_divider": "章节分隔页，大标题 + 章节编号 + 少量装饰",
+      "closing": "收尾页，总结关键观点或行动号召"
+    },
+    "visual_techniques": {
+      "contrast": "用明暗、大小、颜色对比突出核心信息，页面只保留一个视觉焦点",
+      "hierarchy": "标题 → 副标题 → 正文三级层级，字号与字重递减",
+      "whitespace": "每页保留充足留白（建议 30% 以上），避免满版堆叠",
+      "alignment": "所有元素对齐到统一网格，段落、标题、图标左右对齐",
+      "repetition": "全页重复使用同一种主色、形状与间距，形成统一视觉节奏",
+      "grid": "按栅格排布内容（8px/12px 间距），保证对齐与呼吸感",
+      "left_align": "中文正文使用左对齐，避免两端对齐造成字距不均"
+    },
+    "data_viz": {
+      "bar": "柱状图用于比较数量与占比",
+      "line": "折线图用于趋势与随时间变化",
+      "pie": "饼图用于占比构成（类别不超过 6 类）",
+      "flow": "流程图用于步骤与流程",
+      "structure": "结构图用于层级与组成",
+      "cycle": "循环图用于循环往复的过程",
+      "relation": "箭头/连线关系图用于因果、关联、影响"
+    },
+    "template_designs": {
+      "lessonforge_deck_academic": {
+        "name": "学术科研",
+        "design_language": "左栏编号学术：左侧主色竖栏，单列编号列表，正式克制",
+        "cover": "左侧主色竖栏 + 右侧大标题 + 副标题",
+        "content": "左导轨 + 单列编号列表，信息密度高；适合 list / two_column / comparison",
+        "recommended_patterns": [
+          "list",
+          "two_column",
+          "comparison",
+          "quote"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      },
+      "lessonforge_deck_ai_future": {
+        "name": "AI 未来",
+        "design_language": "深色科技卡片：深蓝底、霓虹强调线、圆角卡片网格",
+        "cover": "深蓝满底 + 霓虹强调线 + 网格底纹 + 白色大标题",
+        "content": "标题 + 2×2 圆角卡片；适合 cards / flow / timeline / stat",
+        "recommended_patterns": [
+          "cards",
+          "flow",
+          "timeline",
+          "stat",
+          "gradient"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      },
+      "lessonforge_deck_business": {
+        "name": "商务培训",
+        "design_language": "极简数据两栏：白底、顶部强调条、双栏指标",
+        "cover": "白底 + 顶部强调条 + 大数字标题",
+        "content": "双栏指标徽标；适合 two_column / stat / before_after / matrix",
+        "recommended_patterns": [
+          "two_column",
+          "stat",
+          "before_after",
+          "matrix",
+          "minimal"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      },
+      "lessonforge_deck_cartoon": {
+        "name": "卡通启蒙",
+        "design_language": "圆角徽章卡片：奶油底、大圆角徽章、彩色点缀、大字号",
+        "cover": "奶油底 + 大圆角徽章标题 + 彩色圆点",
+        "content": "圆角徽章卡片，字号偏大；适合 cards / geometric / before_after / agenda",
+        "recommended_patterns": [
+          "cards",
+          "geometric",
+          "before_after",
+          "agenda"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      },
+      "lessonforge_deck_chinese_culture": {
+        "name": "中国文化",
+        "design_language": "纸墨竖排：纸纹底、红色竖线、居中标题、印章角标",
+        "cover": "纸纹底 + 红色竖标题 + 印章角标",
+        "content": "左侧红竖线 + 居中标题；适合 quote / section_divider / timeline",
+        "recommended_patterns": [
+          "quote",
+          "section_divider",
+          "timeline",
+          "centered"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      },
+      "lessonforge_deck_smart_ai": {
+        "name": "智慧课堂",
+        "design_language": "紫色渐变侧栏：左侧紫栏、分栏面板、现代",
+        "cover": "紫渐变左栏 + 白色大标题",
+        "content": "左侧紫栏 + 分栏面板；适合 two_column / cards / flow / stat",
+        "recommended_patterns": [
+          "two_column",
+          "cards",
+          "flow",
+          "stat",
+          "gradient"
+        ],
+        "page_structure": "封面-课程导入-学习目标-知识地图-知识导入-核心知识×4-案例分析-互动讨论-本课总结-即时测验-课后任务-结课"
+      }
+    }
   }
 }

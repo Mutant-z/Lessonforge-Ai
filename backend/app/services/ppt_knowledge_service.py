@@ -10,6 +10,7 @@ KNOWLEDGE_PATH = Path(__file__).resolve().parents[3] / "templates" / "ppt_design
 REQUIRED_SECTIONS = {
     "version", "design_principles", "page_type_guidance", "density_limits",
     "layout_library", "visual_suggestion_guidelines", "diagram_guidance", "quality_checklist",
+    "ppt_skills",
 }
 DENSITY_LIMIT_KEYS = ("title_chars", "body_chars", "body_items", "item_chars", "speaker_notes_chars")
 

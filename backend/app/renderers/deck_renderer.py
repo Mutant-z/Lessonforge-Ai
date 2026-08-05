@@ -16,8 +16,27 @@ DECK_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates" / "PPT_te
 EMU_PER_INCH = 914400
 
 
-def _load_slots() -> dict:
+def _load_slots_data() -> dict:
     return json.loads(SLOTS_PATH.read_text(encoding="utf-8"))
+
+
+def _load_slots(template_id: str) -> dict:
+    """按模板 id 读取该模板的槽位几何（每套模板版式独立）。"""
+    data = _load_slots_data()
+    templates = data.get("templates") or {}
+    if template_id not in templates:
+        raise KeyError(f"deck_slots.json 缺少模板 {template_id} 的槽位几何")
+    return templates[template_id]
+
+
+def role_order() -> list[str]:
+    return _load_slots_data()["role_order"]
+
+
+def slot_counts(template_id: str) -> dict[str, int]:
+    """返回模板每个角色的内容槽位数，供 make_deck 按模板整形内容。"""
+    roles = _load_slots(template_id)
+    return {role: len(spec["content"]) for role, spec in roles.items()}
 
 
 def _find_shape(slide, anchor: dict, tol_inches: float):
@@ -87,22 +106,21 @@ def _set_shape_text(shape, value: str):
         paragraph.font.size = Pt(size)
 
 
-def render_deck(template_path: Path, slides: list[dict], output: Path) -> Path:
+def render_deck(template_path: Path, slides: list[dict], output: Path, template_id: str) -> Path:
     """把 slides 内容填入模板 deck，输出新 .pptx。
 
     slides[i] 对应模板第 i+1 页（i 与 role_order 对齐）；每页填 title 槽 +
-    content 槽（顺序取自 slides[i]["body"]）。装饰形状（页码/页脚/英文标签/图表）
-    不在清单中，保持模板原样。
+    content 槽（顺序取自 slides[i]["body"]）。槽位几何按 template_id 独立读取，
+    因此每套模板的版式（封面/分栏/卡片/装饰）各不相同。
     """
-    slots = _load_slots()
-    role_order = slots["role_order"]
-    roles = slots["roles"]
-    tol = slots.get("default_tol", 0.35)
+    roles = _load_slots(template_id)
+    order = role_order()
+    tol = 0.35
     presentation = Presentation(str(template_path))
     for index, slide in enumerate(slides[: len(presentation.slides)]):
-        if index >= len(role_order):
+        if index >= len(order):
             break
-        role = role_order[index]
+        role = order[index]
         spec = roles.get(role)
         if not spec:
             continue
@@ -123,17 +141,23 @@ def render_deck(template_path: Path, slides: list[dict], output: Path) -> Path:
 
 
 def deck_template_path(template_id: str) -> Path:
-    """把模板 id 解析为 .pptx 路径（如 'academic' -> templates/PPT_template/Academic_Template.pptx）。"""
+    """把模板 id 解析为 .pptx 路径。
+
+    兼容全量模板 id（lessonforge_deck_academic）与短名（Academic_Template / academic）。
+    """
+    name = template_id
+    if name.startswith("lessonforge_deck_"):
+        name = name[len("lessonforge_deck_"):]
     candidates = [
-        DECK_TEMPLATES_DIR / f"{template_id}.pptx",
-        DECK_TEMPLATES_DIR / f"{template_id}_Template.pptx",
-        DECK_TEMPLATES_DIR / f"{template_id.capitalize()}_Template.pptx",
+        DECK_TEMPLATES_DIR / f"{name}.pptx",
+        DECK_TEMPLATES_DIR / f"{name}_Template.pptx",
+        DECK_TEMPLATES_DIR / f"{name.capitalize()}_Template.pptx",
     ]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
     # 按文件前缀宽松匹配（忽略大小写/下划线）
     for candidate in DECK_TEMPLATES_DIR.glob("*.pptx"):
-        if candidate.stem.lower().replace("_", "") == template_id.lower().replace("_", ""):
+        if candidate.stem.lower().replace("_", "") == name.lower().replace("_", ""):
             return candidate
     raise FileNotFoundError(f"未找到 deck 模板：{template_id}")

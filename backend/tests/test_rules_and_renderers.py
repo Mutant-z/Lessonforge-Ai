@@ -82,7 +82,8 @@ def test_all_ppt_templates_render_and_reopen(tmp_path: Path):
         # 成品 deck 模板走真实模板填字；其余构图走代码绘制渲染器
         if template["composition"] == "deck":
             deck_path = (catalog_dir / template["file"]).resolve()
-            path = render_deck(deck_path, make_deck(bp), tmp_path / f"{template['id']}.pptx")
+            deck = make_deck(bp, template["id"])
+            path = render_deck(deck_path, deck, tmp_path / f"{template['id']}.pptx", template["id"])
             presentation = Presentation(path)
             assert len(presentation.slides) == 15
             assert presentation.slide_width / presentation.slide_height == pytest.approx(16 / 9, rel=0.01)

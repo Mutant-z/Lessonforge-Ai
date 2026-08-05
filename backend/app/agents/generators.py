@@ -2,6 +2,7 @@ import json
 
 from app.models.entities import CourseProject
 from app.core.database import SessionLocal
+from app.renderers.deck_renderer import role_order, slot_counts
 from sqlalchemy import select
 from app.providers.llm.mock import MockProvider
 from app.providers.llm.router import get_provider
@@ -211,23 +212,51 @@ def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_deck_academic"
     return PPTContent(theme=theme, slides=slides)
 
 
-def make_deck(bp: CourseBlueprintSchema) -> list[dict]:
+_ROLE_FILLERS: dict[str, list[str]] = {
+    "cover": ["课程主题"],
+    "intro": ["结合实例展开讨论"],
+    "objectives": ["补充目标——达成可观察成果"],
+    "knowledge_map": ["延伸知识点"],
+    "knowledge_intro": ["结合实例理解关键关系"],
+    "core_1": ["延伸要点"], "core_2": ["延伸要点"], "core_3": ["延伸要点"], "core_4": ["延伸要点"],
+    "case_study": ["对照步骤检查结论"],
+    "discussion": ["独立判断后再交流"],
+    "summary": ["回顾本课关键结论"],
+    "assessment": ["完成后再对照标准"],
+    "assignment": ["按计划完成并自检"],
+    "end": ["把关键观点用在下一个真实问题上"],
+}
+
+
+def _adapt_body(role: str, source: list[str], n: int | None) -> list[str]:
+    """把角色的规范内容整形到该模板的槽位数：过长截断、不足用该角色兜底条目补齐。"""
+    if n is None:
+        return source
+    if len(source) >= n:
+        return source[:n]
+    filler = _ROLE_FILLERS.get(role, ["要点"])
+    return source + filler[: n - len(source)]
+
+
+def make_deck(bp: CourseBlueprintSchema, template_id: str = "lessonforge_deck_academic") -> list[dict]:
     """为真实 PPT 模板 deck 生成 15 页角色化内容。
 
-    返回每页 {title, body}，body 的条目顺序与 templates/ppt_decks/deck_slots.json
-    中对应角色的 content 槽位一一对应；渲染时由 deck_renderer 填入模板。
+    body 的条目顺序与 templates/ppt_decks/deck_slots.json 中该模板对应角色的
+    content 槽位一一对应；不同模板槽位数不同，内容按模板整形（卡片模板条目更少、
+    列表模板条目更多），渲染时由 deck_renderer 按模板读槽位填入。
     """
     identity = bp.course_identity
-    objectives = [f"{o.id}：{o.behavior}——{o.criterion}" for o in bp.objectives[:4]]
-    while len(objectives) < 4:
+    objectives = [f"{o.id}：{o.behavior}——{o.criterion}" for o in bp.objectives]
+    while len(objectives) < 6:
         objectives.append("OBJ-0X：补充目标——达成可观察成果")
-    key_points = [kp for kp in bp.key_points[:4]]
+    key_points = [kp for kp in bp.key_points]
     while len(key_points) < 4:
         key_points.append("延伸知识点")
     difficulty = (bp.difficulty_points or ["在新情境中迁移应用"])[0]
     title = identity.title
     subtitle = " · ".join(filter(None, [identity.subject, identity.grade_level]))
     motivation = f"围绕“{title}”展开，理解核心概念并能在真实情境中应用。"
+
     core_modules = []
     for n in range(1, 5):
         core_modules.append({
@@ -236,20 +265,34 @@ def make_deck(bp: CourseBlueprintSchema) -> list[dict]:
             + [f"要点{n}-{i + 1}" for i in range(3)]
             + ["核心公式"],
         })
-    return [
-        {"title": title, "body": [subtitle]},
-        {"title": "课程导入", "body": [f"为什么学习{title}？", motivation] + [f"{i + 1}. {kp}" for i, kp in enumerate(key_points[:4])]},
-        {"title": "学习目标", "body": ["完成本节后，你能够："] + objectives[:4]},
-        {"title": "知识地图", "body": ["核心问题", *key_points[:4]]},
-        {"title": "知识导入", "body": [motivation, *key_points[:4], "核心判断", f"关键：{key_points[0]}；难点：{difficulty}"]},
-        *core_modules,
-        {"title": "案例分析", "body": [f"{i + 1}. {step}" for i, step in enumerate(["问题定义", "方案执行", "数据收集", "结果评价"])] + ["案例复盘", f"通过{title}案例理解应用条件"]},
-        {"title": "互动讨论", "body": [f"讨论：{difficulty}", "独立判断", "同伴交换", "全班分享"]},
-        {"title": "本课总结", "body": ["用一句话记住四个关键点", *key_points[:4], *[f"详解：{kp}" for kp in key_points[:4]], "理解框架只是起点，真正的掌握来自应用、反馈与修正"]},
-        {"title": "即时测验", "body": [f"Q1  {key_points[0]}的核心是什么？", "选择或写出你的答案", f"Q2  {key_points[1]}如何应用？", "选择或写出你的答案", f"Q3  适用条件是什么？", "选择或写出你的答案", "建议：先隐藏答案，完成后再揭示"]},
-        {"title": "课后任务", "body": ["任务说明", f"围绕{title}完成一个应用任务", *[f"✓ {item}" for item in ["明确的问题或目标", "可验证的证据或指标", "具体行动步骤", "风险与反馈机制"]]]},
-        {"title": f"结课：{title}", "body": ["把今天的一个关键观点，用在下一个真实问题上"]},
-    ]
+
+    pages = {
+        "cover": {"title": title, "body": [subtitle]},
+        "intro": {"title": "课程导入", "body": [f"为什么学习{title}？", motivation] + [f"{i + 1}. {kp}" for i, kp in enumerate(key_points[:4])]},
+        "objectives": {"title": "学习目标", "body": ["完成本节后，你能够："] + objectives[:5]},
+        "knowledge_map": {"title": "知识地图", "body": ["核心问题", *key_points[:4], "知识脉络"]},
+        "knowledge_intro": {"title": "知识导入", "body": [motivation, *key_points[:4], "核心判断", f"关键：{key_points[0]}；难点：{difficulty}"]},
+        "core_1": core_modules[0],
+        "core_2": core_modules[1],
+        "core_3": core_modules[2],
+        "core_4": core_modules[3],
+        "case_study": {"title": "案例分析", "body": [f"{i + 1}. {step}" for i, step in enumerate(["问题定义", "方案执行", "数据收集", "结果评价"])] + ["案例复盘", f"通过{title}案例理解应用条件"]},
+        "discussion": {"title": "互动讨论", "body": [f"讨论：{difficulty}", "独立判断", "同伴交换", "全班分享"]},
+        "summary": {"title": "本课总结", "body": ["用一句话记住四个关键点", *key_points[:4], *[f"详解：{kp}" for kp in key_points[:4]], "理解框架只是起点，真正的掌握来自应用、反馈与修正"]},
+        "assessment": {"title": "即时测验", "body": [f"Q1  {key_points[0]}的核心是什么？", "选择或写出你的答案", f"Q2  {key_points[1]}如何应用？", "选择或写出你的答案", f"Q3  适用条件是什么？", "选择或写出你的答案", "建议：先隐藏答案，完成后再揭示"]},
+        "assignment": {"title": "课后任务", "body": ["任务说明", f"围绕{title}完成一个应用任务", *[f"✓ {item}" for item in ["明确的问题或目标", "可验证的证据或指标", "具体行动步骤", "风险与反馈机制"]]]},
+        "end": {"title": f"结课：{title}", "body": ["把今天的一个关键观点，用在下一个真实问题上"]},
+    }
+
+    counts = slot_counts(template_id)
+    result = []
+    for role in role_order():
+        page = pages[role]
+        result.append({
+            "title": page["title"],
+            "body": _adapt_body(role, page["body"], counts.get(role)),
+        })
+    return result
 
 
 def make_task_sheet(bp: CourseBlueprintSchema) -> TaskSheetContent:

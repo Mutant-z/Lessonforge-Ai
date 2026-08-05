@@ -75,9 +75,10 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         template = resolve_ppt_template(theme)
         if template.get("composition") == "deck":
             deck_path = (CATALOG_DIR / str(template["file"])).resolve()
-            # make_deck 生成与 15 页槽位一一对应的完整内容，保证成品模板填字连贯
-            deck = make_deck(CourseBlueprintSchema.model_validate(blueprint))
-            path = render_deck(deck_path, deck, folder / "02_课件.pptx")
+            # make_deck 按模板槽位数整形内容，render_deck 按模板读槽位填字，
+            # 保证不同模板导出为各自独立的版式设计
+            deck = make_deck(CourseBlueprintSchema.model_validate(blueprint), template["id"])
+            path = render_deck(deck_path, deck, folder / "02_课件.pptx", template["id"])
         else:
             path = render_pptx(title, ppt_content, folder / "02_课件.pptx")
         add(

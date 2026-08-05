@@ -9,11 +9,11 @@ from html import escape
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.core.config import get_settings
+from app.core.http_client import build_async_client
 from app.core.security import decrypt_secret
 from app.models.entities import AgentChatSession, ArtifactAsset, CourseProject, GenerationRun, ModelConfig
 
@@ -101,7 +101,7 @@ async def _safe_remote_image(url: str, timeout: int) -> tuple[bytes, str]:
         ip = ipaddress.ip_address(address[4][0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             raise ValueError("图片返回 URL 不允许访问内网地址")
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+    async with build_async_client(url, timeout=timeout, follow_redirects=False) as client:
         response = await client.get(url, headers={"Accept": "image/png,image/jpeg,image/webp"})
         response.raise_for_status()
         if response.is_redirect:
@@ -120,7 +120,7 @@ async def generate_image(config: ModelConfig, prompt: str, size: str) -> tuple[b
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     if mode == "google_gemini_image":
         endpoint = f"{config.base_url.rstrip('/')}/models/{config.model_name}:generateContent"
-        async with httpx.AsyncClient(timeout=config.timeout_seconds, follow_redirects=False) as client:
+        async with build_async_client(endpoint, timeout=config.timeout_seconds, follow_redirects=False) as client:
             response = await client.post(
                 endpoint,
                 params={"key": key},
@@ -145,7 +145,7 @@ async def generate_image(config: ModelConfig, prompt: str, size: str) -> tuple[b
             adapter.get("prompt_field", "prompt"): prompt,
             adapter.get("size_field", "size"): size,
         }
-        async with httpx.AsyncClient(timeout=config.timeout_seconds, follow_redirects=False) as client:
+        async with build_async_client(endpoint, timeout=config.timeout_seconds, follow_redirects=False) as client:
             response = await client.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
@@ -180,9 +180,10 @@ async def review_image(
         + json.dumps(question_context, ensure_ascii=False)
     )
     if config.provider == "anthropic" or config.api_mode == "anthropic_vision":
-        async with httpx.AsyncClient(timeout=config.timeout_seconds, follow_redirects=False) as client:
+        vision_url = f"{config.base_url.rstrip('/')}/v1/messages"
+        async with build_async_client(vision_url, timeout=config.timeout_seconds, follow_redirects=False) as client:
             response = await client.post(
-                f"{config.base_url.rstrip('/')}/v1/messages",
+                vision_url,
                 headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                 json={
                     "model": config.model_name, "max_tokens": 500,
@@ -195,18 +196,20 @@ async def review_image(
         response.raise_for_status()
         text = "".join(item.get("text", "") for item in response.json().get("content", []) if item.get("type") == "text")
     elif config.api_mode == "google_vision":
-        async with httpx.AsyncClient(timeout=config.timeout_seconds, follow_redirects=False) as client:
+        vision_url = f"{config.base_url.rstrip('/')}/models/{config.model_name}:generateContent"
+        async with build_async_client(vision_url, timeout=config.timeout_seconds, follow_redirects=False) as client:
             response = await client.post(
-                f"{config.base_url.rstrip('/')}/models/{config.model_name}:generateContent",
+                vision_url,
                 params={"key": key},
                 json={"contents": [{"parts": [{"text": prompt}, {"inlineData": {"mimeType": mime, "data": encoded}}]}]},
             )
         response.raise_for_status()
         text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
     else:
-        async with httpx.AsyncClient(timeout=config.timeout_seconds, follow_redirects=False) as client:
+        chat_url = f"{config.base_url.rstrip('/')}/chat/completions"
+        async with build_async_client(chat_url, timeout=config.timeout_seconds, follow_redirects=False) as client:
             response = await client.post(
-                f"{config.base_url.rstrip('/')}/chat/completions",
+                chat_url,
                 headers={"Authorization": f"Bearer {key}"},
                 json={
                     "model": config.model_name, "temperature": 0,

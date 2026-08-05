@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
+from app.core.http_client import build_async_client
 from app.providers.llm.base import LLMProvider, LLMProviderError, T
 
 
@@ -70,13 +71,10 @@ class OpenAICompatibleProvider(LLMProvider):
         reraise=True,
     )
     async def _post_chat(self, payload: dict[str, Any]) -> tuple[dict[str, Any], httpx.Response]:
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(
-                    f"{self.base_url.rstrip('/')}/chat/completions",
-                    json=payload,
-                    headers=self._headers(),
-                )
+            async with build_async_client(url, timeout=self.timeout_seconds) as client:
+                response = await client.post(url, json=payload, headers=self._headers())
         except httpx.TimeoutException as exc:
             raise self._response_error(
                 "upstream_timeout",
@@ -228,8 +226,9 @@ class OpenAICompatibleProvider(LLMProvider):
             "temperature": 0.3,
             "stream": True,
         }
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            async with client.stream("POST", f"{self.base_url.rstrip('/')}/chat/completions", json=payload, headers=self._headers()) as response:
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        async with build_async_client(url, timeout=self.timeout_seconds) as client:
+            async with client.stream("POST", url, json=payload, headers=self._headers()) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):

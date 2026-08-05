@@ -2,9 +2,9 @@ from collections.abc import AsyncIterator
 import json
 import re
 from typing import TypeVar
-import httpx
 from pydantic import BaseModel
 
+from app.core.http_client import build_async_client
 from app.providers.llm.base import LLMProvider
 
 T = TypeVar("T", bound=BaseModel)
@@ -44,7 +44,7 @@ class AnthropicProvider(LLMProvider):
             "system": system,
             "messages": [{"role": "user", "content": prompt_with_schema}],
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with build_async_client(url, timeout=self.timeout) as client:
             resp = await client.post(url, headers=self._headers(), json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -74,7 +74,7 @@ class AnthropicProvider(LLMProvider):
             "stream": True,
             "messages": [{"role": "user", "content": prompt}],
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with build_async_client(url, timeout=self.timeout) as client:
             async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -101,8 +101,9 @@ class AnthropicProvider(LLMProvider):
             "messages": [{"role": "user", "content": "Ping"}],
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(f"{self.base_url.rstrip('/')}/v1/messages", json=payload, headers=self._headers())
+            url = f"{self.base_url.rstrip('/')}/v1/messages"
+            async with build_async_client(url, timeout=15.0) as client:
+                resp = await client.post(url, json=payload, headers=self._headers())
                 if resp.status_code == 200:
                     return True, "Anthropic 协议连通正常！"
                 else:

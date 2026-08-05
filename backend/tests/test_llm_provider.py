@@ -16,6 +16,8 @@ def provider_with_handler(monkeypatch, handler):
     original_client = httpx.AsyncClient
 
     def client_factory(*args, **kwargs):
+        # MockTransport 与 proxy 在 httpx 中互斥，注入 transport 时移除代理
+        kwargs.pop("proxy", None)
         kwargs["transport"] = httpx.MockTransport(handler)
         return original_client(*args, **kwargs)
 

@@ -1,150 +1,12 @@
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "templates": [
-    {
-      "id": "lessonforge_swiss_blue",
-      "file": "lessonforge_swiss_blue.pptx",
-      "name": "瑞士蓝·清晰学术",
-      "short_name": "瑞士蓝",
-      "description": "高对比蓝色导轨与清晰网格，强调概念层级和严谨表达。",
-      "recommended_for": ["通用课程", "数学", "物理"],
-      "composition": "swiss_rail",
-      "palette": {
-        "background": "#FFFFFF",
-        "surface": "#F7F7F8",
-        "primary": "#002FA7",
-        "secondary": "#DCE7FF",
-        "text": "#161A22",
-        "muted": "#646B78",
-        "on_primary": "#FFFFFF"
-      },
-      "typography": {
-        "heading": "Microsoft YaHei",
-        "body": "Microsoft YaHei",
-        "latin": "Arial"
-      }
-    },
-    {
-      "id": "lessonforge_nordic_clean",
-      "file": "lessonforge_nordic_clean.pptx",
-      "name": "北欧绿·自然探究",
-      "short_name": "北欧绿",
-      "description": "柔和绿意、大面积留白与轻量分区，适合观察和探究过程。",
-      "recommended_for": ["生物", "地理", "综合实践"],
-      "composition": "nordic_field",
-      "palette": {
-        "background": "#F4F8F6",
-        "surface": "#FFFFFF",
-        "primary": "#0F766E",
-        "secondary": "#CFE8DF",
-        "text": "#17332E",
-        "muted": "#58706B",
-        "on_primary": "#FFFFFF"
-      },
-      "typography": {
-        "heading": "Microsoft YaHei",
-        "body": "Microsoft YaHei",
-        "latin": "Arial"
-      }
-    },
-    {
-      "id": "lessonforge_modern_academic",
-      "file": "lessonforge_modern_academic.pptx",
-      "name": "现代紫·示范课堂",
-      "short_name": "现代紫",
-      "description": "紫色非对称标题区与醒目页码，突出公开课的演示节奏。",
-      "recommended_for": ["公开课", "示范课", "教学评审"],
-      "composition": "academic_offset",
-      "palette": {
-        "background": "#FAF8FF",
-        "surface": "#FFFFFF",
-        "primary": "#6D28D9",
-        "secondary": "#E9DDFE",
-        "text": "#251B38",
-        "muted": "#6E647E",
-        "on_primary": "#FFFFFF"
-      },
-      "typography": {
-        "heading": "Microsoft YaHei",
-        "body": "Microsoft YaHei",
-        "latin": "Arial"
-      }
-    },
-    {
-      "id": "lessonforge_humanities_editorial",
-      "file": "lessonforge_humanities_editorial.pptx",
-      "name": "人文书卷·编辑排版",
-      "short_name": "人文书卷",
-      "description": "暖色纸张质感、砖红细线与书刊式标题，适合叙事和材料阅读。",
-      "recommended_for": ["语文", "历史", "道德与法治"],
-      "composition": "editorial_margin",
-      "palette": {
-        "background": "#F3E7D3",
-        "surface": "#FAF3E7",
-        "primary": "#8A3B2E",
-        "secondary": "#D6B897",
-        "text": "#382A22",
-        "muted": "#756457",
-        "on_primary": "#FFF9F0"
-      },
-      "typography": {
-        "heading": "SimSun",
-        "body": "Microsoft YaHei",
-        "latin": "Georgia"
-      }
-    },
-    {
-      "id": "lessonforge_science_dark",
-      "file": "lessonforge_science_dark.pptx",
-      "name": "深海科技·实验演示",
-      "short_name": "深海科技",
-      "description": "深蓝背景与青色信号轨道，为实验步骤和技术信息提供强对比。",
-      "recommended_for": ["物理实验", "科学", "信息技术"],
-      "composition": "science_signal",
-      "palette": {
-        "background": "#0B1020",
-        "surface": "#131C33",
-        "primary": "#00C2FF",
-        "secondary": "#173C57",
-        "text": "#EAF6FF",
-        "muted": "#9CB8CA",
-        "on_primary": "#07111D"
-      },
-      "typography": {
-        "heading": "Microsoft YaHei",
-        "body": "Microsoft YaHei",
-        "latin": "Arial"
-      }
-    },
-    {
-      "id": "lessonforge_primary_vivid",
-      "file": "lessonforge_primary_vivid.pptx",
-      "name": "活力课堂·橙蓝启蒙",
-      "short_name": "活力课堂",
-      "description": "橙蓝撞色、放大编号和圆润内容区，帮助低龄学习者抓住重点。",
-      "recommended_for": ["小学", "启蒙", "活动型课程"],
-      "composition": "primary_blocks",
-      "palette": {
-        "background": "#FFF7ED",
-        "surface": "#FFFFFF",
-        "primary": "#F97316",
-        "secondary": "#2563EB",
-        "text": "#2D241E",
-        "muted": "#76675D",
-        "on_primary": "#FFFFFF"
-      },
-      "typography": {
-        "heading": "Microsoft YaHei",
-        "body": "Microsoft YaHei",
-        "latin": "Arial"
-      }
-    },
     {
       "id": "lessonforge_deck_academic",
       "file": "../PPT_template/Academic_Template.pptx",
       "name": "学术科研·成品微课",
       "short_name": "学术科研",
-      "description": "15 页成品微课模板，agent 生成内容直接填入，保留模板视觉设计。",
+      "description": "沉稳蓝色学术版式，适合科研、论文与深度讲解型微课，内容直接填入成品版式。",
       "recommended_for": ["科研", "学术", "深度课程"],
       "composition": "deck",
       "palette": {
@@ -167,7 +29,7 @@
       "file": "../PPT_template/AI_Future_Template.pptx",
       "name": "AI 未来·成品微课",
       "short_name": "AI 未来",
-      "description": "15 页 AI 主题成品微课模板，适合前沿科技类课程。",
+      "description": "科技感蓝色渐变版式，适合人工智能、前沿科技与创新主题微课。",
       "recommended_for": ["AI", "科技", "前沿课程"],
       "composition": "deck",
       "palette": {
@@ -190,7 +52,7 @@
       "file": "../PPT_template/Business_Template.pptx",
       "name": "商务培训·成品微课",
       "short_name": "商务培训",
-      "description": "15 页商务培训成品微课模板，适合职场与管理课程。",
+      "description": "干练深蓝商务版式，适合职场技能、管理与培训类微课。",
       "recommended_for": ["商务", "管理", "培训课程"],
       "composition": "deck",
       "palette": {
@@ -213,7 +75,7 @@
       "file": "../PPT_template/Cartoon_Template.pptx",
       "name": "卡通启蒙·成品微课",
       "short_name": "卡通启蒙",
-      "description": "15 页卡通成品微课模板，适合低龄与趣味课程。",
+      "description": "活泼橙彩卡通版式，适合小学、低龄与趣味启蒙类微课。",
       "recommended_for": ["小学", "启蒙", "趣味课程"],
       "composition": "deck",
       "palette": {
@@ -236,7 +98,7 @@
       "file": "../PPT_template/Chinese_Culture_Template.pptx",
       "name": "中国文化·成品微课",
       "short_name": "中国文化",
-      "description": "15 页中国文化主题成品微课模板，适合人文与国学课程。",
+      "description": "暖色纸张与砖红细线，适合语文、历史、国学等文化类微课。",
       "recommended_for": ["人文", "国学", "文化课程"],
       "composition": "deck",
       "palette": {
@@ -259,7 +121,7 @@
       "file": "../PPT_template/Smart_AI_Template.pptx",
       "name": "智慧课堂·成品微课",
       "short_name": "智慧课堂",
-      "description": "15 页智慧课堂成品微课模板，适合个性化学习与智能教学。",
+      "description": "紫色智能课堂版式，适合个性化学习、互动教学与 AI 辅助课堂。",
       "recommended_for": ["智慧课堂", "个性化学习", "AI 教学"],
       "composition": "deck",
       "palette": {

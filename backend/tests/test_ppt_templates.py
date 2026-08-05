@@ -34,21 +34,24 @@ def sample_ppt_content(theme=DEFAULT_PPT_TEMPLATE_ID):
     }
 
 
-def test_template_catalog_has_twelve_valid_unique_templates():
+def test_template_catalog_has_six_deck_templates():
     catalog = load_ppt_template_catalog()
-    assert catalog["version"]
-    assert len(catalog["templates"]) == 12
+    assert catalog["version"] == "2.0.0"
+    assert len(catalog["templates"]) == 6
     ids = [item["id"] for item in catalog["templates"]]
-    assert len(set(ids)) == 12
+    assert len(set(ids)) == 6
+    # 模板全部来自 templates/PPT_template 的真实成品模板
+    assert all(item["composition"] == "deck" for item in catalog["templates"])
+    assert all(item["id"].startswith("lessonforge_deck_") for item in catalog["templates"])
     assert get_ppt_template(DEFAULT_PPT_TEMPLATE_ID)
     assert all(len(item["recommended_for"]) == 3 for item in catalog["templates"])
     template_dir = Path(__file__).resolve().parents[2] / "templates" / "pptx"
     for item in catalog["templates"]:
-        template_path = template_dir / item["file"]
+        template_path = (template_dir / item["file"]).resolve()
         assert template_path.is_file()
+        assert template_path.parent.name == "PPT_template"
         deck = Presentation(template_path)
-        expected_slides = 15 if item["composition"] == "deck" else 6
-        assert len(deck.slides) == expected_slides
+        assert len(deck.slides) == 15
         assert deck.slide_width / deck.slide_height == pytest.approx(16 / 9, rel=0.01)
 
 
@@ -99,16 +102,16 @@ async def test_apply_template_creates_visual_only_version_without_staling_depend
     response = await client.post(
         f"/api/v1/artifacts/{ppt_id}/apply-template",
         headers=auth_headers,
-        json={"template_id": "lessonforge_science_dark", "expected_version": 1},
+        json={"template_id": "lessonforge_deck_business", "expected_version": 1},
     )
     assert response.status_code == 200, response.text
     result = response.json()
     assert result["changed"] is True
     assert result["artifact"]["version"] == 2
     assert result["artifact"]["content_json"] == {
-        **original_content, "theme": "lessonforge_science_dark",
+        **original_content, "theme": "lessonforge_deck_business",
     }
-    assert result["artifact"]["change_summary"] == "切换 PPT 模板：深海科技·实验演示"
+    assert result["artifact"]["change_summary"] == "切换 PPT 模板：商务培训·成品微课"
 
     async with SessionLocal() as db:
         tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course_id)))
@@ -118,7 +121,7 @@ async def test_apply_template_creates_visual_only_version_without_staling_depend
     repeated = await client.post(
         f"/api/v1/artifacts/{result['artifact']['id']}/apply-template",
         headers=auth_headers,
-        json={"template_id": "lessonforge_science_dark", "expected_version": 2},
+        json={"template_id": "lessonforge_deck_business", "expected_version": 2},
     )
     assert repeated.status_code == 200
     assert repeated.json()["changed"] is False
@@ -135,7 +138,7 @@ async def test_apply_template_creates_visual_only_version_without_staling_depend
 async def test_template_catalog_endpoint_and_preference_validation(client, auth_headers):
     catalog = await client.get("/api/v1/ppt-templates", headers=auth_headers)
     assert catalog.status_code == 200
-    assert len(catalog.json()["templates"]) == 12
+    assert len(catalog.json()["templates"]) == 6
 
     invalid = await client.patch(
         "/api/v1/settings/preferences",

@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 
-DEFAULT_PPT_TEMPLATE_ID = "lessonforge_swiss_blue"
+DEFAULT_PPT_TEMPLATE_ID = "lessonforge_deck_academic"
 CATALOG_PATH = Path(__file__).resolve().parents[3] / "templates" / "pptx" / "catalog.json"
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 REQUIRED_PALETTE_KEYS = {

@@ -205,6 +205,11 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .theme-primary_blocks .dec-dot { left: 5.8px; top: 5.8px; width: 85px; height: 85px; border-radius: 50%; background: var(--ppt-secondary); }
 .theme-primary_blocks .dec-main { left: 877px; top: 459.4px; width: 64.8px; height: 64.8px; border-radius: 50%; background: var(--ppt-primary); }
 
+/* 成品 deck 模板：内容填入真实 PPT 版式，页面内用简洁的品牌条与角标做预览 */
+.theme-deck .dec-main { left: 0; top: 0; width: 960px; height: 6px; background: var(--ppt-primary); }
+.theme-deck .dec-accent { left: 45px; top: 45px; width: 6px; height: 104px; background: var(--ppt-secondary); }
+.theme-deck .dec-dot { right: 45px; bottom: 45px; width: 86px; height: 86px; border-radius: 50%; background: var(--ppt-secondary); }
+
 /* 2. 页眉页码 */
 .ppt-folio { position: absolute; left: 59px; top: 44.6px; font: 800 16px/1 var(--ppt-latin-font); color: var(--ppt-primary); z-index: 3; }
 .theme-academic_offset .ppt-folio { left: 27.4px; color: var(--ppt-on-primary); }

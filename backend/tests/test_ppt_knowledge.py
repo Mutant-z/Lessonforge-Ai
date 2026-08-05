@@ -39,7 +39,7 @@ from app.services.ppt_knowledge_service import check_ppt_against_knowledge
 
 def compliant_ppt_content():
     return {
-        "theme": "lessonforge_swiss_blue",
+        "theme": "lessonforge_deck_smart_ai",
         "slides": [
             {
                 "id": "S01", "page_type": "cover", "title": "阿基米德原理",
@@ -62,7 +62,7 @@ def compliant_ppt_content():
 
 def violating_ppt_content():
     return {
-        "theme": "lessonforge_swiss_blue",
+        "theme": "lessonforge_deck_smart_ai",
         "slides": [
             {
                 "id": "S01", "page_type": "objectives", "title": "学习目标",
@@ -220,7 +220,7 @@ async def test_v2_prompt_improves_rule_compliance(client):
 
 def compliant_blocks_content():
     return {
-        "theme": "lessonforge_swiss_blue",
+        "theme": "lessonforge_deck_smart_ai",
         "slides": [
             {
                 "id": "S01", "page_type": "cover", "title": "阿基米德原理",
@@ -263,7 +263,7 @@ def test_blocks_density_takes_precedence_over_body():
 
 def test_blocks_density_violations_reported():
     content = {
-        "theme": "lessonforge_swiss_blue",
+        "theme": "lessonforge_deck_smart_ai",
         "slides": [
             {
                 "id": "S01", "page_type": "objectives", "title": "学习目标",

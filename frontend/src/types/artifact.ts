@@ -135,7 +135,7 @@ export interface PPTTemplate {
   short_name: string;
   description: string;
   recommended_for: string[];
-  composition: 'swiss_rail' | 'nordic_field' | 'academic_offset' | 'editorial_margin' | 'science_signal' | 'primary_blocks';
+  composition: 'swiss_rail' | 'nordic_field' | 'academic_offset' | 'editorial_margin' | 'science_signal' | 'primary_blocks' | 'deck';
   palette: PPTTemplatePalette;
   typography: PPTTemplateTypography;
 }

@@ -4,10 +4,12 @@
 的角色+位置锚点，把生成内容填入对应文本形状，保留模板的视觉设计（装饰/图表/配图）。
 """
 import json
+import math
 from pathlib import Path
 
 from pptx import Presentation
-from pptx.util import Emu
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.util import Emu, Pt
 
 SLOTS_PATH = Path(__file__).resolve().parents[3] / "templates" / "ppt_decks" / "deck_slots.json"
 DECK_TEMPLATES_DIR = Path(__file__).resolve().parents[3] / "templates" / "PPT_template"
@@ -19,13 +21,18 @@ def _load_slots() -> dict:
 
 
 def _find_shape(slide, anchor: dict, tol_inches: float):
-    """返回最接近锚点 (x,y) 英寸坐标的文本形状，无则 None。"""
+    """返回最接近锚点 (x,y) 英寸坐标的文本形状，无则 None。
+
+    只匹配文本框/占位符，跳过色块、圆、图片等装饰形状，避免把内容填进装饰元素。
+    """
     tx = anchor["x"] * EMU_PER_INCH
     ty = anchor["y"] * EMU_PER_INCH
     best = None
     best_dist = None
     for shape in slide.shapes:
         if shape.left is None or shape.top is None or not shape.has_text_frame:
+            continue
+        if shape.shape_type != MSO_SHAPE_TYPE.TEXT_BOX and not shape.is_placeholder:
             continue
         dist = abs(shape.left - tx) + abs(shape.top - ty)
         if best_dist is None or dist < best_dist:
@@ -35,20 +42,49 @@ def _find_shape(slide, anchor: dict, tol_inches: float):
     return None
 
 
+def _fit_font_size(shape, text: str, base_size: float) -> float:
+    """按文本框尺寸估算并收缩字号，避免长文本溢出。"""
+    width_in = (shape.width or Emu(int(6 * EMU_PER_INCH))) / EMU_PER_INCH
+    height_in = (shape.height or Emu(int(1 * EMU_PER_INCH))) / EMU_PER_INCH
+    size = float(base_size)
+    while size > 8:
+        # 中文字符宽度约等于字号；按整串字符估算（拉丁字符偏保守）
+        char_w = size / 72.0 * 0.98
+        chars_per_line = max(1, int(width_in / char_w))
+        lines = 0
+        for segment in text.split("\n"):
+            lines += max(1, math.ceil(len(segment) / chars_per_line))
+        needed_height = lines * size / 72.0 * 1.28
+        if needed_height <= height_in * 0.98:
+            break
+        size -= 1
+    return size
+
+
 def _set_shape_text(shape, value: str):
-    """写入文本并保留首段首个 run 的字体格式，清除多余 run/段落。"""
+    """写入文本并保留首段首个 run 的字体格式，清除多余 run/段落，并收缩字号防止溢出。"""
     if not shape.has_text_frame:
         return
     frame = shape.text_frame
     paragraph = frame.paragraphs[0]
+    base_size = 16.0
     if paragraph.runs:
-        paragraph.runs[0].text = value
+        first_run = paragraph.runs[0]
+        if first_run.font.size:
+            base_size = float(first_run.font.size.pt)
+        first_run.text = str(value)
         for run in paragraph.runs[1:]:
             run._r.getparent().remove(run._r)
     else:
-        paragraph.text = value
+        paragraph.text = str(value)
     for extra in frame.paragraphs[1:]:
         extra._p.getparent().remove(extra._p)
+    frame.word_wrap = True
+    size = _fit_font_size(shape, str(value), base_size)
+    if paragraph.runs:
+        paragraph.runs[0].font.size = Pt(size)
+    else:
+        paragraph.font.size = Pt(size)
 
 
 def render_deck(template_path: Path, slides: list[dict], output: Path) -> Path:

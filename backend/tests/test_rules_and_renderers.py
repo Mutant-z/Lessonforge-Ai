@@ -52,7 +52,7 @@ def test_docx_pptx_and_zip(tmp_path: Path):
     package, manifest = build_course_package("course", "测试课程", bp.model_dump(), 1, artifacts, tmp_path / "out")
     assert package.exists() and len(manifest["artifacts"]) >= 9
     ppt_manifest = next(item for item in manifest["artifacts"] if item["type"] == "ppt")
-    assert ppt_manifest["template_id"] == "lessonforge_swiss_blue"
+    assert ppt_manifest["template_id"] == "lessonforge_deck_academic"
     assert ppt_manifest["template_catalog_version"]
     with zipfile.ZipFile(package) as archive:
         assert archive.testzip() is None
@@ -71,17 +71,31 @@ def test_docx_pptx_and_zip(tmp_path: Path):
 
 
 def test_all_ppt_templates_render_and_reopen(tmp_path: Path):
+    from app.agents.generators import make_deck
+    from app.renderers.deck_renderer import render_deck
+
     bp = make_blueprint(sample_course())
     base = make_ppt(bp).model_dump()
+    catalog_dir = Path(__file__).resolve().parents[2] / "templates" / "pptx"
     for template in list_ppt_templates():
         content = {**base, "theme": template["id"]}
-        path = render_pptx("模板测试", content, tmp_path / f"{template['id']}.pptx")
-        presentation = Presentation(path)
-        assert len(presentation.slides) == len(base["slides"])
-        assert presentation.slide_width == 12191695
-        assert presentation.slide_height == 6858000
-        assert presentation.slides[0].notes_slide.notes_text_frame.text
-        assert all(len(slide.shapes) >= 5 for slide in presentation.slides)
+        # 成品 deck 模板走真实模板填字；其余构图走代码绘制渲染器
+        if template["composition"] == "deck":
+            deck_path = (catalog_dir / template["file"]).resolve()
+            path = render_deck(deck_path, make_deck(bp), tmp_path / f"{template['id']}.pptx")
+            presentation = Presentation(path)
+            assert len(presentation.slides) == 15
+            assert presentation.slide_width / presentation.slide_height == pytest.approx(16 / 9, rel=0.01)
+            cover_texts = [sh.text_frame.text for sh in presentation.slides[0].shapes if sh.has_text_frame]
+            assert any(base["slides"][0]["title"] in text for text in cover_texts)
+        else:
+            path = render_pptx("模板测试", content, tmp_path / f"{template['id']}.pptx")
+            presentation = Presentation(path)
+            assert len(presentation.slides) == len(base["slides"])
+            assert presentation.slide_width == 12191695
+            assert presentation.slide_height == 6858000
+            assert presentation.slides[0].notes_slide.notes_text_frame.text
+            assert all(len(slide.shapes) >= 5 for slide in presentation.slides)
 
 
 def test_task_sheet_v2_schema_and_quality_paths(tmp_path: Path):

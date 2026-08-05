@@ -133,7 +133,7 @@ def _blocks_flat_text(blocks: list[dict]) -> list[str]:
     return text
 
 
-def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_swiss_blue") -> PPTContent:
+def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_deck_academic") -> PPTContent:
     seconds = bp.course_identity.duration_minutes * 60
     key_points = [_clip(item, 24) for item in bp.key_points[:3]]
     if len(key_points) == 1:
@@ -232,7 +232,7 @@ def make_deck(bp: CourseBlueprintSchema) -> list[dict]:
     for n in range(1, 5):
         core_modules.append({
             "title": f"核心知识0{n}",
-            "body": [f"MODULE {n}", f"要点：{key_points[n - 1]}"]
+            "body": [f"模块 {n}", f"要点：{key_points[n - 1]}"]
             + [f"要点{n}-{i + 1}" for i in range(3)]
             + ["核心公式"],
         })

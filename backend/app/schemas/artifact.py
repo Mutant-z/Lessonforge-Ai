@@ -112,7 +112,7 @@ class Slide(BaseModel):
 
 
 class PPTContent(BaseModel):
-    theme: str = "lessonforge_swiss_blue"
+    theme: str = "lessonforge_deck_academic"
     slides: list[Slide]
 
 

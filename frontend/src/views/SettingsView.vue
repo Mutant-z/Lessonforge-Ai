@@ -672,7 +672,7 @@ const pptTemplates = ref<PPTTemplate[]>([]);
 const preferenceForm = reactive<UserPreferencesPayload>({
   default_language: 'zh-CN',
   default_grade_level: '',
-  default_ppt_template: 'lessonforge_swiss_blue',
+  default_ppt_template: 'lessonforge_deck_academic',
 });
 
 // 计算属性
@@ -822,7 +822,7 @@ async function loadSettings() {
     if (res.preferences) {
       preferenceForm.default_language = res.preferences.default_language || 'zh-CN';
       preferenceForm.default_grade_level = res.preferences.default_grade_level || '';
-      preferenceForm.default_ppt_template = res.preferences.default_ppt_template || 'lessonforge_swiss_blue';
+      preferenceForm.default_ppt_template = res.preferences.default_ppt_template || 'lessonforge_deck_academic';
     }
   } catch (err: any) {
     fetchError.value = err.response?.data?.detail || err.message || '获取配置信息失败';

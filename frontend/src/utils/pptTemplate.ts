@@ -2,15 +2,15 @@ import type { CSSProperties } from 'vue';
 import type { PPTTemplate } from '../types';
 
 export const DEFAULT_PPT_TEMPLATE: PPTTemplate = {
-  id: 'lessonforge_swiss_blue',
-  name: '瑞士蓝·清晰学术',
-  short_name: '瑞士蓝',
-  description: '高对比蓝色导轨与清晰网格，强调概念层级和严谨表达。',
-  recommended_for: ['通用课程', '数学', '物理'],
-  composition: 'swiss_rail',
+  id: 'lessonforge_deck_academic',
+  name: '学术科研·成品微课',
+  short_name: '学术科研',
+  description: '沉稳蓝色学术版式，适合科研、论文与深度讲解型微课，内容直接填入成品版式。',
+  recommended_for: ['科研', '学术', '深度课程'],
+  composition: 'deck',
   palette: {
-    background: '#FFFFFF', surface: '#F7F7F8', primary: '#002FA7', secondary: '#DCE7FF',
-    text: '#161A22', muted: '#646B78', on_primary: '#FFFFFF',
+    background: '#FFFFFF', surface: '#F4F7FB', primary: '#1F4E79', secondary: '#D6E4F0',
+    text: '#1A1A1A', muted: '#6B7280', on_primary: '#FFFFFF',
   },
   typography: { heading: 'Microsoft YaHei', body: 'Microsoft YaHei', latin: 'Arial' },
 };

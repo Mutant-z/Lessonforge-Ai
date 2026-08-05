@@ -89,7 +89,7 @@ class TestConnectionRequest(BaseModel):
 class UserPreferencesUpdate(BaseModel):
     default_language: str = "zh-CN"
     default_grade_level: str = ""
-    default_ppt_template: str = "lessonforge_swiss_blue"
+    default_ppt_template: str = "lessonforge_deck_academic"
 
 
 class FullSettingsResponse(BaseModel):

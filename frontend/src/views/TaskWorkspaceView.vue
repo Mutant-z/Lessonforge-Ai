@@ -691,7 +691,7 @@ onUnmounted(() => {
         <div v-else-if="artifact" class="artifact-viewport" :class="{ updated: artifact.id }">
           <div v-if="taskType === 'ppt' && artifact.content_json?.slides" class="ppt-layout">
             <div class="slide-list">
-              <SlideThumbnail v-for="(slide, index) in artifact.content_json.slides" :key="slide.id || index" :slide="slide" :index="index" :is-active="selectedSlide === index" :template="previewTemplate" @select="selectedSlide = $event" />
+              <SlideThumbnail v-for="(slide, index) in artifact.content_json.slides" :key="slide.id || index" :slide="slide" :index="index" :total-slides="artifact.content_json.slides.length" :is-active="selectedSlide === index" :template="previewTemplate" @select="selectedSlide = $event" />
             </div>
             <div class="slide-preview"><SlidePreview :slide="artifact.content_json.slides[selectedSlide]" :slide-index="selectedSlide" :total-slides="artifact.content_json.slides.length" :template="previewTemplate" @regenerate-slide="prepareSlideRevision" /></div>
           </div>
@@ -747,6 +747,7 @@ onUnmounted(() => {
                 v-if="artifact?.content_json?.slides?.[selectedSlide]"
                 :slide="artifact.content_json.slides[selectedSlide]"
                 :index="selectedSlide"
+                :total-slides="artifact.content_json.slides.length"
                 :is-active="false"
                 :template="item"
               />

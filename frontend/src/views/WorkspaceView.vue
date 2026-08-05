@@ -344,6 +344,7 @@ onMounted(loadArtifacts);
                   :key="sIdx"
                   :slide="slide"
                   :index="sIdx"
+                  :total-slides="currentArtifact.content_json.slides.length"
                   :is-active="selectedSlideIndex === sIdx"
                   :template="currentPptTemplate"
                   @select="selectedSlideIndex = $event"

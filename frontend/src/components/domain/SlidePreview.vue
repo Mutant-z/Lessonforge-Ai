@@ -9,6 +9,8 @@ const props = defineProps<{
   slideIndex: number;
   totalSlides: number;
   template?: PPTTemplate | null;
+  /** 紧凑渲染模式（例如侧边栏缩略图），隐藏底部控制栏和多余间距 */
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -58,7 +60,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 </script>
 
 <template>
-  <div class="slide-preview-container animate-fade-in" :style="pptTemplateStyle(activeTemplate)">
+  <div class="slide-preview-container animate-fade-in" :class="{ compact }" :style="pptTemplateStyle(activeTemplate)">
     <div ref="canvasFrame" class="ppt-canvas-frame">
       <div class="ppt-canvas" :class="canvasClasses" :style="{ transform: `scale(${canvasScale})` }">
         <!-- 1. 模板装饰形状（对齐 pptx_renderer._decorate） -->
@@ -170,6 +172,8 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 
 <style scoped>
 .slide-preview-container { width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.slide-preview-container.compact { gap: 0; }
+.slide-preview-container.compact .ppt-footer-panel { display: none; }
 .ppt-canvas-frame { width: 100%; aspect-ratio: 16 / 9; position: relative; overflow: hidden; background: var(--ppt-bg); }
 .ppt-canvas {
   width: 960px; height: 540px; box-sizing: border-box; position: absolute; inset: 0 auto auto 0;

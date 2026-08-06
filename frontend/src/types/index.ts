@@ -1,4 +1,5 @@
 export * from './agent';
+export * from './agentPipeline';
 export * from './content-block';
 export * from './artifact';
 export * from './intake';

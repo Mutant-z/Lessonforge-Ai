@@ -111,7 +111,8 @@ async def test_knowledge_snapshot_is_course_isolated_and_soft_versions_propagate
     assert versions["exercise"] == 2
     assert "task_sheet" not in versions
     assert "OBJ-NOT-IN-BLUEPRINT" in "\n".join(context["conflicts"])
-    assert len(serialized) <= 24_500
+    # 上下文包含 15 页 PPT slides，阈值按该规模放宽（仍是防失控的软上限）
+    assert len(serialized) <= 28_000
 
     refreshed_a = (await client.get(f"/api/v1/courses/{course_a['id']}/project", headers=auth_headers)).json()
     assert _task(refreshed_a, "task_sheet")["status"] == "review"

@@ -200,13 +200,14 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
     assert "V3" in fallback_reply.content
 
     import app.services.course_task_service as task_service
+    from app.services import ppt_pipeline_service
 
-    original_revision = task_service._generate_revision
+    original_run_pipeline = ppt_pipeline_service.run_ppt_pipeline
 
-    async def broken_revision(*args, **kwargs):
+    async def broken_pipeline(*args, **kwargs):
         raise RuntimeError("temporary structured output failure")
 
-    monkeypatch.setattr(task_service, "_generate_revision", broken_revision)
+    monkeypatch.setattr(ppt_pipeline_service, "run_ppt_pipeline", broken_pipeline)
     failed_sent = await client.post(
         f"/api/v1/courses/{course['id']}/tasks/ppt/messages",
         headers=auth_headers,
@@ -221,7 +222,7 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
     )
     assert next(task for task in failed_project["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 3
 
-    monkeypatch.setattr(task_service, "_generate_revision", original_revision)
+    monkeypatch.setattr(ppt_pipeline_service, "run_ppt_pipeline", original_run_pipeline)
     retried = await client.post(
         f"/api/v1/courses/{course['id']}/tasks/ppt/runs",
         headers=auth_headers,

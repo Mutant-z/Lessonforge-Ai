@@ -48,7 +48,20 @@ export type AgentEventType =
   | 'run_completed'
   | 'run_cancelled'
   | 'heartbeat'
-  | 'stream_closed';
+  | 'stream_closed'
+  | 'agent_started'
+  | 'agent_completed'
+  | 'tool_call_started'
+  | 'tool_call_completed'
+  | 'artifact_created'
+  | 'asset_generated'
+  | 'qa_completed'
+  | 'revision_started'
+  | 'revision_completed'
+  | 'task_paused'
+  | 'task_resumed'
+  | 'pipeline_completed'
+  | 'pipeline_failed';
 
 export interface AgentStreamEvent {
   id?: number | string;

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { ArrowDown, CircleCheck, Clock, Cpu, Edit, Lock, MagicStick, Promotion, RefreshRight, Setting, Warning } from '@element-plus/icons-vue';
+import { ArrowDown, CircleCheck, Clock, Cpu, Edit, Lock, MagicStick, Promotion, RefreshRight, Setting, VideoPause, Warning } from '@element-plus/icons-vue';
 import { api, errorMessage } from '../api/client';
 import { pptTemplatesApi } from '../api/pptTemplates';
 import { settingsApi } from '../api/settings';
+import { pipelineApi } from '../api/pipeline';
 import { useProjectStore } from '../stores/project';
 import { useAutoScroll } from '../composables/useAutoScroll';
 import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoScriptContent } from '../types';
@@ -20,15 +21,19 @@ import ExercisePreview from '../components/domain/ExercisePreview.vue';
 import VideoScriptEditor from '../components/domain/VideoScriptEditor.vue';
 import VideoScriptPreview from '../components/domain/VideoScriptPreview.vue';
 import VersionSelector from '../components/domain/VersionSelector.vue';
+import AgentPipelineWorkbench from '../components/agent/pipeline/AgentPipelineWorkbench.vue';
 import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
 
 const route = useRoute();
 const store = useProjectStore();
-const courseId = route.params.id as string;
+const courseId = computed(() => route.params.id as string);
 const taskType = computed(() => route.params.taskType as string);
+const isPpt = computed(() => taskType.value === 'ppt');
 const input = ref('');
 const sending = ref(false);
+const pausing = ref(false);
 const error = ref('');
+const taskLoading = ref(false);
 const selectedSlide = ref(0);
 const mobilePane = ref<'agent' | 'file'>('agent');
 const versions = ref<Artifact[]>([]);
@@ -98,7 +103,7 @@ const contentUpdateSignature = computed(() => {
     task.value?.task_type,
     messages.length,
     latest?.id,
-    latest?.content.length,
+    latest?.content?.length || 0,
     latest?.status,
     activity?.phase,
     activity?.status,
@@ -154,14 +159,21 @@ function resetSplitter() {
 }
 
 async function load() {
+  taskLoading.value = true;
   error.value = '';
   selectedSlide.value = 0;
+  editing.value = false;
+  taskSheetDraft.value = null;
+  exerciseDraft.value = null;
+  videoScriptDraft.value = null;
   try {
-    await store.openTask(courseId, taskType.value);
+    await store.openTask(courseId.value, taskType.value);
     await nextTick();
     scrollToBottom(false);
   } catch (cause) {
     error.value = errorMessage(cause);
+  } finally {
+    taskLoading.value = false;
   }
 }
 
@@ -209,6 +221,23 @@ async function applyPptTemplate() {
   }
 }
 
+async function handleButtonClick() {
+  if (isRunning.value) {
+    if (pausing.value) return;
+    pausing.value = true;
+    error.value = '';
+    try {
+      await pipelineApi.pause(courseId.value, taskType.value);
+    } catch (cause) {
+      error.value = errorMessage(cause);
+    } finally {
+      pausing.value = false;
+    }
+    return;
+  }
+  await send();
+}
+
 async function send() {
   const content = input.value.trim();
   if (!content || sending.value) return;
@@ -216,7 +245,7 @@ async function send() {
   error.value = '';
   input.value = '';
   try {
-    await store.sendMessage(courseId, taskType.value, content);
+    await store.sendMessage(courseId.value, taskType.value, content);
     await nextTick();
     scrollToBottom(false);
   } catch (cause) {
@@ -230,32 +259,32 @@ async function send() {
 async function run(action: 'initial' | 'retry' | 'sync_dependencies' | 'sync_context') {
   error.value = '';
   try {
-    await store.runTask(courseId, taskType.value, action);
+    await store.runTask(courseId.value, taskType.value, action);
   } catch (cause) {
     error.value = errorMessage(cause);
   }
 }
 
 async function approve() {
-  try { await store.approveTask(courseId, taskType.value); }
+  try { await store.approveTask(courseId.value, taskType.value); }
   catch (cause) { error.value = errorMessage(cause); }
 }
 
 async function setModel(id: string) {
-  try { await store.setTaskModel(courseId, taskType.value, id); }
+  try { await store.setTaskModel(courseId.value, taskType.value, id); }
   catch (cause) { error.value = errorMessage(cause); }
 }
 
 async function setImageModel(id: string) {
   try {
-    const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType.value}/model`, { image_model_config_id: id });
+    const { data } = await api.patch(`/courses/${courseId.value}/tasks/${taskType.value}/model`, { image_model_config_id: id });
     if (task.value) task.value.image_model_config_id = data.image_model_config_id;
   } catch (cause) { error.value = errorMessage(cause); }
 }
 
 async function setVisionModel(id: string) {
   try {
-    const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType.value}/model`, { vision_model_config_id: id });
+    const { data } = await api.patch(`/courses/${courseId.value}/tasks/${taskType.value}/model`, { vision_model_config_id: id });
     if (task.value) task.value.vision_model_config_id = data.vision_model_config_id;
   } catch (cause) { error.value = errorMessage(cause); }
 }
@@ -415,7 +444,20 @@ onUnmounted(() => {
 <template>
   <div v-if="store.loading && !store.project" class="task-loading"><el-skeleton :rows="8" animated /></div>
   <ProjectShell v-else-if="store.project" :active-type="taskType">
-    <div v-if="task" ref="containerRef" class="task-workspace">
+    <div v-if="taskLoading && (!task || task.task_type !== taskType)" class="task-subtask-loading" style="padding: 32px; max-width: 900px; margin: 20px auto;">
+      <el-skeleton :rows="10" animated />
+    </div>
+    <div v-else-if="error && (!task || task.task_type !== taskType)" class="task-subtask-error" style="padding: 32px; max-width: 600px; margin: 40px auto;">
+      <el-alert :title="error" type="error" show-icon :closable="false">
+        <template #default>
+          <p style="margin: 8px 0 12px; font-weight: 600;">无法加载当前【{{ taskType }}】任务数据。</p>
+          <el-button size="small" type="primary" @click="load">重试加载</el-button>
+        </template>
+      </el-alert>
+    </div>
+    <AgentPipelineWorkbench v-else-if="isPpt && task && task.task_type === taskType" :course-id="courseId" :task-type="taskType" />
+    <template v-else>
+    <div v-if="task && task.task_type === taskType" ref="containerRef" class="task-workspace">
       <div class="mobile-pane-switch" role="tablist">
         <button :class="{ active: mobilePane === 'agent' }" @click="mobilePane = 'agent'">Agent 对话</button>
         <button :class="{ active: mobilePane === 'file' }" @click="mobilePane = 'file'">任务文件</button>
@@ -573,7 +615,7 @@ onUnmounted(() => {
           回到最新回复<span v-if="unreadCount"> · {{ unreadCount }}</span>
         </button>
 
-        <form class="composer-floating-card" @submit.prevent="send">
+        <form class="composer-floating-card" @submit.prevent="handleButtonClick">
           <!-- Quick Prompts Toolbar right inside Composer -->
           <div v-if="artifact && currentQuickPrompts.length" class="composer-quick-prompts">
             <span class="quick-prompts-label">
@@ -598,7 +640,7 @@ onUnmounted(() => {
             v-model="input"
             rows="2"
             :disabled="isRunning || !artifact || !profileReady"
-            :placeholder="!profileReady ? '项目专属 Agent 初始化完成后可继续对话' : artifact ? `详细描述您希望如何修改 ${task.display_name}…` : '任务文件生成后可继续对话修改'"
+            :placeholder="isRunning ? 'Agent 正在处理中，点击右下角按钮可暂停...' : (!profileReady ? '项目专属 Agent 初始化完成后可继续对话' : artifact ? `详细描述您希望如何修改 ${task.display_name}…` : '任务文件生成后可继续对话修改')"
             @keydown="onKeydown"
           />
 
@@ -617,10 +659,13 @@ onUnmounted(() => {
               <button
                 type="submit"
                 class="composer-send-circle"
-                :disabled="!input.trim() || isRunning || !artifact || !profileReady"
-                title="发送修改"
+                :class="{ 'is-pausing': isRunning }"
+                :disabled="isRunning ? pausing : (!input.trim() || !artifact || !profileReady)"
+                :title="isRunning ? '暂停 Agent 推演' : '发送修改'"
               >
-                <el-icon><Promotion /></el-icon>
+                <el-icon v-if="pausing || sending" class="is-loading"><Loading /></el-icon>
+                <el-icon v-else-if="isRunning"><VideoPause /></el-icon>
+                <el-icon v-else><Promotion /></el-icon>
               </button>
             </div>
           </div>
@@ -708,6 +753,7 @@ onUnmounted(() => {
         </div>
       </main>
     </div>
+    </template>
     <VersionSelector v-if="showVersions" :versions="versions" :current-version="artifact?.version" @select="selectVersion" @close="showVersions = false" />
     <el-drawer
       v-model="showTemplateDrawer"
@@ -794,35 +840,35 @@ onUnmounted(() => {
 
 /* Pane Resizer / Divider */
 .pane-resizer {
-  width: 8px;
-  margin: 0 2px;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: col-resize;
-  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background 150ms ease;
   user-select: none;
-  transition: background 150ms;
+  flex-shrink: 0;
 }
 
 .pane-resizer:hover,
 .pane-resizer.dragging {
-  background: #eef2ff;
-  border-radius: 4px;
+  background: #e0e7ff;
 }
 
 .resizer-line {
-  width: 3px;
-  height: 32px;
-  border-radius: 4px;
+  width: 2px;
+  height: 24px;
   background: #cbd5e1;
-  transition: background 150ms, height 150ms;
+  border-radius: 999px;
+  transition: background 150ms ease;
 }
 
 .pane-resizer:hover .resizer-line,
 .pane-resizer.dragging .resizer-line {
-  background: var(--primary-600, #4f46e5);
-  height: 44px;
+  background: #4f46e5;
 }
 
 .agent-pane {
@@ -1053,6 +1099,15 @@ onUnmounted(() => {
 
 .message.user {
   align-self: flex-end;
+  align-items: flex-end;
+}
+
+.message.user .role-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 3px;
+  flex-direction: row-reverse;
 }
 
 .role-line {
@@ -1110,6 +1165,19 @@ onUnmounted(() => {
   color: #ffffff;
   border-radius: 14px 14px 4px 14px;
   box-shadow: 0 3px 10px rgba(79, 70, 229, 0.2);
+}
+
+.message.user .message-content :deep(.markdown-rendered-body),
+.message.user .message-content :deep(.markdown-rendered-body p),
+.message.user .message-content :deep(.markdown-rendered-body span),
+.message.user .message-content :deep(.markdown-rendered-body strong),
+.message.user .message-content :deep(.markdown-rendered-body li) {
+  color: #ffffff !important;
+}
+
+.message.user .message-content :deep(.markdown-rendered-body code) {
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
 }
 
 .status-hint {
@@ -1411,6 +1479,16 @@ onUnmounted(() => {
 .composer-send-circle:hover:not(:disabled) {
   transform: scale(1.06) translateY(-1px);
   box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
+}
+
+.composer-send-circle.is-pausing {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  box-shadow: 0 3px 10px rgba(239, 68, 68, 0.3);
+}
+
+.composer-send-circle.is-pausing:hover:not(:disabled) {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  box-shadow: 0 4px 14px rgba(220, 38, 38, 0.4);
 }
 
 .composer-send-circle:disabled {

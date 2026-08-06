@@ -60,7 +60,8 @@ from app.services.project_knowledge_service import build_project_knowledge_conte
 from app.services.exercise_review_service import degrade_unreviewed_visuals, review_and_repair_exercise
 from app.services.exercise_visual_service import process_exercise_visuals
 from app.services.quality_service import validate_exercise, validate_resources, validate_video_script
-from app.services.ppt_template_service import resolve_ppt_template
+from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, resolve_ppt_template
+from app.agent.pipeline import PipelinePaused  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +497,179 @@ async def _ensure_current_task_profile(db, task: CourseTask) -> CourseTaskAgentP
     return upgraded
 
 
+def _ppt_template_instruction(theme_id: str | None) -> str:
+    """把所选主题模板与 15 页结构注入 PPT 生成指令，让 AI 按模板生成内容。"""
+    return (
+        f"\n当前主题模板：{theme_id or DEFAULT_PPT_TEMPLATE_ID}。"
+        "请严格按该模板的 15 页结构生成 slides"
+        "（见 ppt_design_knowledge.ppt_skills.template_designs 中该模板的 page_structure 与版式说明），"
+        "顺序固定为 cover/intro/objectives/knowledge_map/knowledge_intro/core_1/core_2/core_3/core_4/"
+        "case_study/discussion/summary/assessment/assignment/end；"
+        "每页 body 与该模板对应版式的槽位语义一致，页数保持 15 页。"
+    )
+
+
+_PPT_REVISION_QUALITY = (
+    "\n请先分析用户意图与当前 PPT 结构，然后输出【完整的修订后 PPT】content_json。质量要求：\n"
+    "· 只修改用户要求的部分，未受影响的页面/字段必须原样保留；\n"
+    "· 遵守 ppt_design_knowledge 的 density_limits（标题≤30字、每条正文≤25字、每页≤6条、备注≥30字）；\n"
+    "· 保持所选模板的 15 页结构与版式；标题用结论式措辞，不用“学习目标/核心概念”等主题式标题；\n"
+    "· 若用户要求生成/插入图片：由于当前不支持二进制图片文件生成，请将插图需求转为视觉占位块（在 Slide 的 blocks 数组中增加 kind=\"visual\" 的 PPTVisualBlock 元素，填写 caption 或 diagram 等属性），或在 visual_suggestion 中提供图片视觉与排版说明，严禁输出非 Schema 字段；\n"
+    "· 不要为了优化而增加页数或堆砌文字，保持信息密度与克制；\n"
+    "· content_json 必须完整且符合 Schema。"
+)
+
+_PPT_REVISION_MAX_ROUNDS = 2
+
+
+def _ppt_revision_prompt(base: str, content: dict, attempt: int, feedback: str = "") -> str:
+    text = (
+        base
+        + "\n当前结构化内容：\n" + json.dumps(content, ensure_ascii=False)
+        + _PPT_REVISION_QUALITY
+    )
+    if attempt > 1 and feedback:
+        text += "\n上次校验未通过，请修正后重新输出完整修订稿：\n" + feedback[:1500]
+    return text
+
+
+def _clip_item(text: str, limit: int = 25) -> str:
+    text = str(text)
+    return text if len(text) <= limit else text[:limit]
+
+
+def _restore_locked_paths(content: dict, original: dict, locks) -> dict:
+    """把 AI 改动过的锁定路径还原为原值，保证不触碰锁定内容。"""
+    for lock in locks or []:
+        path = getattr(lock, "json_path", None)
+        if isinstance(lock, dict):
+            path = lock.get("json_path")
+        if not path or path in {"", "$"}:
+            continue
+        old = _locked_value(original, path)
+        if _locked_value(content, path) != old:
+            _set_locked_value(content, path, old)
+    return content
+
+
+def _set_locked_value(content, path: str, value):
+    parts = [p for p in re.split(r"\.|\[|\]", path.removeprefix("$.")) if p]
+    if not parts:
+        return
+    node = content
+    for part in parts[:-1]:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+            node = node[int(part)]
+        elif isinstance(node, list):
+            node = next((entry for entry in node if isinstance(entry, dict) and entry.get("id") == part), None)
+            if node is None:
+                return
+        else:
+            return
+    last = parts[-1]
+    if isinstance(node, dict):
+        node[last] = value
+    elif isinstance(node, list) and last.isdigit() and int(last) < len(node):
+        node[int(last)] = value
+    elif isinstance(node, list):
+        target = next((entry for entry in node if isinstance(entry, dict) and entry.get("id") == last), None)
+        if target is not None:
+            node[node.index(target)] = value
+
+
+def _validate_and_repair_ppt(content: dict):
+    """校验 PPT（结构 + 知识规则）并自动修复可确定性修正的问题。
+
+    返回 (content | None, 反馈信息)：content 为修复后可通过校验的内容；为 None 时反馈用于重试。
+    """
+    from app.services.ppt_knowledge_service import check_ppt_against_knowledge
+
+    try:
+        PPTContent.model_validate(content)
+    except Exception as exc:
+        return None, f"结构校验失败：{str(exc)[:300]}"
+    violations = check_ppt_against_knowledge(content)
+    if not violations:
+        return content, ""
+    slides = content.get("slides") or []
+    fixed = False
+    for violation in violations:
+        slide = next((s for s in slides if s.get("id") == violation.slide_id), None)
+        if slide is None:
+            continue
+        rule = violation.rule_id
+        if rule == "title.conclusion":
+            title = (slide.get("title") or "").strip()
+            if title in {"学习目标", "核心概念", "本课小结", "应用步骤", "课堂练习", "课堂总结"}:
+                slide["title"] = f"本课{title}"
+            else:
+                slide["title"] = title + "核心要点" if title else "本课要点"
+            fixed = True
+        elif rule == "density.title_chars":
+            slide["title"] = _clip_item(slide.get("title") or "", 30)
+            fixed = True
+        elif rule == "density.body_items":
+            slide["body"] = (slide.get("body") or [])[:6]
+            fixed = True
+        elif rule == "density.item_chars":
+            slide["body"] = [_clip_item(item) for item in (slide.get("body") or [])]
+            fixed = True
+        elif rule == "body.bullet_hardcoded":
+            slide["body"] = [item.lstrip("•-* ").strip() or item for item in (slide.get("body") or [])]
+            fixed = True
+        elif rule == "density.speaker_notes":
+            notes = slide.get("speaker_notes") or ""
+            if len(notes) < 30:
+                slide["speaker_notes"] = (notes or "本页要点") + "，请结合本页要点讲解，用提问确认学生理解后再进入下一环节。"
+                fixed = True
+        elif rule == "duration.positive":
+            slide["duration_seconds"] = max(20, int(slide.get("duration_seconds") or 0))
+            fixed = True
+        elif rule in {"layout.valid", "layout.page_type_match"}:
+            slide["layout"] = "bullet"
+            fixed = True
+        elif rule == "visual.suggestion_length":
+            if len(slide.get("visual_suggestion") or "") < 10:
+                slide["visual_suggestion"] = "用主题色区分层级，配箭头图表示关键关系"
+                fixed = True
+    if fixed:
+        content["slides"] = slides
+        try:
+            PPTContent.model_validate(content)
+        except Exception as exc:
+            return None, f"修复后仍无法通过结构校验：{str(exc)[:300]}"
+        remaining = check_ppt_against_knowledge(content)
+        if remaining:
+            return None, "；".join(v.message for v in remaining[:3])
+    return content, ""
+
+
+async def _generate_ppt_revision(provider, profile, knowledge_context, base_instruction, source, locks):
+    """PPT 修订（质量优先）：AI 生成完整修订稿 → 锁定还原 → 校验 → 自动修复 → 一次重试。
+
+    AI 全程参与生成修订后的完整 content_json（只改被要求的部分、遵循知识库密度规则），
+    后端校验并自动修复可确定性问题，避免整体改写导致的内容膨胀。
+    """
+    feedback = ""
+    for attempt in range(1, _PPT_REVISION_MAX_ROUNDS + 1):
+        system, prompt = build_runtime_prompts(
+            profile, AgentArtifactRevisionPayload.model_json_schema(), knowledge_context,
+            _ppt_revision_prompt(base_instruction, source.content_json, attempt, feedback),
+        )
+        result = await provider.structured(system, prompt, AgentArtifactRevisionPayload)
+        content = _restore_locked_paths(dict(result.content_json), source.content_json, locks)
+        repaired, error = _validate_and_repair_ppt(content)
+        if repaired is not None:
+            return AgentArtifactRevisionPayload(content_json=repaired, assistant_reply=result.assistant_reply)
+        feedback = error
+    return AgentArtifactRevisionPayload(
+        content_json=source.content_json,
+        assistant_reply="本次修订未能通过结构校验，已保留原稿。可尝试更具体的指令或切换模型。",
+    )
+
+
 async def _generate_initial(db, course: CourseProject, task: CourseTask, blueprint: CourseBlueprint):
     bp = CourseBlueprintSchema.model_validate(blueprint.content_json)
     kind = task.task_type
@@ -540,8 +714,11 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
     if isinstance(provider, MockProvider):
         value = mock
     else:
+        instruction = "生成本任务文件首稿。"
+        if kind == "ppt":
+            instruction += _ppt_template_instruction(getattr(mock, "theme", None))
         system, prompt = build_runtime_prompts(
-            profile, schema.model_json_schema(), knowledge_context, "生成本任务文件首稿。",
+            profile, schema.model_json_schema(), knowledge_context, instruction,
         )
         value = await provider.structured(system, prompt, schema)
     if kind == "ppt":
@@ -610,17 +787,30 @@ async def _generate_revision(db, course: CourseProject, task: CourseTask, run: G
             AgentMessage.module_type == task.task_type,
         ).order_by(AgentMessage.created_at.desc()).limit(12)))
         schema = TASK_SCHEMAS[task.task_type]
-        instruction = (
-            "当前结构化内容：\n" + json.dumps(source.content_json, ensure_ascii=False)
-            + "\n最近对话：\n" + json.dumps([{"role": x.role, "content": x.content} for x in reversed(history)], ensure_ascii=False)
-            + "\n锁定路径：\n" + json.dumps([x.json_path for x in locks], ensure_ascii=False)
-            + "\n教师指令：\n" + message.content
-            + "\ncontent_json 必须符合：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
-        )
-        system, prompt = build_runtime_prompts(
-            profile, AgentArtifactRevisionPayload.model_json_schema(), knowledge_context, instruction,
-        )
-        revision = await provider.structured(system, prompt, AgentArtifactRevisionPayload)
+        if task.task_type == "ppt":
+            # PPT 修订：AI 生成完整修订稿 → 校验 → 自动修复 → 重试（质量优先）。
+            # 当前内容由修订函数注入最新状态，这里只传稳定上下文。
+            base_instruction = (
+                "最近对话：\n" + json.dumps([{"role": x.role, "content": x.content} for x in reversed(history)], ensure_ascii=False)
+                + "\n锁定路径：\n" + json.dumps([x.json_path for x in locks], ensure_ascii=False)
+                + "\n教师指令：\n" + message.content
+                + "\ncontent_json 必须符合：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+            ) + _ppt_template_instruction((source.content_json or {}).get("theme"))
+            revision = await _generate_ppt_revision(
+                provider, profile, knowledge_context, base_instruction, source, locks,
+            )
+        else:
+            instruction = (
+                "当前结构化内容：\n" + json.dumps(source.content_json, ensure_ascii=False)
+                + "\n最近对话：\n" + json.dumps([{"role": x.role, "content": x.content} for x in reversed(history)], ensure_ascii=False)
+                + "\n锁定路径：\n" + json.dumps([x.json_path for x in locks], ensure_ascii=False)
+                + "\n教师指令：\n" + message.content
+                + "\ncontent_json 必须符合：\n" + json.dumps(schema.model_json_schema(), ensure_ascii=False)
+            )
+            system, prompt = build_runtime_prompts(
+                profile, AgentArtifactRevisionPayload.model_json_schema(), knowledge_context, instruction,
+            )
+            revision = await provider.structured(system, prompt, AgentArtifactRevisionPayload)
     return revision, message, resolved_model_name(provider, config), profile, provider, locks, source_versions
 
 
@@ -947,7 +1137,24 @@ async def execute_task_run(run_id: str):
             await _publish_activity(run_id, "analyzing", 26, "completed")
             current_phase = "generating"
             await _publish_activity(run_id, "generating", 30)
-            if run.trigger_type == "message":
+            if task.task_type == "ppt":
+                # PPT：多 Agent 流水线（多次 LLM 调用 + 工具调用 + QA 修订闭环）
+                from app.services.ppt_pipeline_service import run_ppt_pipeline
+                generated, generation_elapsed = await _run_with_generation_heartbeat(
+                    run_id,
+                    run_ppt_pipeline(db, course, task, run, blueprint),
+                )
+                result = generated
+                content = result.content
+                revision = result.revision
+                user_message = result.user_message
+                model_name = result.model_name
+                profile = result.profile
+                provider = result.provider
+                locks = result.locks
+                source_versions = result.source_versions
+                change_summary = result.change_summary
+            elif run.trigger_type == "message":
                 if not source:
                     raise RuntimeError("任务文件尚未生成")
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
@@ -1210,6 +1417,18 @@ async def execute_task_run(run_id: str):
                 )
                 await _emit(db, run, "task_status_changed", task, status="cancelled", progress=task.progress)
             await db.commit()
+    except PipelinePaused:
+        # 流水线在 Agent 边界暂停：持久化 paused，保留 active_run_id 供恢复
+        async with SessionLocal() as db:
+            run = await db.get(GenerationRun, run_id)
+            task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+            if not run or not task:
+                return
+            run.status = "paused"
+            task.status = "paused"
+            await _emit(db, run, "task_paused", task, status="paused", reason="用户暂停")
+            await _emit(db, run, "task_status_changed", task, status="paused", progress=task.progress)
+            await db.commit()
     except Exception as exc:
         logger.exception("Course task run failed", extra={"run_id": run_id})
         await _mark_streaming_reply_failed(run_id, "文件生成或保存失败，本次回复未完成。")
@@ -1265,7 +1484,7 @@ async def resume_incomplete_task_runs():
     async with SessionLocal() as db:
         runs = list(await db.scalars(select(GenerationRun).where(
             GenerationRun.run_type == "task",
-            GenerationRun.status.in_(["queued", "running"]),
+            GenerationRun.status.in_(["queued", "running", "paused"]),
         )))
         for run in runs:
             run.status = "queued"

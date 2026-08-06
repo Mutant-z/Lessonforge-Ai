@@ -1,17 +1,21 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { Check, Download, House, Link } from '@element-plus/icons-vue';
 import { useRouter } from 'vue-router';
 import { useProjectStore } from '../../stores/project';
 import ProjectTaskRail from './ProjectTaskRail.vue';
 
-defineProps<{ activeType?: string }>();
+const props = defineProps<{ activeType?: string; compact?: boolean }>();
 const router = useRouter();
 const store = useProjectStore();
+
+const isCompactMode = computed(() => props.compact || props.activeType === 'ppt');
 </script>
 
 <template>
-  <section v-if="store.project" class="project-shell">
-    <header class="workspace-top-bar">
+  <section v-if="store.project" class="project-shell" :class="{ compact: isCompactMode }">
+    <header class="workspace-top-bar" :class="{ 'compact-top-bar': isCompactMode }">
+      <!-- Tier 1: Course Info & Actions Bar -->
       <div class="workspace-meta-row">
         <div class="meta-left">
           <button type="button" class="back-pill-btn" @click="router.push('/')">
@@ -22,6 +26,7 @@ const store = useProjectStore();
             <span class="course-spec-badge">{{ store.project.course.subject }} · {{ store.project.course.grade_level }} · {{ store.project.course.duration_minutes }} 分钟</span>
           </div>
         </div>
+
         <div class="meta-right">
           <span v-if="store.connectionError" class="sync-status warning"><el-icon><Link /></el-icon>{{ store.connectionError }}</span>
           <span v-else class="sync-status success"><el-icon><Check /></el-icon>实时同步</span>
@@ -29,6 +34,7 @@ const store = useProjectStore();
         </div>
       </div>
 
+      <!-- Tier 2: Task Navigation Rail Bar -->
       <div class="workspace-rail-row">
         <ProjectTaskRail :course-id="store.project.course.id" :tasks="store.tasks" :active-type="activeType" />
       </div>
@@ -58,8 +64,14 @@ const store = useProjectStore();
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 6px 20px 6px;
+  padding: 8px 20px 6px;
   flex-shrink: 0;
+  transition: all 200ms ease;
+}
+
+.workspace-top-bar.compact-top-bar {
+  padding: 5px 16px 5px;
+  gap: 4px;
 }
 
 .workspace-meta-row {
@@ -67,6 +79,7 @@ const store = useProjectStore();
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  width: 100%;
 }
 
 .meta-left, .meta-right {
@@ -151,7 +164,12 @@ const store = useProjectStore();
 
 .workspace-rail-row {
   width: 100%;
-  overflow: hidden;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.workspace-rail-row::-webkit-scrollbar {
+  display: none;
 }
 
 .project-content {

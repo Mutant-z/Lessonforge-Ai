@@ -21,7 +21,41 @@ const TASK_EVENTS = [
   'agent_initialization_progress',
   'agent_initialization_completed',
   'agent_initialization_failed',
+  // 多 Agent 流水线（PPT）事件
+  'agent_started',
+  'agent_completed',
+  'tool_call_started',
+  'tool_call_completed',
+  'artifact_created',
+  'asset_generated',
+  'qa_completed',
+  'revision_started',
+  'revision_completed',
+  'task_paused',
+  'task_resumed',
+  'pipeline_completed',
+  'pipeline_failed',
+  'agent_thought_chunk',
 ];
+
+/** 流水线事件被路由到项目 store 的收件箱，工作台据此渲染时间线 */
+const PIPELINE_EVENT_TYPES = new Set([
+  'agent_started', 'agent_completed', 'tool_call_started', 'tool_call_completed',
+  'artifact_created', 'asset_generated', 'qa_completed', 'revision_started',
+  'revision_completed', 'task_paused', 'task_resumed', 'pipeline_completed', 'pipeline_failed',
+  'agent_thought_chunk',
+]);
+
+function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessage[] {
+  const seenIds = new Set<string>();
+  const result: ProjectAgentMessage[] = [];
+  for (const m of messages) {
+    if (!m.id || seenIds.has(m.id)) continue;
+    seenIds.add(m.id);
+    result.push(m);
+  }
+  return result;
+}
 
 export const useProjectStore = defineStore('project', {
   state: () => ({
@@ -37,6 +71,8 @@ export const useProjectStore = defineStore('project', {
     reconnectAttempt: 0,
     activeTaskPollTimer: null as number | null,
     activeTaskPollInFlight: false,
+    pipelineEvents: [] as Array<{ type: string; data: Record<string, any>; event_id: number }>,
+    pipelineStatus: '' as string,
   }),
   getters: {
     tasks: state => state.project?.tasks || [],
@@ -71,7 +107,11 @@ export const useProjectStore = defineStore('project', {
       }
     },
     async openTask(courseId: string, taskType: string) {
-      if (!this.project || this.project.course.id !== courseId) await this.open(courseId);
+      if (!this.project || this.project.course.id !== courseId) {
+        await this.open(courseId);
+      } else {
+        this.connect(courseId);
+      }
       const { data } = await api.get<CourseTask>(`/courses/${courseId}/tasks/${taskType}`);
       this.currentTask = data;
       this.replaceTask(data);
@@ -144,6 +184,12 @@ export const useProjectStore = defineStore('project', {
     applyEvent(type: string, event: ProjectTaskEvent) {
       if (event.event_id && event.event_id <= this.lastEventId) return;
       this.lastEventId = Math.max(this.lastEventId, event.event_id || 0);
+      if (PIPELINE_EVENT_TYPES.has(type)) {
+        this.pipelineEvents.push({ type, data: event as Record<string, any>, event_id: event.event_id || 0 });
+        if (event.status) this.pipelineStatus = event.status;
+        if (this.pipelineEvents.length > 800) this.pipelineEvents.splice(0, this.pipelineEvents.length - 800);
+        return;
+      }
       if (type === 'project_planning_updated' && this.project) {
         this.project.planning.status = event.status || 'ready';
         this.project.planning.progress = event.progress || 0;
@@ -201,9 +247,13 @@ export const useProjectStore = defineStore('project', {
         Object.assign(this.currentTask, task);
         const messages = this.currentTask.messages || [];
         if (type === 'agent_message_started' && event.message) {
-          const existing = messages.find(message => message.id === event.message?.id);
-          if (existing) Object.assign(existing, event.message, { content: '', status: 'streaming' });
-          else this.currentTask.messages = [...messages, { ...event.message, content: '', status: 'streaming' }];
+          const existingIndex = messages.findIndex(message => message.id === event.message?.id || message.id.startsWith('local-'));
+          if (existingIndex >= 0) {
+            messages[existingIndex] = { ...messages[existingIndex], ...event.message, content: '', status: 'streaming' };
+            this.currentTask.messages = [...messages];
+          } else {
+            this.currentTask.messages = [...messages, { ...event.message, content: '', status: 'streaming' }];
+          }
         } else if (type === 'agent_message_delta' && event.message_id) {
           let streaming = messages.find(message => message.id === event.message_id);
           if (!streaming) {
@@ -219,9 +269,13 @@ export const useProjectStore = defineStore('project', {
           streaming.content = event.reset ? (event.delta || '') : streaming.content + (event.delta || '');
           streaming.status = 'streaming';
         } else if (type === 'agent_message_completed' && event.message) {
-          const existing = messages.find(message => message.id === event.message?.id);
-          if (existing) Object.assign(existing, event.message, { status: 'completed' });
-          else this.currentTask.messages = [...messages, event.message];
+          const existingIndex = messages.findIndex(message => message.id === event.message?.id);
+          if (existingIndex >= 0) {
+            messages[existingIndex] = { ...messages[existingIndex], ...event.message, status: 'completed' };
+          } else {
+            messages.push(event.message);
+          }
+          this.currentTask.messages = deduplicateMessages(messages);
           const pending = (this.currentTask.messages || []).find(
             message => message.run_id === event.message?.run_id && message.role === 'user',
           );
@@ -232,8 +286,8 @@ export const useProjectStore = defineStore('project', {
         } else if (event.message) {
           const pending = messages.find(message => message.run_id === event.message?.run_id && message.role === 'user');
           if (pending) pending.status = 'completed';
-          if (!messages.some(message => message.id === event.message?.id || (message.role === event.message?.role && message.content === event.message?.content))) {
-            this.currentTask.messages = [...messages, event.message];
+          if (!messages.some(message => message.id === event.message?.id)) {
+            this.currentTask.messages = deduplicateMessages([...messages, event.message]);
           }
         }
       }

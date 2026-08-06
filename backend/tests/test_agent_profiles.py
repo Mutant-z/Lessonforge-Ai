@@ -98,8 +98,18 @@ def test_ppt_profile_has_seven_requirement_groups():
 
 
 @pytest.mark.asyncio
-async def test_initializer_does_not_hide_non_retryable_schema_failures():
-    class InvalidStructuredOutputProvider:
+async def test_initializer_recovers_from_model_content_errors_with_deterministic_bundle():
+    """模型输出截断/非法 JSON/结构不完整：初始化回退到蓝图驱动的确定性配置，而不是失败。"""
+
+    class TruncatedOutputProvider:
+        async def structured(self, system, prompt, schema):
+            raise LLMProviderError(
+                code="upstream_invalid_json",
+                user_message="模型返回的内容不是有效 JSON。",
+                retryable=False,
+            )
+
+    class SchemaMismatchProvider:
         async def structured(self, system, prompt, schema):
             raise LLMProviderError(
                 code="upstream_schema_mismatch",
@@ -112,9 +122,36 @@ async def test_initializer_does_not_hide_non_retryable_schema_failures():
         audience="八年级学生", duration_minutes=10, scenario="课堂讲解", language="中文",
         settings_json={},
     )
-    with pytest.raises(LLMProviderError, match="结构不完整"):
+    for provider in (TruncatedOutputProvider(), SchemaMismatchProvider()):
+        bundle, warning = await generate_initialization_bundle(
+            provider, make_blueprint(course), course, {"course": {"title": course.title}}, {},
+        )
+        assert warning and warning["code"] == "model_extraction_temporarily_unavailable"
+        assert len(bundle.profiles) == 6
+        assert len({item.mission for item in bundle.profiles}) == 6
+
+
+@pytest.mark.asyncio
+async def test_initializer_still_raises_on_hard_failures():
+    """认证/HTTP 等硬失败仍应报错，不掩盖模型配置问题。"""
+
+    class HardFailureProvider:
+        async def structured(self, system, prompt, schema):
+            raise LLMProviderError(
+                code="upstream_http_error",
+                user_message="模型服务返回 HTTP 401（API Key 无效）。",
+                retryable=False,
+                status_code=401,
+            )
+
+    course = CourseProject(
+        id="course-3", owner_id="u", title="浮力", subject="物理", grade_level="八年级",
+        audience="八年级学生", duration_minutes=10, scenario="课堂讲解", language="中文",
+        settings_json={},
+    )
+    with pytest.raises(LLMProviderError, match="HTTP 401"):
         await generate_initialization_bundle(
-            InvalidStructuredOutputProvider(), make_blueprint(course), course, {}, {},
+            HardFailureProvider(), make_blueprint(course), course, {"course": {"title": course.title}}, {},
         )
 
 

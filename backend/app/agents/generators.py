@@ -134,82 +134,162 @@ def _blocks_flat_text(blocks: list[dict]) -> list[str]:
     return text
 
 
+# deck 角色 → 现有 page_type 映射（不新增 schema 枚举）
+_ROLE_PAGE_TYPE = {
+    "cover": "cover", "intro": "scenario", "objectives": "objectives",
+    "knowledge_map": "concept", "knowledge_intro": "concept",
+    "core_1": "concept", "core_2": "concept", "core_3": "concept", "core_4": "concept",
+    "case_study": "case", "discussion": "question", "summary": "summary",
+    "assessment": "exercise", "assignment": "homework", "end": "summary",
+}
+_PAGE_PURPOSE = {
+    "cover": "建立课程主题并唤起学习期待",
+    "scenario": "用真实问题激活学生既有经验",
+    "objectives": "明确本课可观察的学习成果",
+    "concept": "建立核心概念与关键关系",
+    "case": "通过案例示范应用过程",
+    "question": "引导互动讨论与判断",
+    "exercise": "即时测验收集学习证据",
+    "summary": "总结本课要点并预告联系",
+    "homework": "布置课后应用任务",
+}
+_PAGE_LAYOUT = {
+    "cover": "cover", "scenario": "question", "objectives": "bullet",
+    "concept": "split", "case": "split", "question": "question",
+    "exercise": "exercise", "summary": "summary", "homework": "bullet",
+}
+_PAGE_VISUAL = {
+    "cover": "纯白背景左侧主色竖栏，课程主题大标题与副标题留白排版",
+    "scenario": "上方大面积留白作为问题区，下方虚线框提示学生写下初步判断",
+    "objectives": "编号列表纵向排列，编号使用主题色圆形徽章",
+    "concept": "左侧概念框图，右侧箭头图表示关键关系，底部保留留白",
+    "case": "横向步骤流程线，每步配编号与短句",
+    "question": "上方问题区，下方作答提示条",
+    "exercise": "左题目右作答分栏，底部自我检查提示条",
+    "summary": "三条结论短句，下方时间轴示意环节推进",
+    "homework": "任务清单卡片，逐条核对",
+}
+_ROLE_WEIGHT = {
+    "cover": 0.04, "intro": 0.10, "objectives": 0.08, "knowledge_map": 0.08,
+    "knowledge_intro": 0.10, "core_1": 0.07, "core_2": 0.07, "core_3": 0.07, "core_4": 0.07,
+    "case_study": 0.10, "discussion": 0.07, "summary": 0.06, "assessment": 0.06,
+    "assignment": 0.03, "end": 0.02,
+}
+
+
+def _blocks_for_body(page_type: str, body: list[str]) -> list[dict]:
+    """把扁平 body 构造成结构化内容块（对应知识库 block_guidance）。
+
+    保证 _blocks_flat_text(blocks) == body（非封面页的扁平投影一致性）。
+    """
+    if page_type == "cover":
+        return []
+    if page_type in {"scenario", "question"}:
+        if not body:
+            return []
+        blocks = [{"kind": "lead", "text": body[0], "sub": ""}]
+        if body[1:]:
+            blocks.append({"kind": "bullets", "items": [{"text": item} for item in body[1:]]})
+        return blocks
+    if page_type == "objectives":
+        return [{"kind": "bullets", "numbered": True, "items": [{"text": item} for item in body]}]
+    if page_type == "concept":
+        if not body:
+            return []
+        blocks = [{"kind": "lead", "text": body[0], "sub": ""}]
+        if body[1:]:
+            blocks.append({"kind": "bullets", "items": [{"text": item} for item in body[1:]]})
+        return blocks
+    return [{"kind": "bullets", "items": [{"text": item} for item in body]}]
+
+
+def _ppt_title(title: str) -> str:
+    """把知识库反模式黑名单中的主题式标题改为结论式措辞。"""
+    return {
+        "学习目标": "本课学习目标",
+        "核心概念": "本课核心概念",
+        "本课小结": "本课小结要点",
+        "应用步骤": "本课应用步骤",
+        "课堂练习": "课堂练习任务",
+        "课堂总结": "本课课堂总结",
+    }.get(title, title)
+
+
+def _clip_ppt_body(items: list[str], item_chars: int = 25, body_items: int = 6, body_chars: int = 120) -> list[str]:
+    """把扁平 body 裁剪到知识库密度上限，并保持与 blocks 的扁平投影一致。"""
+    clipped: list[str] = []
+    total = 0
+    for value in items:
+        text = _clip(str(value), item_chars)
+        if total + len(text) > body_chars:
+            break
+        clipped.append(text)
+        total += len(text)
+        if len(clipped) >= body_items:
+            break
+    return clipped or ["本页要点"]
+
+
 def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_deck_academic") -> PPTContent:
+    """为真实 PPT 模板 deck 生成 15 页角色化首稿（与模板槽位一一对应）。
+
+    每页按 deck 角色顺序（cover/intro/objectives/knowledge_map/knowledge_intro/
+    core_1..4/case_study/discussion/summary/assessment/assignment/end）生成，
+    复用现有 page_type 语义，内容与所选模板版式匹配，并符合知识库密度与标题规范。
+    """
     seconds = bp.course_identity.duration_minutes * 60
-    key_points = [_clip(item, 24) for item in bp.key_points[:3]]
-    if len(key_points) == 1:
-        key_points.append("把握适用条件与前提")
-    specs = [
-        ("S01", "cover", _clip(bp.course_identity.title, 30), "建立课程主题",
-         [_clip(bp.course_identity.subject, 24), _clip(bp.course_identity.grade_level, 24)], "cover",
-         "封面左侧放置课程主题大标题，右侧留白，用一条主题色细线建立视觉锚点。",
-         f"围绕“{_clip(bp.course_identity.title, 20)}”建立情境与期待，说明本节将回答的核心问题，用提问唤起学生的既有经验。",
-         20, []),
-        ("S02", "objectives", "本课学习目标：可观察、可检验", "明确可观察成果",
-         [_clip(f"{o.id}：{o.behavior}", 24) for o in bp.objectives[:6]], "bullet",
-         "用编号列表按目标顺序纵向排列，目标编号使用主题色圆形徽章。",
-         "逐一说明每条学习目标，指出目标与课堂环节的对应关系，检查学生是否明确本课要达成的结果。",
-         40,
-         [{"kind": "bullets", "numbered": True, "items": [
-             {"text": _clip(f"{o.id}：{o.behavior}", 24)} for o in bp.objectives[:6]
-         ]}]),
-        ("S03", "scenario", "从一个真实问题开始判断", "激活经验",
-         [_clip(bp.timeline[0].teacher_action, 24), "先作出判断，再说明依据"], "question",
-         "页面上方保留大面积留白作为问题区，下方用虚线框提示学生写下初步判断。",
-         "呈现真实问题情境，先请学生独立作出初步判断并说明依据，再进入正式讲解，保留学生的原有认识。",
-         max(40, int(seconds * .15)),
-         [{"kind": "lead", "text": _clip(bp.timeline[0].teacher_action, 24), "sub": ""},
-          {"kind": "quote", "text": "先作出判断，再说明依据", "citation": "课堂提示"}]),
-        ("S04", "concept", "理解概念才能正确应用", "建立准确理解",
-         key_points, "split",
-         "左侧放置概念框图，右侧用箭头图表示概念之间的关键关系，底部保留留白。",
-         "围绕关键关系讲解核心概念，用箭头图示连接概念与应用条件，设置一个检查问题确认学生理解。",
-         max(60, int(seconds * .30)),
-         [{"kind": "lead", "text": key_points[0], "sub": ""},
-          {"kind": "bullets", "items": [{"text": item} for item in key_points[1:]]}]),
-        ("S05", "process", "应用三步：识别、选择、检查", "形成可迁移方法",
-         ["识别任务与条件", "选择核心概念", "完成推理并检查结论"], "steps",
-         "用三步横向流程线展示应用步骤，每一步配编号与短句。",
-         "以一道完整例题示范三步应用过程，逐步标注识别、选择与检查动作，强调检查环节的作用。",
-         max(60, int(seconds * .25)),
-         [{"kind": "steps", "steps": [
-             {"title": "识别任务与条件", "detail": "找出已知条件与所求目标"},
-             {"title": "选择核心概念", "detail": "匹配适用的核心概念"},
-             {"title": "完成推理并检查", "detail": "验证结论与条件一致"},
-         ]}]),
-        ("S06", "exercise", "现在试一试：完成并检查", "收集学习证据",
-         ["完成一个基础任务", "写出关键判断依据", "对照标准自我检查"], "exercise",
-         "题目与作答区分栏，左侧题目区，右侧作答区，底部留出自我检查提示条。",
-         "布置一个基础任务，要求学生完成并写出关键依据，再对照标准自我检查，收集本课的学习证据。",
-         max(50, int(seconds * .15)),
-         [{"kind": "bullets", "items": [
-             {"text": "完成一个基础任务", "emphasize": True},
-             {"text": "写出关键判断依据", "emphasize": False},
-             {"text": "对照标准自我检查", "emphasize": False},
-         ]},
-          {"kind": "note", "text": "完成后对照评分标准核对"}]),
-        ("S07", "summary", "本课小结：概念到应用", "巩固核心结构",
-         ["核心概念", "应用条件", "解决问题的步骤"], "summary",
-         "用三条结论短句收束本课，下方用时间轴示意环节之间的推进关系。",
-         "带领学生回顾核心概念、应用条件与解决步骤，用提问确认三条结论，并预告下一课的联系。",
-         max(30, int(seconds * .10)),
-         [{"kind": "bullets", "items": [
-             {"text": "核心概念"},
-             {"text": "应用条件"},
-             {"text": "解决问题的步骤"},
-         ]}]),
-    ]
-    total = sum(item[8] for item in specs)
-    specs[-1] = (*specs[-1][:8], max(20, specs[-1][8] + seconds - total), specs[-1][9])
+    deck = make_deck(bp, theme)
+    # 时长按角色权重归一化分配，最后一页吸收舍入误差，保证总时长与课程时长一致
+    # （视频脚本校验要求分镜总时长 == 制作目标时长）
+    weights = [_ROLE_WEIGHT.get(role, 0.06) for role in role_order()]
+    total_weight = sum(weights) or 1.0
+    durations = [max(1, int(seconds * w / total_weight)) for w in weights]
+    durations[-1] += seconds - sum(durations)
     slides = []
-    for item_id, page_type, title, purpose, fallback_body, layout, visual, notes, duration, blocks in specs:
-        flat_body = _blocks_flat_text(blocks) if blocks else fallback_body
+    for index, role in enumerate(role_order()):
+        page = deck[index]
+        pt = _ROLE_PAGE_TYPE[role]
+        body = _clip_ppt_body(page["body"])
+        title = _ppt_title(page["title"])
         slides.append(Slide(
-            id=item_id, page_type=page_type, title=title, purpose=purpose, body=flat_body,
-            layout=layout, visual_suggestion=visual, speaker_notes=notes, duration_seconds=duration,
-            blocks=blocks,
+            id=f"S{index + 1:02d}",
+            page_type=pt,
+            title=title,
+            purpose=_PAGE_PURPOSE.get(pt, "讲解要点"),
+            body=body,
+            layout=_PAGE_LAYOUT.get(pt, "bullet"),
+            visual_suggestion=_PAGE_VISUAL.get(pt, "要点列表"),
+            speaker_notes=f"围绕「{title}」讲解核心要点，用提问确认学生理解，并给出下一环节的衔接说明。",
+            duration_seconds=durations[index],
+            blocks=_blocks_for_body(pt, body),
         ))
     return PPTContent(theme=theme, slides=slides)
+
+
+def deck_from_artifact(bp: CourseBlueprintSchema, ppt_content: dict, template_id: str) -> list[dict]:
+    """用 AI 生成的 slides 内容填入模板；不足角色用 make_deck 兜底。
+
+    slides[i] 覆盖模板第 i+1 页（与 role_order 对齐）：title 取 slide.title，
+    body 由 blocks（_blocks_flat_text）或 body 展平，并按该模板槽位数整形。
+    这样 AI 生成的初稿/修订内容真正进入导出的成品模板。
+    """
+    deck = make_deck(bp, template_id)
+    order = role_order()
+    counts = slot_counts(template_id)
+    slides = ppt_content.get("slides") or []
+    for index, slide in enumerate(slides[: len(deck)]):
+        if not isinstance(slide, dict):
+            continue
+        role = order[index]
+        body = [str(value) for value in (slide.get("body") or [])]
+        blocks = slide.get("blocks")
+        if blocks:
+            body = [str(value) for value in _blocks_flat_text(blocks)]
+        deck[index] = {
+            "title": str(slide.get("title") or deck[index]["title"]),
+            "body": _adapt_body(role, body, counts.get(role)),
+        }
+    return deck
 
 
 _ROLE_FILLERS: dict[str, list[str]] = {
@@ -493,6 +573,8 @@ def make_exercises(bp: CourseBlueprintSchema) -> ExerciseContent:
             rules_status="passed", text_review_status="pending", visual_review_status="not_required",
         ),
     )
+    res.paper_settings.estimated_minutes = target_minutes
+    return res
 
 
 def _subtitle_chunks(text: str, duration: float, width: int = 18) -> list[SubtitleChunk]:
@@ -589,6 +671,18 @@ def _scene_narration(bp: CourseBlueprintSchema, slide: Slide) -> str:
     return f"接下来围绕“{slide.title}”继续学习。请关注画面中的信息变化，并把它与前一个结论联系起来。"
 
 
+def _fit_mock_narration(text: str, max_chars: int) -> str:
+    """按分镜可用时长截断 mock 自动旁白，避免旁白估算超时触发视频脚本校验。"""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    for punct in "。！？":
+        idx = cut.rfind(punct)
+        if idx > max_chars * 0.6:
+            return cut[: idx + 1]
+    return cut.rstrip("，、；： ") + "。"
+
+
 def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent, ppt: PPTContent) -> VideoScriptContent:
     cursor = 0
     scenes = []
@@ -607,9 +701,12 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
         knowledge_ids = list(dict.fromkeys(
             knowledge_id for item in bp.objectives if item.id in objective_ids for knowledge_id in item.knowledge_point_ids
         )) or knowledge_ids_all
-        narration = _scene_narration(bp, slide)
         interactive = slide.page_type in {"scenario", "exercise", "question"}
         pause_duration = min(3.0, max(2.0, slide.duration_seconds * .08)) if interactive else 0
+        narration = _scene_narration(bp, slide)
+        # mock 自动旁白按分镜可用时长截断，避免旁白估算超时
+        available = max(1.0, slide.duration_seconds - pause_duration)
+        narration = _fit_mock_narration(narration, int(available * 4.0 * 0.9))
         pause_offset = max(0.0, slide.duration_seconds - pause_duration - 1) if interactive else 0
         animation_cues = [
             AnimationCue(offset_seconds=0, target="整页", action="显示", instruction=f"显示 {slide.id}《{slide.title}》"),

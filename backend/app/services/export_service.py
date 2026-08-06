@@ -5,12 +5,14 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.agents.generators import make_deck
+from app.agents.generators import deck_from_artifact
 from app.renderers.docx_renderer import render_exercise_docx, render_markdown_docx, render_task_sheet_docx, render_video_script_docx
 from app.renderers.deck_renderer import render_deck
 from app.renderers.pptx_renderer import render_pptx
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.ppt_template_service import ppt_template_catalog_version, resolve_ppt_template
+
+from app.core.config import get_settings  # noqa: E402
 
 CATALOG_DIR = Path(__file__).resolve().parents[3] / "templates" / "pptx"
 
@@ -73,14 +75,23 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         ppt_content = artifacts["ppt"]["content_json"]
         theme = ppt_content.get("theme")
         template = resolve_ppt_template(theme)
-        if template.get("composition") == "deck":
+        # 优先使用多 Agent 流水线生成的动态 PPTX（AI 动态布局真正进入成品）
+        pipeline_file = Path(get_settings().storage_root) / "generated" / course_id / "ppt" / f"{artifacts['ppt']['version']}.pptx"
+        if pipeline_file.is_file():
+            path = pipeline_file
+        elif template.get("composition") == "deck":
             deck_path = (CATALOG_DIR / str(template["file"])).resolve()
-            # make_deck 按模板槽位数整形内容，render_deck 按模板读槽位填字，
-            # 保证不同模板导出为各自独立的版式设计
-            deck = make_deck(CourseBlueprintSchema.model_validate(blueprint), template["id"])
+            # 用 AI 生成的 artifact slides 内容填模板（不足角色 make_deck 兜底），
+            # 使教师修订与 Agent 设计真正进入成品 PPT；render_deck 按模板读槽位填字
+            deck = deck_from_artifact(CourseBlueprintSchema.model_validate(blueprint), ppt_content, template["id"])
             path = render_deck(deck_path, deck, folder / "02_课件.pptx", template["id"])
         else:
             path = render_pptx(title, ppt_content, folder / "02_课件.pptx")
+        if not path.exists() or folder not in path.parents:
+            # 流水线文件位于 storage/generated，复制进导出目录
+            final = folder / "02_课件.pptx"
+            final.write_bytes(path.read_bytes())
+            path = final
         add(
             path,
             "ppt",

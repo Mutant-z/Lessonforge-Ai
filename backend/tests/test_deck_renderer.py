@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.agents.generators import make_blueprint, make_deck
+from app.agents.generators import make_blueprint, make_deck, make_ppt, deck_from_artifact
 from app.models.entities import CourseProject
 from app.renderers.deck_renderer import deck_template_path, render_deck, role_order, slot_counts
 
@@ -24,6 +24,24 @@ def test_make_deck_adapts_body_to_template_slot_counts():
         counts = slot_counts(template_id)
         for index, role in enumerate(order):
             assert len(deck[index]["body"]) == counts.get(role, 0), f"{template_id} {role}"
+
+
+def test_deck_from_artifact_uses_ai_slides_and_falls_back_to_make_deck():
+    bp = make_blueprint(_course())
+    template_id = "lessonforge_deck_academic"
+    ppt = make_ppt(bp, template_id).model_dump()
+    deck = deck_from_artifact(bp, ppt, template_id)
+    assert len(deck) == 15
+    # AI 生成的 slides 覆盖模板对应页
+    assert deck[2]["title"] == ppt["slides"][2]["title"]  # objectives 页
+    assert deck[0]["title"] == ppt["slides"][0]["title"]  # 封面
+    # 旧 7 页 artifact：前 7 页用 AI 内容，其余用 make_deck 兜底
+    legacy = {"theme": template_id, "slides": ppt["slides"][:7]}
+    deck_legacy = deck_from_artifact(bp, legacy, template_id)
+    assert len(deck_legacy) == 15
+    assert deck_legacy[0]["title"] == legacy["slides"][0]["title"]
+    fallback = make_deck(bp, template_id)
+    assert deck_legacy[7]["title"] == fallback[7]["title"]  # 第 8 页走兜底
 
 
 def test_render_deck_fills_slots_and_preserves_design():
@@ -59,5 +77,5 @@ def test_export_builds_deck_package_for_deck_theme(tmp_path):
     prs = Presentation(str(pptx))
     assert len(prs.slides) == 15
     slide3_texts = [sh.text_frame.text for sh in prs.slides[2].shapes if sh.has_text_frame]
-    assert any(text == "学习目标" for text in slide3_texts)
+    assert any(text == "本课学习目标" for text in slide3_texts)
     assert any("OBJ" in text for text in slide3_texts)

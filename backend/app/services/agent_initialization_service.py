@@ -162,6 +162,17 @@ def deterministic_bundle(
     return AgentInitializationBundle.model_validate({"profiles": profiles})
 
 
+# 模型内容型错误：输出被截断/非法 JSON/结构不完整——初始化应回退到蓝图驱动的确定性配置，
+# 而不是让整个任务失败（确定性配置同样是项目专属、强类型的）。
+RECOVERABLE_INIT_ERROR_CODES = {
+    "upstream_empty_response",
+    "upstream_invalid_response",
+    "upstream_empty_content",
+    "upstream_invalid_json",
+    "upstream_schema_mismatch",
+}
+
+
 async def generate_initialization_bundle(
     provider: LLMProvider,
     bp: CourseBlueprintSchema,
@@ -169,11 +180,11 @@ async def generate_initialization_bundle(
     source: dict,
     preferences: dict | None = None,
 ) -> tuple[AgentInitializationBundle, dict | None]:
-    """Generate a profile bundle, recovering only from transient provider failures.
+    """Generate a profile bundle, recovering from provider and content failures.
 
     The recovery bundle is still project-specific and strongly typed; it is built
     from the approved blueprint instead of falling back to a generic Agent prompt.
-    Validation and template errors continue to fail the whole initialization run.
+    Only genuinely hard failures (认证/HTTP 错误等) fail the whole initialization run。
     """
     if isinstance(provider, MockProvider):
         return deterministic_bundle(bp, course, preferences, source), None
@@ -190,7 +201,7 @@ async def generate_initialization_bundle(
     try:
         return await provider.structured(system, prompt, AgentInitializationBundle), None
     except LLMProviderError as exc:
-        if not exc.retryable:
+        if not (exc.retryable or exc.code in RECOVERABLE_INIT_ERROR_CODES):
             raise
         warning = {
             "code": "model_extraction_temporarily_unavailable",
@@ -288,6 +299,12 @@ async def create_initialization_run(db, course: CourseProject, trigger_type: str
             GenerationRun.status == "completed",
         ).order_by(GenerationRun.created_at.desc()))
         if completed:
+            # 修复：之前的失败运行可能把任务留在 agent_profile_status=failed；
+            # 既然专属配置已就绪且与当前蓝图/模板匹配，将任务状态复位为 ready。
+            for task in tasks:
+                task.agent_profile_status = "ready"
+                task.agent_profile_error_json = None
+            await db.commit()
             return completed, False
     run = GenerationRun(
         course_id=course.id, thread_id=str(uuid4()), run_type="agent_initialization",

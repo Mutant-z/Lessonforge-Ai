@@ -463,35 +463,35 @@ async function confirmAndGenerate() {
 
 /* Pane Resizer / Divider */
 .pane-resizer {
-  width: 10px;
-  margin: 0 2px;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: col-resize;
-  flex-shrink: 0;
+  position: relative;
+  z-index: 10;
+  transition: background 150ms ease;
   user-select: none;
-  transition: background 150ms;
+  flex-shrink: 0;
 }
 
 .pane-resizer:hover,
 .pane-resizer.dragging {
-  background: #eef2ff;
-  border-radius: 6px;
+  background: #e0e7ff;
 }
 
 .resizer-line {
-  width: 4px;
-  height: 36px;
-  border-radius: 4px;
+  width: 2px;
+  height: 24px;
   background: #cbd5e1;
-  transition: background 150ms, height 150ms;
+  border-radius: 999px;
+  transition: background 150ms ease;
 }
 
 .pane-resizer:hover .resizer-line,
 .pane-resizer.dragging .resizer-line {
-  background: var(--primary-600, #4f46e5);
-  height: 48px;
+  background: #4f46e5;
 }
 
 .conversation-scroll {

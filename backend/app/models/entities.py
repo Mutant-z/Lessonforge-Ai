@@ -244,6 +244,80 @@ class GenerationEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class PipelineRun(Base, TimestampMixin):
+    """多 Agent 流水线运行（PPT 生成）——与 GenerationRun 1:1 子表。
+
+    承载流水线专属状态（计划、checkpoint、token 用量、修订轮数），
+    使共享的 GenerationRun 语义保持不变（蓝图/初始化/全部 6 任务共用）。
+    """
+
+    __tablename__ = "pipeline_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    generation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    pipeline_type: Mapped[str] = mapped_column(String(30), default="ppt_agent_pipeline")
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    current_agent: Mapped[str] = mapped_column(String(60), default="")
+    current_step_index: Mapped[int] = mapped_column(Integer, default=0)
+    revision_round: Mapped[int] = mapped_column(Integer, default=0)
+    max_revision_rounds: Mapped[int] = mapped_column(Integer, default=3)
+    plan_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    checkpoint_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    token_usage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PipelineArtifact(Base, TimestampMixin):
+    """流水线内部 Artifact 图（版本化，依赖边 parent_id）。"""
+
+    __tablename__ = "pipeline_artifacts"
+    __table_args__ = (UniqueConstraint("pipeline_run_id", "artifact_type", "name", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    artifact_type: Mapped[str] = mapped_column(String(40), index=True)
+    name: Mapped[str] = mapped_column(String(120), default="default")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("pipeline_artifacts.id", ondelete="SET NULL"), nullable=True
+    )
+    data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    file_path: Mapped[str] = mapped_column(String(500), default="")
+    mime_type: Mapped[str] = mapped_column(String(100), default="application/json")
+    status: Mapped[str] = mapped_column(String(30), default="draft")
+    producer_agent: Mapped[str] = mapped_column(String(60), default="")
+    producer_tool: Mapped[str] = mapped_column(String(80), default="")
+    created_by_step_index: Mapped[int] = mapped_column(Integer, default=0)
+    dependencies_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PipelineToolCall(Base):
+    __tablename__ = "pipeline_tool_calls"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    agent_key: Mapped[str] = mapped_column(String(60))
+    tool_name: Mapped[str] = mapped_column(String(80), index=True)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="started")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PipelineEvent(Base):
+    __tablename__ = "pipeline_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(50))
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+    data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class QualityReport(Base, TimestampMixin):
     __tablename__ = "quality_reports"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

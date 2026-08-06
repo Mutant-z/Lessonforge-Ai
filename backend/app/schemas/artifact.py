@@ -116,6 +116,7 @@ class PPTContent(BaseModel):
     slides: list[Slide]
 
 
+
 class TaskSheetCourseInfo(BaseModel):
     course_title: str = Field(min_length=1)
     subject: str = ""

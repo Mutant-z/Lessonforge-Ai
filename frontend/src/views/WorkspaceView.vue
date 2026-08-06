@@ -621,7 +621,21 @@ onMounted(loadArtifacts);
 }
 
 .chat-bubble.user {
-  border-left: 3.5px solid var(--color-primary);
+  background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--primary-700, #4338ca) 100%);
+  color: #ffffff;
+  border: 0;
+  border-radius: 14px 14px 4px 14px;
+}
+
+.chat-bubble.user .bubble-role {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.chat-bubble.user :deep(.markdown-rendered-body),
+.chat-bubble.user :deep(.markdown-rendered-body p),
+.chat-bubble.user :deep(.markdown-rendered-body span),
+.chat-bubble.user :deep(.markdown-rendered-body strong) {
+  color: #ffffff !important;
 }
 
 .bubble-role {

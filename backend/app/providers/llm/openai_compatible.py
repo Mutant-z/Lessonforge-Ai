@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import Any
 
@@ -8,7 +9,44 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from app.core.config import get_settings
 from app.core.http_client import build_async_client
-from app.providers.llm.base import LLMProvider, LLMProviderError, T
+from app.providers.llm.base import DecisionStreamEvent, LLMProvider, LLMProviderError, T
+from app.providers.llm.streaming import ThinkingStreamParser
+
+logger = logging.getLogger(__name__)
+
+
+def _close_json(fragment: str) -> str:
+    """Close all unclosed JSON structures in *fragment*.
+
+    Walks the string tracking open brackets / braces and whether we are
+    inside a string literal; then appends the required closing tokens.
+    """
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for ch in fragment:
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            stack.append('}' if ch == '{' else ']')
+        elif ch in ('}', ']') and stack:
+            stack.pop()
+    # If we ended inside a string, close it
+    if in_string:
+        fragment += '"'
+    # Close remaining structures in reverse order
+    while stack:
+        fragment += stack.pop()
+    return fragment
 
 
 class ConnectionProbe(BaseModel):
@@ -156,6 +194,97 @@ class OpenAICompatibleProvider(LLMProvider):
 
         return clean
 
+    @staticmethod
+    def _finish_reason_is_length(data: dict[str, Any]) -> bool:
+        """Return True if the completion was cut short by max_tokens."""
+        try:
+            return data["choices"][0]["finish_reason"] == "length"
+        except (KeyError, IndexError, TypeError):
+            return False
+
+    @staticmethod
+    def _sanitize_control_chars(content: str) -> str:
+        """Escape raw control characters that appear inside JSON strings.
+
+        Gemini-family models sometimes emit literal newline / tab characters
+        inside JSON string values (e.g. question text, assistant_reply),
+        which ``json.loads`` rejects with "Invalid control character".
+        This walks the content tracking string/escape state and replaces any
+        raw control char inside a string with its JSON escape sequence.
+        """
+        escapes = {
+            "\n": "\\n",
+            "\r": "\\r",
+            "\t": "\\t",
+            "\b": "\\b",
+            "\f": "\\f",
+        }
+        result: list[str] = []
+        in_string = False
+        escape = False
+        for ch in content:
+            if escape:
+                result.append(ch)
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                result.append(ch)
+                escape = True
+                continue
+            if ch == '"':
+                if not escape:
+                    in_string = not in_string
+                result.append(ch)
+                continue
+            if in_string and ord(ch) < 0x20:
+                result.append(escapes.get(ch, f"\\u{ord(ch):04x}"))
+                continue
+            result.append(ch)
+        return "".join(result)
+
+    @staticmethod
+    def _try_repair_truncated_json(raw: str) -> dict | None:
+        """Attempt to repair JSON that was truncated due to max_tokens limit.
+
+        Strategy: find the outermost '{', then try to close any unclosed
+        strings, arrays, and objects so that ``json.loads`` can succeed.
+        Returns the parsed dict on success, or *None* if repair fails.
+        """
+        start = raw.find("{")
+        if start == -1:
+            return None
+        fragment = raw[start:]
+        # Try progressively aggressive repairs
+        for attempt in range(64):
+            try:
+                return json.loads(fragment)
+            except json.JSONDecodeError as exc:
+                pos = exc.pos or len(fragment)
+                # Detect what's missing and patch it
+                if exc.msg.startswith("Unterminated string"):
+                    fragment = fragment[:pos] + '"' + fragment[pos:]
+                elif exc.msg.startswith("Expecting ',' delimiter"):
+                    # Likely truncated inside a value; remove last partial token and close
+                    fragment = fragment[:pos].rstrip()
+                    # Close all open structures
+                    fragment = _close_json(fragment)
+                elif exc.msg.startswith("Expecting ':' delimiter"):
+                    fragment = fragment[:pos].rstrip()
+                    fragment = _close_json(fragment)
+                elif exc.msg.startswith("Expecting value"):
+                    # Insert null at the error position, then close any open structures
+                    fragment = fragment[:pos] + 'null' + fragment[pos:]
+                    fragment = _close_json(fragment)
+                elif exc.msg.startswith("Expecting property name"):
+                    # Truncated after a comma in object; remove trailing comma and close
+                    fragment = fragment[:pos].rstrip().rstrip(",")
+                    fragment = _close_json(fragment)
+                else:
+                    # Generic: strip from error position and close everything
+                    fragment = fragment[:pos].rstrip().rstrip(",")
+                    fragment = _close_json(fragment)
+        return None
+
     async def _structured_request(
         self,
         system: str,
@@ -181,15 +310,27 @@ class OpenAICompatibleProvider(LLMProvider):
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         data, response = await self._post_chat(payload)
-        content = self._strip_json_fence(self._content_from_response(data, response))
+        raw_content = self._content_from_response(data, response)
+        content = self._strip_json_fence(raw_content)
+        truncated = self._finish_reason_is_length(data)
+        if truncated:
+            logger.warning("Model response hit max_tokens limit (model=%s)", self.model_name)
+        # Escape any raw control characters inside JSON strings before parsing
+        content = self._sanitize_control_chars(content)
         try:
             decoded = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise self._response_error(
-                "upstream_invalid_json",
-                "模型返回的内容不是有效 JSON，请检查模型的结构化输出能力。",
-                response,
-            ) from exc
+        except json.JSONDecodeError:
+            # Attempt to repair truncated JSON (common with max_tokens cutoff)
+            repaired = self._try_repair_truncated_json(content)
+            if repaired is not None:
+                logger.warning("Repaired truncated JSON from model response (model=%s)", self.model_name)
+                decoded = repaired
+            else:
+                raise self._response_error(
+                    "upstream_invalid_json",
+                    "模型返回的内容不是有效 JSON，请检查模型的结构化输出能力。",
+                    response,
+                )
         try:
             return schema.model_validate(decoded)
         except ValidationError as exc:
@@ -216,6 +357,89 @@ class OpenAICompatibleProvider(LLMProvider):
                 "不要输出分析、Markdown 代码围栏或额外说明。"
             )
             return await self._structured_request(system, recovery_prompt, schema, json_mode=False)
+
+    async def stream_decision(self, system: str, prompt: str, schema: type[T]):
+        """流式返回结构化决策：实时 yield thinking 增量，最终 yield decision_ready。
+
+        stream=True 逐块接收 JSON；ThinkingStreamParser 增量提取顶层 thinking 字符串值，
+        每个新增片段立即 yield ("thought_delta", text)。流结束解析完整 JSON 并校验；
+        任何内容/连接异常回退到非流式 structured()（含 json-mode → 普通 → 恢复重试链）。
+        """
+        settings = get_settings()
+        if not self.api_key:
+            raise LLMProviderError("upstream_http_error", "当前模型未配置 API Key，请先完成模型设置。")
+        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        structured_prompt = (
+            f"{prompt}\n\n请仅返回符合以下 JSON Schema 的 JSON 对象：\n{schema_json}"
+        )
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": structured_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": settings.llm_max_tokens,
+            "stream": True,
+            "response_format": {"type": "json_object"},
+        }
+        parser = ThinkingStreamParser()
+        buffer: list[str] = []
+        try:
+            async with build_async_client(url, timeout=self.timeout_seconds) as client:
+                async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        delta = choices[0].get("delta") or {} if choices else {}
+                        content = delta.get("content")
+                        if content is None:
+                            continue
+                        if isinstance(content, list):
+                            content = "".join(
+                                str(block.get("text", ""))
+                                for block in content
+                                if isinstance(block, dict)
+                            )
+                        if not content:
+                            continue
+                        buffer.append(content)
+                        thought = parser.feed(content)
+                        if thought:
+                            yield ("thought_delta", thought)
+        except (httpx.HTTPError, LLMProviderError) as exc:
+            logger.warning("stream_decision 流式失败，回退 structured：%s", exc)
+            decision = await self.structured(system, prompt, schema)
+            yield ("decision_ready", decision)
+            return
+
+        full = "".join(buffer)
+        try:
+            clean = self._strip_json_fence(self._sanitize_control_chars(full))
+            try:
+                decoded = json.loads(clean)
+            except json.JSONDecodeError:
+                repaired = self._try_repair_truncated_json(clean)
+                if repaired is not None:
+                    logger.warning("stream_decision: repaired truncated JSON (model=%s)", self.model_name)
+                    decoded = repaired
+                else:
+                    raise
+            decision = schema.model_validate(decoded)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("stream_decision 内容异常，回退 structured：%s", str(exc)[:200])
+            decision = await self.structured(system, prompt, schema)
+        yield ("decision_ready", decision)
 
     async def stream_text(self, system: str, prompt: str):
         if not self.api_key:

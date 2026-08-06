@@ -7,6 +7,9 @@ from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 
+# 流式决策事件：("thought_delta", str) 实时思考文本块 ｜ ("decision_ready", T) 完整决策
+DecisionStreamEvent = tuple[str, object]
+
 
 @dataclass
 class LLMProviderError(RuntimeError):
@@ -29,6 +32,17 @@ class LLMProvider(ABC):
 
     @abstractmethod
     async def structured(self, system: str, prompt: str, schema: type[T]) -> T:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def stream_decision(self, system: str, prompt: str, schema: type[T]) -> AsyncIterator[DecisionStreamEvent]:
+        """流式返回结构化决策。
+
+        LLM 以 stream=True 生成 JSON 决策；本方法实时 yield：
+        - ("thought_delta", str)：从 JSON 流中增量提取的 thinking 文本（Markdown，供前端打字机）
+        - ("decision_ready", T)：流结束并解析/校验后的决策对象
+        内容异常时应回退到非流式 structured() 兜底。
+        """
         raise NotImplementedError
 
     @abstractmethod

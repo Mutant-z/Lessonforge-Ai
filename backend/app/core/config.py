@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4.1-mini"
     llm_provider: str = "mock"
-    llm_timeout_seconds: int = 90
-    llm_max_tokens: int = 6000
+    llm_timeout_seconds: int = 180
+    llm_max_tokens: int = 16000
     default_language: str = "zh-CN"
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 

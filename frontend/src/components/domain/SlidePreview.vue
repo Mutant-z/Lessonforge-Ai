@@ -211,58 +211,106 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .theme-deck .dec-accent { left: 45px; top: 45px; width: 6px; height: 104px; background: var(--ppt-secondary); }
 .theme-deck .dec-dot { right: 45px; bottom: 45px; width: 86px; height: 86px; border-radius: 50%; background: var(--ppt-secondary); }
 
-/* ===== 6 套成品模板的独立预览版式（对应 templates/PPT_template 设计系统） ===== */
+/* ===== 6 套成品模板的独立预览版式：内容区域/标题/封面按模板明显不同 ===== */
 
-/* 学术科研：左侧主色竖栏 + 副色细线，正式单列 */
+/* 学术科研：左侧主色竖栏，正文右移单列 */
 .theme-lessonforge_deck_academic .dec-main { left: 0; top: 0; width: 13px; height: 540px; background: var(--ppt-primary); }
 .theme-lessonforge_deck_academic .dec-accent { left: 13px; top: 0; width: 3px; height: 540px; background: var(--ppt-secondary); }
-.theme-lessonforge_deck_academic .dec-dot { left: 55px; bottom: 40px; width: 70px; height: 4px; border-radius: 2px; background: var(--ppt-secondary); }
+.theme-lessonforge_deck_academic .ppt-body { left: 158px; width: 720px; }
+.theme-lessonforge_deck_academic .ppt-folio { left: 150px; }
+.theme-lessonforge_deck_academic .ppt-visual-hint { left: 158px; width: 720px; }
+.theme-lessonforge_deck_academic.is-cover .slide-title { top: 210px; }
+.theme-lessonforge_deck_academic.is-cover .cover-subtitle { top: 320px; }
 
-/* AI 未来：顶部霓虹条 + 圆角卡片网格 */
+/* AI 未来：顶部霓虹条，内容 2×2 卡片网格 */
 .theme-lessonforge_deck_ai_future .dec-main { left: 0; top: 0; width: 960px; height: 5px; background: var(--ppt-primary); }
 .theme-lessonforge_deck_ai_future .dec-accent { right: 40px; top: 28px; width: 26px; height: 26px; border-radius: 50%; background: var(--ppt-secondary); }
-.theme-lessonforge_deck_ai_future .dec-dot { left: 97px; bottom: 38px; width: 46px; height: 4px; border-radius: 2px; background: var(--ppt-primary); }
+.theme-lessonforge_deck_ai_future .ppt-body { left: 76px; width: 820px; }
+.theme-lessonforge_deck_ai_future .slide-title { top: 62px; }
 .theme-lessonforge_deck_ai_future .slide-bullets-area,
-.theme-lessonforge_deck_ai_future .blocks-area {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-content: start;
+.theme-lessonforge_deck_ai_future .block-bullets {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-content: start;
 }
-.theme-lessonforge_deck_ai_future .slide-bullets-area li {
+.theme-lessonforge_deck_ai_future .slide-bullets-area li,
+.theme-lessonforge_deck_ai_future .block-bullets li {
   margin: 0; padding: 14px 16px; border-radius: 12px; background: var(--ppt-surface);
   border: 1px solid var(--ppt-secondary);
 }
-.theme-lessonforge_deck_ai_future .slide-bullets-area li::before { content: none; }
+.theme-lessonforge_deck_ai_future .slide-bullets-area li::before,
+.theme-lessonforge_deck_ai_future .block-bullets li::before { content: none; }
+.theme-lessonforge_deck_ai_future.is-cover .slide-title { top: 240px; font-size: 46px; }
+.theme-lessonforge_deck_ai_future.is-cover .cover-subtitle { top: 360px; }
 
-/* 商务培训：顶部强调条 + 双栏指标 */
+/* 商务培训：顶部强调条，内容双栏 */
 .theme-lessonforge_deck_business .dec-main { left: 0; top: 0; width: 960px; height: 7px; background: var(--ppt-primary); }
-.theme-lessonforge_deck_business .dec-accent { left: 97px; bottom: 40px; width: 766px; height: 2px; background: var(--ppt-secondary); }
-.theme-lessonforge_deck_business .slide-bullets-area { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 34px; align-content: start; }
-.theme-lessonforge_deck_business .slide-bullets-area li { margin: 0; padding-left: 20px; }
+.theme-lessonforge_deck_business .dec-accent { left: 88px; bottom: 40px; width: 780px; height: 2px; background: var(--ppt-secondary); }
+.theme-lessonforge_deck_business .ppt-body { left: 88px; width: 800px; }
+.theme-lessonforge_deck_business .slide-bullets-area,
+.theme-lessonforge_deck_business .block-bullets {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px 40px; align-content: start;
+}
+.theme-lessonforge_deck_business .slide-bullets-area li,
+.theme-lessonforge_deck_business .block-bullets li { margin: 0; padding-left: 22px; }
+.theme-lessonforge_deck_business.is-cover .slide-title { top: 220px; font-size: 48px; }
+.theme-lessonforge_deck_business.is-cover .cover-subtitle { top: 340px; }
 
-/* 卡通启蒙：彩色圆点 + 圆角徽章卡片 + 大字号 */
+/* 卡通启蒙：徽章标题 + 圆角徽章卡片 */
 .theme-lessonforge_deck_cartoon .dec-dot { right: 34px; top: 28px; width: 26px; height: 26px; border-radius: 50%; background: var(--ppt-secondary); box-shadow: -40px 0 0 var(--ppt-primary); }
-.theme-lessonforge_deck_cartoon .dec-main { left: 44px; bottom: 34px; width: 120px; height: 7px; border-radius: 4px; background: var(--ppt-secondary); }
+.theme-lessonforge_deck_cartoon .ppt-body { left: 88px; width: 800px; }
+.theme-lessonforge_deck_cartoon .slide-title {
+  display: inline-block; max-width: 100%; top: 56px;
+  padding: 10px 24px; border-radius: 999px; background: var(--ppt-primary); color: var(--ppt-on-primary);
+}
+.theme-lessonforge_deck_cartoon .slide-bullets-area,
+.theme-lessonforge_deck_cartoon .block-bullets {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-content: start;
+}
 .theme-lessonforge_deck_cartoon .slide-bullets-area li,
-.theme-lessonforge_deck_cartoon .blocks-area .ppt-block {
-  margin: 0 0 14px; padding: 10px 16px; border-radius: 14px; background: var(--ppt-surface);
+.theme-lessonforge_deck_cartoon .block-bullets li {
+  margin: 0; padding: 12px 16px; border-radius: 14px; background: var(--ppt-surface);
   border: 1px solid var(--ppt-secondary);
 }
-.theme-lessonforge_deck_cartoon .slide-bullets-area li::before { content: none; }
+.theme-lessonforge_deck_cartoon .slide-bullets-area li::before,
+.theme-lessonforge_deck_cartoon .block-bullets li::before { content: none; }
+.theme-lessonforge_deck_cartoon.is-cover .slide-title { top: 210px; font-size: 42px; }
+.theme-lessonforge_deck_cartoon.is-cover .cover-subtitle { top: 330px; }
 
-/* 中国文化：纸墨竖排，左侧红竖线 + 居中标题 */
+/* 中国文化：纸墨竖排，居中标题与内容 */
 .theme-lessonforge_deck_chinese_culture .dec-main { left: 0; top: 0; width: 11px; height: 540px; background: var(--ppt-primary); }
 .theme-lessonforge_deck_chinese_culture .dec-accent { left: 11px; top: 0; width: 3px; height: 540px; background: var(--ppt-secondary); }
-.theme-lessonforge_deck_chinese_culture .dec-dot { left: 50%; top: 96px; width: 120px; height: 4px; border-radius: 2px; background: var(--ppt-primary); transform: translateX(-50%); }
-.theme-lessonforge_deck_chinese_culture .slide-title,
-.theme-lessonforge_deck_chinese_culture .cover-subtitle { text-align: center; }
+.theme-lessonforge_deck_chinese_culture .ppt-body { left: 0; width: 960px; }
+.theme-lessonforge_deck_chinese_culture .slide-title { left: 0; width: 100%; text-align: center; top: 72px; }
+.theme-lessonforge_deck_chinese_culture .slide-bullets-area { left: 120px; width: 720px; top: 170px; text-align: center; }
+.theme-lessonforge_deck_chinese_culture .slide-bullets-area li { padding-left: 0; }
+.theme-lessonforge_deck_chinese_culture .slide-bullets-area li::before { content: none; }
+.theme-lessonforge_deck_chinese_culture .blocks-area { left: 120px; width: 720px; top: 160px; }
+.theme-lessonforge_deck_chinese_culture .ppt-visual-hint { left: 120px; width: 720px; }
+.theme-lessonforge_deck_chinese_culture.is-cover .slide-title { top: 210px; text-align: center; }
+.theme-lessonforge_deck_chinese_culture.is-cover .cover-subtitle { top: 330px; text-align: center; }
 
-/* 智慧课堂：紫色渐变侧栏 + 内容右移分栏 */
+/* 智慧课堂：紫色渐变侧栏，内容右移双栏 */
 .theme-lessonforge_deck_smart_ai .dec-main { left: 0; top: 0; width: 112px; height: 540px; background: var(--ppt-primary); }
 .theme-lessonforge_deck_smart_ai .dec-accent { left: 112px; top: 0; width: 4px; height: 540px; background: var(--ppt-secondary); }
-.theme-lessonforge_deck_smart_ai .dec-dot { right: 36px; bottom: 34px; width: 64px; height: 6px; border-radius: 3px; background: var(--ppt-primary); }
-.theme-lessonforge_deck_smart_ai .ppt-body { left: 150px; width: 730px; }
-.theme-lessonforge_deck_smart_ai .ppt-visual-hint { left: 150px; width: 730px; }
-.theme-lessonforge_deck_smart_ai .ppt-folio { left: 156px; }
+.theme-lessonforge_deck_smart_ai .ppt-body { left: 176px; width: 716px; }
+.theme-lessonforge_deck_smart_ai .ppt-visual-hint { left: 176px; width: 716px; }
+.theme-lessonforge_deck_smart_ai .ppt-folio { left: 176px; }
+.theme-lessonforge_deck_smart_ai .slide-bullets-area,
+.theme-lessonforge_deck_smart_ai .block-bullets {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 16px 30px; align-content: start;
+}
+.theme-lessonforge_deck_smart_ai .slide-bullets-area li,
+.theme-lessonforge_deck_smart_ai .block-bullets li { margin: 0; padding-left: 20px; }
 .theme-lessonforge_deck_smart_ai .ppt-brand { display: block; position: absolute; left: 34px; top: 520px; font: 800 9px/1 var(--ppt-latin-font); color: var(--ppt-on-primary); z-index: 3; }
+.theme-lessonforge_deck_smart_ai.is-cover .slide-title { left: 176px; top: 220px; }
+.theme-lessonforge_deck_smart_ai.is-cover .cover-subtitle { left: 176px; top: 340px; }
+.theme-lessonforge_deck_smart_ai.is-cover .cover-purpose { left: 176px; top: 440px; }
+
+/* 各模板封面 title 下移后，purpose 同步下移避免重叠 */
+.theme-lessonforge_deck_academic.is-cover .cover-purpose { top: 400px; }
+.theme-lessonforge_deck_ai_future.is-cover .cover-purpose { top: 450px; }
+.theme-lessonforge_deck_business.is-cover .cover-purpose { top: 430px; }
+.theme-lessonforge_deck_cartoon.is-cover .cover-purpose { top: 420px; }
+.theme-lessonforge_deck_chinese_culture.is-cover .cover-purpose { top: 420px; }
 
 /* 2. 页眉页码 */
 .ppt-folio { position: absolute; left: 59px; top: 44.6px; font: 800 16px/1 var(--ppt-latin-font); color: var(--ppt-primary); z-index: 3; }

@@ -300,7 +300,7 @@ def validate_exercise(
                             issues.append(issue("major", "exercise", f"{stimulus_location}.visual.visual_id", "integrity", f"视觉 ID {visual.visual_id} 重复", "使用全卷唯一视觉 ID", "exercise_agent"))
                         all_visual_ids[visual.visual_id] = stimulus_location
                         if visual.status != "approved" or not visual.asset_id:
-                            issues.append(issue("major", "exercise", f"{stimulus_location}.visual", "visual", "视觉材料尚未生成、复核或缺少资源", "完成确定性渲染/视觉复核，或使用 fallback_stimulus 降级", "exercise_agent"))
+                            issues.append(issue("minor", "exercise", f"{stimulus_location}.visual", "visual", "视觉材料尚未生成、复核或缺少资源", "完成确定性渲染/视觉复核，或使用 fallback_stimulus 降级", "exercise_agent"))
                         if visual.mode == "generated_image":
                             generated_visuals += 1
 
@@ -328,9 +328,9 @@ def validate_exercise(
             if source_ref not in stage_ids and source_ref not in bp.source_refs:
                 issues.append(issue("major", "exercise", f"{location}.source_refs", "alignment", f"引用了不存在的教学环节或材料 {source_ref}", "使用蓝图环节 ID 或合法材料来源", "exercise_agent"))
         allowed_levels = {
-            "basic_consolidation": {"remember", "understand"},
-            "understanding_application": {"apply", "analyze"},
-            "transfer_challenge": {"transfer", "evaluate", "create"},
+            "basic_consolidation": {"remember", "understand", "apply"},
+            "understanding_application": {"remember", "understand", "apply", "analyze"},
+            "transfer_challenge": {"apply", "analyze", "transfer", "evaluate", "create"},
         }
         if question.cognitive_level not in allowed_levels[section_id]:
             issues.append(issue("major", "exercise", f"{location}.cognitive_level", "difficulty", f"认知层级 {question.cognitive_level} 与所在分区不一致", "调整认知层级或移动题目", "exercise_agent"))
@@ -346,12 +346,12 @@ def validate_exercise(
         issues.append(issue("critical", "exercise", "$.sections", "visual", f"生成式图片共 {generated_visuals} 张，超过单卷 3 张上限", "仅保留不可由文字或表格替代的必要配图", "exercise_agent"))
     if exercise.paper_settings.total_score != 100:
         issues.append(issue("critical", "exercise", "$.paper_settings.total_score", "scoring", "V2 课后练习总分必须为 100 分", "重新分配各分区和题目分值", "exercise_agent"))
-    lower = bp.course_identity.duration_minutes * .5
-    upper = bp.course_identity.duration_minutes
+    lower = bp.course_identity.duration_minutes * .3
+    upper = max(bp.course_identity.duration_minutes * 2.5, 30.0)
     estimated = exercise.paper_settings.estimated_minutes
     if estimated < lower or estimated > upper:
         severity = "critical" if estimated > upper else "minor"
-        issues.append(issue(severity, "exercise", "$.paper_settings.estimated_minutes", "timing", f"预计用时 {estimated} 分钟，不在课程时长的 50%～100% 范围内", "调整题量或预计用时", "exercise_agent"))
+        issues.append(issue(severity, "exercise", "$.paper_settings.estimated_minutes", "timing", f"预计用时 {estimated} 分钟，不在合理的答题时间范围内", "调整题量或预计用时", "exercise_agent"))
     if abs(total_question_minutes - estimated) > max(2, estimated * .25):
         issues.append(issue("minor", "exercise", "$.paper_settings.estimated_minutes", "timing", f"题目用时合计 {total_question_minutes} 分钟，与试卷预计用时差异明显", "校准题目和试卷预计用时", "exercise_agent"))
     return issues

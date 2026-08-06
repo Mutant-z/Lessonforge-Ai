@@ -1,11 +1,15 @@
 from collections.abc import AsyncIterator
 import json
+import logging
 import re
 from typing import TypeVar
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.http_client import build_async_client
 from app.providers.llm.base import LLMProvider
+from app.providers.llm.streaming import ThinkingStreamParser
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -64,6 +68,68 @@ class AnthropicProvider(LLMProvider):
                     clean = clean[start : end + 1].strip()
             
             return schema.model_validate_json(clean)
+
+    async def stream_decision(self, system: str, prompt: str, schema: type[T]):
+        """流式返回结构化决策：yield thinking 增量 + decision_ready，异常回退 structured。"""
+        prompt_with_schema = (
+            f"{prompt}\n\n请严格返回且仅返回符合以下 JSON Schema 的 JSON 对象：\n"
+            f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
+        )
+        url = f"{self.base_url}/v1/messages"
+        payload = {
+            "model": self.model_name,
+            "max_tokens": 4096,
+            "system": system,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt_with_schema}],
+        }
+        parser = ThinkingStreamParser()
+        buffer: list[str] = []
+        try:
+            async with build_async_client(url, timeout=self.timeout) as client:
+                async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        if data.get("type") == "content_block_delta":
+                            delta = data.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                chunk = delta.get("text", "")
+                                if chunk:
+                                    buffer.append(chunk)
+                                    thought = parser.feed(chunk)
+                                    if thought:
+                                        yield ("thought_delta", thought)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("anthropic stream_decision 流式失败，回退 structured：%s", exc)
+            decision = await self.structured(system, prompt, schema)
+            yield ("decision_ready", decision)
+            return
+
+        full = "".join(buffer)
+        try:
+            clean = full.strip()
+            fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", clean, re.IGNORECASE)
+            if fence_match:
+                clean = fence_match.group(1).strip()
+            else:
+                start = clean.find("{")
+                end = clean.rfind("}")
+                if start != -1 and end != -1 and start < end:
+                    clean = clean[start : end + 1].strip()
+            decision = schema.model_validate_json(clean)
+        except (ValidationError, json.JSONDecodeError) as exc:
+            logger.warning("anthropic stream_decision 内容异常，回退 structured：%s", str(exc)[:200])
+            decision = await self.structured(system, prompt, schema)
+        yield ("decision_ready", decision)
 
     async def stream_text(self, system: str, prompt: str) -> AsyncIterator[str]:
         url = f"{self.base_url}/v1/messages"

@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import artifact_assets, artifacts, auth, blueprints, courses, exports, intakes, materials, ppt_templates, projects, quality, settings
+from app.api.v1 import artifact_assets, artifacts, auth, blueprints, courses, exports, intakes, materials, ppt_pipeline, ppt_templates, projects, quality, settings
 from app.core.config import get_settings
 from app.core.database import SessionLocal, create_schema
 from app.services.project_planning_service import planning_jobs
@@ -54,5 +54,5 @@ async def health():
     return {"status": "ok", "service": "lessonforge-api"}
 
 
-for module in (auth, courses, materials, intakes, blueprints, artifacts, artifact_assets, ppt_templates, projects, quality, exports, settings):
+for module in (auth, courses, materials, intakes, blueprints, artifacts, artifact_assets, ppt_templates, ppt_pipeline, projects, quality, exports, settings):
     app.include_router(module.router, prefix="/api/v1")

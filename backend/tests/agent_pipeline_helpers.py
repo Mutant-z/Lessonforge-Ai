@@ -29,9 +29,9 @@ async def wait_for(client, headers, url, predicate, attempts=300):
 
 
 async def wait_tasks_terminal(client, headers, course_id, attempts=600):
-    """等待全部任务达到终态（review/stale/failed/cancelled），避免后台任务泄漏到测试后。"""
+    """等待内容任务终态、手动视频任务可生成，避免后台任务泄漏到测试后。"""
     project = await wait_for(client, headers, f"/api/v1/courses/{course_id}/project",
-                             lambda item: all(task["status"] in {"review", "stale", "failed", "cancelled", "approved"}
+                             lambda item: all(task["status"] in {"review", "stale", "failed", "cancelled", "approved", "ready_to_generate"}
                                               for task in item["tasks"]),
                              attempts=attempts)
     return project

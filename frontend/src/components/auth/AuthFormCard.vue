@@ -10,7 +10,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'submit', data: { username: string; password: string; email: string }): void;
+  (e: 'submit', data: { username: string; password: string; email: string; rememberMe: boolean }): void;
   (e: 'toggleMode'): void;
 }>();
 
@@ -24,7 +24,8 @@ function handleSubmit() {
   emit('submit', {
     username: username.value,
     password: password.value,
-    email: email.value
+    email: email.value,
+    rememberMe: rememberMe.value
   });
 }
 </script>

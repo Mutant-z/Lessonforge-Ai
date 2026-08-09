@@ -4,6 +4,19 @@ import asyncio
 import pytest
 
 from agent_pipeline_helpers import ready_course, wait_for, wait_tasks_terminal
+from app.services.ppt_pipeline_service import _resolve_message_slide_ids
+
+
+@pytest.mark.parametrize(("instruction", "expected"), [
+    ("为第一页生成一张图片并插入", ["slide_01"]),
+    ("修改第一页面", ["slide_01"]),
+    ("润色第十二页", ["slide_12"]),
+    ("调整首张幻灯片", ["slide_01"]),
+    ("[目标页面:slide_03,slide_05] 修改", ["slide_03", "slide_05"]),
+])
+def test_resolve_message_slide_ids_supports_chinese_page_numbers(instruction, expected):
+    slides = [{"id": f"slide_{index:02d}"} for index in range(1, 16)]
+    assert _resolve_message_slide_ids(instruction, slides) == expected
 
 
 @pytest.mark.asyncio

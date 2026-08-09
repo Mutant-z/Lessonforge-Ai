@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue';
-import { Cpu, Picture } from '@element-plus/icons-vue';
+import { Cpu, Microphone, Picture, VideoCamera } from '@element-plus/icons-vue';
 import { useModelConfigStore } from '../../stores/modelConfigs';
 
 const props = withDefaults(defineProps<{
@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<{
   disabled?: boolean;
   compact?: boolean;
   label?: string;
-  capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | null;
+  capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'speech_generation' | 'media_composition' | null;
 }>(), {
   modelValue: null,
   disabled: false,
@@ -26,8 +26,8 @@ const store = useModelConfigStore();
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
 const availableConfigs = computed(() => {
   if (!props.capability) return store.configs;
-  const filtered = store.configs.filter(item => item.capabilities?.includes(props.capability!));
-  return filtered.length > 0 ? filtered : store.configs;
+  // 能力型选择器不能回退展示不具备该能力的模型，否则会造成“选了图片模型但实际只能生成文本”的假象。
+  return store.configs.filter(item => item.capabilities?.includes(props.capability!));
 });
 
 function formatTokens(value: number) {
@@ -51,7 +51,10 @@ function selectModel(value: string) {
 watch(
   () => [store.loaded, store.configs.length, props.modelValue] as const,
   () => {
-    if (!props.modelValue && store.activeConfig) emit('update:modelValue', store.activeConfig.id);
+    if (!props.modelValue && availableConfigs.value.length) {
+      const eligibleActive = availableConfigs.value.find(item => item.id === store.activeConfig?.id);
+      emit('update:modelValue', (eligibleActive || availableConfigs.value[0]).id);
+    }
   },
   { immediate: true },
 );
@@ -63,7 +66,7 @@ onMounted(() => {
 
 <template>
   <div class="model-selector" :class="{ compact }">
-    <span v-if="label" class="selector-label">{{ label }}</span>
+    <span v-if="label && !compact" class="selector-label">{{ label }}</span>
     <div v-if="availableConfigs.length" class="selector-control">
       <el-select
         :model-value="modelValue || undefined"
@@ -73,11 +76,20 @@ onMounted(() => {
         placement="top-start"
         popper-class="model-select-popper"
         class="model-select"
+        :class="{ 'has-label-tag': Boolean(label) }"
         placeholder="选择模型"
         @update:model-value="selectModel"
       >
         <template #prefix>
-          <el-icon class="select-prefix-icon"><Cpu /></el-icon>
+          <div class="prefix-wrap">
+            <el-icon class="select-prefix-icon">
+              <Picture v-if="capability === 'image_generation'" />
+              <VideoCamera v-else-if="capability === 'video_generation'" />
+              <Microphone v-else-if="capability === 'speech_generation'" />
+              <Cpu v-else />
+            </el-icon>
+            <span v-if="label" class="select-prefix-tag" :class="capability === 'image_generation' ? 'tag-purple' : 'tag-indigo'">{{ label }}</span>
+          </div>
         </template>
         <el-option
           v-for="config in availableConfigs"
@@ -145,7 +157,12 @@ onMounted(() => {
 }
 
 .compact .model-select {
-  width: 165px;
+  width: 170px;
+  max-width: 100%;
+}
+
+.compact .model-select.has-label-tag {
+  width: 195px;
   max-width: 100%;
 }
 
@@ -155,7 +172,7 @@ onMounted(() => {
   border-radius: 999px !important;
   background: linear-gradient(135deg, #ffffff 0%, #f8fafc 60%, #eef2ff 100%) !important;
   box-shadow: 0 0 0 1px #c7d2fe inset, 0 1px 4px rgba(99, 102, 241, 0.08) !important;
-  padding: 3px 12px !important;
+  padding: 3px 10px !important;
   transition: all 200ms ease !important;
 }
 
@@ -167,11 +184,39 @@ onMounted(() => {
   background: #ffffff !important;
 }
 
+:deep(.prefix-wrap) {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+:deep(.select-prefix-tag) {
+  font-size: 10.5px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+:deep(.select-prefix-tag.tag-indigo) {
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+}
+
+:deep(.select-prefix-tag.tag-purple) {
+  color: #7e22ce;
+  background: #f3e8ff;
+  border: 1px solid #e9d5ff;
+}
+
 :deep(.select-prefix-icon),
 :deep(.model-select .el-select__prefix) {
   color: var(--primary-600, #4f46e5) !important;
   font-size: 14px !important;
-  margin-right: 2px !important;
+  margin-right: 1px !important;
 }
 
 :deep(.model-select .el-input__inner),

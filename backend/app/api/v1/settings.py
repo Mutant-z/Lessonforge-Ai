@@ -1,4 +1,5 @@
 import re
+from io import BytesIO
 from typing import Any, Literal
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -17,14 +18,23 @@ from app.providers.llm.openai_compatible import OpenAICompatibleProvider
 from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, get_ppt_template, resolve_ppt_template
 
 router = APIRouter(prefix="/settings", tags=["设置"])
-ModelCapability = Literal["text_generation", "structured_output", "vision_review", "image_generation"]
+ModelCapability = Literal[
+    "text_generation", "structured_output", "vision_review", "image_generation",
+    "video_generation", "speech_generation", "media_composition",
+]
 ALLOWED_API_MODES = {
     "text_chat", "openai_images", "google_gemini_image", "google_vision",
-    "anthropic_vision", "custom_image_http",
+    "anthropic_vision", "custom_image_http", "custom_video_async_http",
+    "custom_speech_http", "local_ffmpeg", "mock_media",
 }
 ALLOWED_ADAPTER_FIELDS = {
     "endpoint_path", "auth_mode", "model_field", "prompt_field", "size_field",
     "response_base64_path", "response_url_path", "response_mime_type",
+    "duration_field", "voice_field", "voice_value", "aspect_ratio_field",
+    "job_id_path", "status_path", "progress_path", "result_url_path",
+    "result_base64_path", "poll_endpoint_path", "cancel_endpoint_path",
+    "success_values", "failed_values", "error_path", "poll_interval_seconds",
+    "health_path", "extra_payload", "max_concurrency", "max_duration_seconds", "max_file_mb",
 }
 
 
@@ -84,6 +94,11 @@ class TestConnectionRequest(BaseModel):
     model_name: str = ""
     api_key: str = ""
     timeout_seconds: int = 15
+    test_capability: Literal[
+        "text_generation", "image_generation", "video_generation", "speech_generation",
+    ] = "text_generation"
+    api_mode: str | None = None
+    adapter_config: dict[str, Any] | None = None
 
 
 class UserPreferencesUpdate(BaseModel):
@@ -124,26 +139,55 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise HTTPException(422, "模型 Base URL 必须是有效的 HTTP(S) 地址")
-    visual_mode = api_mode != "text_chat"
-    if visual_mode and get_settings().environment == "production" and parsed.scheme != "https":
-        raise HTTPException(422, "生产环境中的图片与视觉接口必须使用 HTTPS")
-    if api_mode != "custom_image_http":
+    media_mode = api_mode != "text_chat"
+    if media_mode and get_settings().environment == "production" and parsed.scheme != "https":
+        raise HTTPException(422, "生产环境中的媒体接口必须使用 HTTPS")
+    if api_mode not in {"custom_image_http", "custom_video_async_http", "custom_speech_http"}:
         return
     unknown = set(adapter) - ALLOWED_ADAPTER_FIELDS
     if unknown:
-        raise HTTPException(422, f"自定义图片接口包含不受支持的字段：{', '.join(sorted(unknown))}")
-    endpoint_path = str(adapter.get("endpoint_path") or "/images/generations")
+        raise HTTPException(422, f"自定义媒体接口包含不受支持的字段：{', '.join(sorted(unknown))}")
+    defaults = {
+        "custom_image_http": "/images/generations",
+        "custom_video_async_http": "/videos/generations",
+        "custom_speech_http": "/audio/speech",
+    }
+    endpoint_path = str(adapter.get("endpoint_path") or defaults[api_mode])
     if not endpoint_path.startswith("/") or "://" in endpoint_path or ".." in endpoint_path:
-        raise HTTPException(422, "自定义图片 Endpoint path 必须是安全的站内绝对路径")
+        raise HTTPException(422, "自定义媒体 Endpoint path 必须是安全的站内绝对路径")
     if adapter.get("auth_mode", "bearer") not in {"bearer", "x_api_key"}:
-        raise HTTPException(422, "自定义图片接口只支持 Bearer 或 X-API-Key 认证")
-    for key in ("model_field", "prompt_field", "size_field"):
+        raise HTTPException(422, "自定义媒体接口只支持 Bearer 或 X-API-Key 认证")
+    for path_key in ("poll_endpoint_path", "cancel_endpoint_path", "health_path"):
+        path_value = adapter.get(path_key)
+        if path_value and (not str(path_value).startswith("/") or "://" in str(path_value) or ".." in str(path_value)):
+            raise HTTPException(422, f"{path_key} 必须是安全的站内绝对路径")
+    for key in ("model_field", "prompt_field", "size_field", "duration_field", "voice_field", "aspect_ratio_field"):
         value = adapter.get(key)
         if value and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", str(value)):
             raise HTTPException(422, f"{key} 不是合法字段名")
+    numeric_limits = {
+        "max_concurrency": (1, 16),
+        "max_duration_seconds": (1, 7200),
+        "max_file_mb": (1, 4096),
+        "poll_interval_seconds": (0.5, 60),
+    }
+    for key, (minimum, maximum) in numeric_limits.items():
+        if key not in adapter:
+            continue
+        try:
+            value = float(adapter[key])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, f"{key} 必须是数字") from exc
+        if not minimum <= value <= maximum:
+            raise HTTPException(422, f"{key} 必须介于 {minimum} 和 {maximum} 之间")
     mime = adapter.get("response_mime_type")
-    if mime and mime not in {"image/png", "image/jpeg", "image/webp"}:
-        raise HTTPException(422, "自定义图片响应 MIME 类型不受支持")
+    allowed_mimes = {
+        "custom_image_http": {"image/png", "image/jpeg", "image/webp"},
+        "custom_video_async_http": {"video/mp4", "video/webm", "video/quicktime"},
+        "custom_speech_http": {"audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac"},
+    }
+    if mime and mime not in allowed_mimes[api_mode]:
+        raise HTTPException(422, "自定义媒体响应 MIME 类型不受支持")
 
 
 def _format_config(c: ModelConfig) -> ModelConfigItem:
@@ -340,6 +384,12 @@ async def delete_model_config(config_id: str, user: User = Depends(current_user)
     vision_references = await db.scalars(select(AgentChatSession).where(AgentChatSession.vision_model_config_id == config_id))
     for reference in vision_references:
         reference.vision_model_config_id = None
+    video_references = await db.scalars(select(AgentChatSession).where(AgentChatSession.video_model_config_id == config_id))
+    for reference in video_references:
+        reference.video_model_config_id = None
+    speech_references = await db.scalars(select(AgentChatSession).where(AgentChatSession.speech_model_config_id == config_id))
+    for reference in speech_references:
+        reference.speech_model_config_id = None
     await db.delete(config)
 
     if was_active:
@@ -360,21 +410,89 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
     model_name = payload.model_name
     api_key = payload.api_key
     timeout = payload.timeout_seconds
+    api_mode = payload.api_mode
+    adapter_config = payload.adapter_config
+    stored_config = None
 
     # 如果指定了 config_id，且 api_key 为空，从数据库读取解密的 key
     if payload.config_id and not api_key:
-        config = await db.scalar(select(ModelConfig).where(ModelConfig.id == payload.config_id, ModelConfig.owner_id == user.id))
-        if config:
-            provider_type = config.provider
-            base_url = base_url or config.base_url
-            model_name = model_name or config.model_name
-            if config.encrypted_api_key:
-                api_key = decrypt_secret(config.encrypted_api_key)
+        stored_config = await db.scalar(select(ModelConfig).where(ModelConfig.id == payload.config_id, ModelConfig.owner_id == user.id))
+        if stored_config:
+            provider_type = stored_config.provider
+            base_url = base_url or stored_config.base_url
+            model_name = model_name or stored_config.model_name
+            api_mode = api_mode or stored_config.api_mode
+            adapter_config = adapter_config if adapter_config is not None else (stored_config.adapter_config_json or {})
+            if stored_config.encrypted_api_key:
+                api_key = decrypt_secret(stored_config.encrypted_api_key)
 
     # 兜底全空情况：使用系统默认环境变量 Key
     settings = get_settings()
     if not api_key:
         api_key = settings.openai_api_key
+
+    if payload.test_capability in {"video_generation", "speech_generation"}:
+        resolved_mode = api_mode or (
+            "custom_video_async_http" if payload.test_capability == "video_generation" else "custom_speech_http"
+        )
+        resolved_adapter = adapter_config or {}
+        _validate_model_transport(provider_type, resolved_mode, base_url, resolved_adapter)
+        return {
+            "success": True,
+            "message": "媒体模型配置与传输映射校验通过。正式生成时将执行异步任务和结果文件校验。",
+            "provider": provider_type,
+            "model_name": model_name,
+            "test_capability": payload.test_capability,
+        }
+
+    if payload.test_capability == "image_generation":
+        resolved_mode = api_mode or "openai_images"
+        resolved_adapter = adapter_config or {}
+        _validate_model_transport(provider_type, resolved_mode, base_url, resolved_adapter)
+        if provider_type == "mock":
+            return {
+                "success": False, "message": "Mock 模型不能验证真实图片生成端点。",
+                "provider": provider_type, "model_name": model_name,
+                "test_capability": payload.test_capability,
+            }
+        probe = ModelConfig(
+            owner_id=user.id,
+            name="image-connection-probe",
+            provider=provider_type,
+            base_url=base_url,
+            model_name=model_name,
+            encrypted_api_key=encrypt_secret(api_key) if api_key else "",
+            timeout_seconds=timeout,
+            capabilities_json=["image_generation"],
+            api_mode=resolved_mode,
+            adapter_config_json=resolved_adapter,
+            is_active=False,
+        )
+        try:
+            from PIL import Image
+            from app.services.exercise_visual_service import generate_image
+            raw, mime = await generate_image(
+                probe,
+                "A clean blue geometric cube on a white background, no text, connection test",
+                "1024x768",
+            )
+            with Image.open(BytesIO(raw)) as image:
+                width, height = image.size
+                image.verify()
+            return {
+                "success": True,
+                "message": f"图片端点可用，返回 {mime}，{width}×{height}，{len(raw)} bytes。",
+                "provider": provider_type, "model_name": model_name,
+                "test_capability": payload.test_capability,
+                "mime_type": mime, "size_bytes": len(raw), "width": width, "height": height,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "success": False,
+                "message": f"图片端点测试失败：{str(exc)[:400]}",
+                "provider": provider_type, "model_name": model_name,
+                "test_capability": payload.test_capability,
+            }
 
     if provider_type == "mock":
         instance = MockProvider()
@@ -384,7 +502,10 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
         instance = OpenAICompatibleProvider(api_key=api_key, base_url=base_url, model_name=model_name, timeout_seconds=timeout)
 
     success, message = await instance.test_connection()
-    return {"success": success, "message": message, "provider": provider_type, "model_name": model_name}
+    return {
+        "success": success, "message": message, "provider": provider_type,
+        "model_name": model_name, "test_capability": payload.test_capability,
+    }
 
 
 @router.patch("/preferences")

@@ -25,6 +25,7 @@ _TYPE_DIRS: dict[str, str] = {
     "visual_asset": "assets",
     "presentation_file": "drafts",
     "visual_qa": "qa",
+    "content_qa": "qa",
     "revision_note": "qa",
 }
 

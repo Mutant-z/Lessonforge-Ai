@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useCourseStore } from '../../stores/courses';
-import { Bell, ArrowRight, CircleCheck } from '@element-plus/icons-vue';
+import { Bell, ArrowRight, CircleCheck, Warning } from '@element-plus/icons-vue';
 
 const store = useCourseStore();
 const router = useRouter();
@@ -19,13 +19,22 @@ const pendingItems = computed(() => {
         desc: `${course.subject} · 统一课程蓝图等待教师核对评测`,
         target: `/courses/${course.id}/blueprint`
       });
-    } else if (course.status === 'draft') {
+    } else if (course.status === 'draft' || course.status === 'requirement_review') {
       list.push({
         id: course.id,
         title: course.title,
         type: 'draft',
         tag: '草稿待完善',
         desc: `${course.subject} · 尚未启动 Agent 并发资源生成`,
+        target: `/courses/${course.id}/workspace`
+      });
+    } else if (course.status === 'needs_attention' || course.status === 'failed') {
+      list.push({
+        id: course.id,
+        title: course.title,
+        type: 'attention',
+        tag: '需教师干预',
+        desc: `${course.subject} · 部分生成环节需人工核对`,
         target: `/courses/${course.id}/workspace`
       });
     }
@@ -35,14 +44,14 @@ const pendingItems = computed(() => {
 </script>
 
 <template>
-  <div class="pending-actions-card">
+  <div class="pending-actions-bento-card">
     <div class="card-header-compact">
       <div class="header-left">
         <div class="icon-wrap amber">
           <el-icon><Bell /></el-icon>
         </div>
         <div class="header-text">
-          <h3 class="card-title">今日待处理</h3>
+          <h3 class="card-title">待办与核对中心</h3>
           <span class="sub-text">需要教师确认与审核的微课阶段</span>
         </div>
       </div>
@@ -67,6 +76,7 @@ const pendingItems = computed(() => {
             <span class="type-badge" :class="item.type">{{ item.tag }}</span>
             <h4 class="item-title" :title="item.title">{{ item.title }}</h4>
           </div>
+          <p class="item-desc">{{ item.desc }}</p>
         </div>
 
         <el-button type="primary" size="small" link class="action-link">
@@ -79,35 +89,42 @@ const pendingItems = computed(() => {
 </template>
 
 <style scoped>
-.pending-actions-card {
+.pending-actions-bento-card {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  padding: 12px 14px;
+  padding: 16px;
   background: var(--surface-primary);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-xs);
+  transition: border-color var(--motion-fast);
+}
+
+.pending-actions-bento-card:hover {
+  border-color: var(--border-active);
 }
 
 .card-header-compact {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .icon-wrap {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-control);
   display: grid;
   place-items: center;
-  font-size: 15px;
+  font-size: 16px;
   flex-shrink: 0;
 }
 
@@ -119,65 +136,66 @@ const pendingItems = computed(() => {
 .header-text {
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .card-title {
   margin: 0;
-  font-size: 14.5px;
+  font-size: 15px;
   font-weight: 800;
   color: var(--text-primary);
   line-height: 1.2;
 }
 
 .sub-text {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
 .pending-count {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
   color: var(--accent-amber);
   background: var(--accent-amber-soft);
-  padding: 2px 8px;
+  padding: 3px 9px;
   border-radius: var(--radius-pill);
 }
 
 .done-count {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
   color: var(--accent-mint);
   background: var(--accent-mint-soft);
-  padding: 2px 8px;
+  padding: 3px 9px;
   border-radius: var(--radius-pill);
 }
 
 .empty-pending-compact {
-  padding: 10px 12px;
-  background: var(--accent-mint-soft);
-  border: 1px dashed rgba(16, 185, 129, 0.25);
-  border-radius: var(--radius-sm);
+  padding: 16px 12px;
+  background: var(--surface-secondary);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-control);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   text-align: center;
 }
 
 .check-done-ic {
-  font-size: 16px;
+  font-size: 18px;
   color: var(--accent-mint);
 }
 
 .pending-list-scroll {
-  max-height: 200px;
+  max-height: 260px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   padding-right: 2px;
 }
 
@@ -185,11 +203,18 @@ const pendingItems = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
+  padding: 10px 12px;
   background: var(--surface-secondary);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   cursor: pointer;
+  transition: all var(--motion-fast);
+}
+
+.pending-row:hover {
+  background: var(--surface-primary);
+  border-color: var(--color-primary-border);
+  transform: translateX(2px);
 }
 
 .row-main {
@@ -200,13 +225,14 @@ const pendingItems = computed(() => {
 .title-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  margin-bottom: 3px;
 }
 
 .type-badge {
   font-size: 11px;
   font-weight: 800;
-  padding: 2px 6px;
+  padding: 2px 7px;
   border-radius: var(--radius-pill);
   white-space: nowrap;
 }
@@ -221,11 +247,25 @@ const pendingItems = computed(() => {
   color: var(--text-secondary);
 }
 
+.type-badge.attention {
+  background: var(--accent-rose-soft);
+  color: var(--accent-rose);
+}
+
 .item-title {
   margin: 0;
-  font-size: 13px;
+  font-size: 13.5px;
   font-weight: 800;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item-desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -234,6 +274,8 @@ const pendingItems = computed(() => {
 .action-link {
   font-weight: 800 !important;
   font-size: 12.5px !important;
+  flex-shrink: 0;
+  margin-left: 8px;
 }
 </style>
 

@@ -20,12 +20,12 @@ function destination() {
   return value.startsWith('/') && !value.startsWith('//') ? value : '/';
 }
 
-async function handleFormSubmit(payload: { username: string; password: string; email: string }) {
+async function handleFormSubmit(payload: { username: string; password: string; email: string; rememberMe?: boolean }) {
   busy.value = true;
   error.value = '';
   try {
     if (mode.value === 'login') {
-      await auth.login(payload.username, payload.password);
+      await auth.login(payload.username, payload.password, payload.rememberMe ?? true);
     } else {
       await auth.register(payload.username, payload.password, payload.email);
     }

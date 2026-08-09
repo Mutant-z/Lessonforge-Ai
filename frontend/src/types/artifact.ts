@@ -92,6 +92,29 @@ export type PPTBlock =
   | PPTVisualBlock
   | PPTNoteBlock;
 
+export interface PPTLayoutElement {
+  id?: string;
+  kind: 'textbox' | 'shape' | 'image' | 'chart';
+  role?: string;
+  text?: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z?: number;
+  style?: Record<string, unknown>;
+  shape_type?: string;
+  fill?: string | null;
+  line?: string | null;
+  file_path?: string;
+  asset_path?: string;
+  asset_id?: string;
+  provider?: string;
+  degraded?: boolean;
+  content_ref?: string;
+  visual_slot?: string;
+}
+
 export interface PPTSlide {
   id?: string;
   slide_number?: number;
@@ -106,6 +129,8 @@ export interface PPTSlide {
   speaker_notes: string;
   duration_seconds?: number;
   blocks?: PPTBlock[];
+  elements?: PPTLayoutElement[];
+  render_mode?: 'semantic' | 'hybrid' | 'absolute';
 }
 
 export interface PPTContent {
@@ -413,6 +438,48 @@ export interface VideoScriptContent {
     subtitle_max_lines: number;
   };
   scenes: VideoScene[];
+}
+
+export interface VideoGenerationSettings {
+  aspect_ratio: '16:9';
+  resolution: '1920x1080' | '1280x720' | '640x360';
+  subtitle_enabled: boolean;
+  voice_style: string;
+  background_music_enabled: boolean;
+}
+
+export interface VideoGenerationScene {
+  id: string;
+  script_scene_id: string;
+  sequence: number;
+  start_seconds: number;
+  end_seconds: number;
+  visual_prompt: string;
+  visual_style: string;
+  narration_text: string;
+  subtitle_text: string;
+  production_notes: string[];
+  status: 'pending' | 'generating' | 'ready' | 'failed';
+  video_asset_id?: string | null;
+  audio_asset_id?: string | null;
+  thumbnail_asset_id?: string | null;
+  provider_job_id?: string | null;
+  error?: Record<string, unknown> | null;
+}
+
+export interface VideoGenerationContent {
+  schema_version: '1.0';
+  mode: 'hybrid';
+  production_settings: VideoGenerationSettings;
+  source_versions: Record<string, number>;
+  scenes: VideoGenerationScene[];
+  outputs: {
+    preview_asset_id?: string | null;
+    final_asset_id?: string | null;
+    subtitle_asset_id?: string | null;
+    thumbnail_asset_id?: string | null;
+    duration_seconds: number;
+  };
 }
 
 export interface VerbatimSegment {

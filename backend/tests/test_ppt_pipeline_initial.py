@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.database import SessionLocal
-from app.models.entities import GenerationEvent, PipelineArtifact, PipelineEvent, PipelineRun, PipelineToolCall
+from app.models.entities import ArtifactAsset, GenerationEvent, PipelineArtifact, PipelineEvent, PipelineRun, PipelineToolCall
 from app.schemas.artifact import PPTContent
 
 from agent_pipeline_helpers import ready_course, wait_for, wait_tasks_terminal
@@ -36,6 +36,22 @@ async def test_pipeline_initial_run_populates_tables_and_events(client, auth_hea
     ppt = next(x for x in ppt_artifact if x["artifact_type"] == "ppt")
     content = PPTContent.model_validate(ppt["content_json"])
     assert len(content.slides) >= 10
+    image_elements = [
+        element
+        for slide in ppt["content_json"]["slides"]
+        for element in (slide.get("elements") or [])
+        if element.get("kind") == "image"
+    ]
+    assert image_elements, "生成的视觉资产必须绑定为可渲染的页面 image 元素"
+    assert image_elements[0].get("asset_id"), "页面图片必须携带浏览器可读取的 ArtifactAsset ID"
+    asset_response = await client.get(
+        f"/api/v1/artifact-assets/{image_elements[0]['asset_id']}", headers=auth_headers,
+    )
+    assert asset_response.status_code == 200
+    assert asset_response.headers["content-type"].startswith("image/")
+    async with SessionLocal() as db:
+        bound_asset = await db.get(ArtifactAsset, image_elements[0]["asset_id"])
+        assert bound_asset is not None and bound_asset.artifact_id == ppt["id"]
 
     # SSE 事件类型
     async with SessionLocal() as db:

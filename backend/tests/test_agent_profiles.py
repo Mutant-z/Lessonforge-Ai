@@ -196,11 +196,16 @@ async def test_profiles_gate_generation_are_traceable_and_version_on_context_cha
     project = await wait_for_project(
         client, auth_headers, course["id"],
         lambda item: item["agent_initialization"]["status"] == "ready"
-        and all(task["current_artifact"] for task in item["tasks"]),
+        and all(task["current_artifact"] for task in item["tasks"] if task["task_type"] != "video_generation")
+        and next(task for task in item["tasks"] if task["task_type"] == "video_generation")["status"] == "ready_to_generate",
     )
     assert project["agent_initialization"]["version"] == 1
     assert all(task["agent_profile_status"] == "ready" for task in project["tasks"])
-    assert all(task["agent_profile_summary"]["mission"] for task in project["tasks"])
+    content_agent_tasks = [task for task in project["tasks"] if task["task_type"] != "video_generation"]
+    assert all(task["agent_profile_summary"]["mission"] for task in content_agent_tasks)
+    video_generation = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
+    assert video_generation["agent_profile_summary"] is None
+    assert video_generation["agent_profile_version"] == 0
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_script")
     assert video_task["dependency_types"] == ["lesson_plan", "ppt"]
     assert video_task["current_artifact"]["content_json"]["schema_version"] == "2.0"

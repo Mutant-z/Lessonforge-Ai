@@ -17,8 +17,29 @@ async def _render_preview(tc: ToolContext, _: RenderPreviewInput) -> ToolResult:
     if tc.workspace_root is None:
         return ToolResult(ok=False, error="缺少工作目录")
     output = tc.workspace_root / "drafts" / "preview.pptx"
+    if tc.emitter is not None:
+        for index, slide in enumerate(tc.builder.slides):
+            await tc.emitter.emit_domain("slide.rendering", message=f"正在渲染第 {index + 1} 页", slide={"slide_id": slide["id"], "page": index + 1}, progress={"current": index + 1, "total": len(tc.builder.slides)})
     tc.builder.render(output)
+    if tc.emitter is not None:
+        for index, slide in enumerate(tc.builder.slides):
+            await tc.emitter.emit_domain("slide.rendered", message=f"第 {index + 1} 页已渲染", slide={"slide_id": slide["id"], "page": index + 1}, payload={"preview_file": str(output.relative_to(tc.workspace_root))})
     return ToolResult(ok=True, output={"file_path": str(output.relative_to(tc.workspace_root)), "slide_count": len(tc.builder.slides)})
+
+
+class RenderSlideInput(BaseModel):
+    slide_id: str
+
+
+async def _render_slide(tc: ToolContext, payload: RenderSlideInput) -> ToolResult:
+    if tc.builder is None or tc.workspace_root is None:
+        return ToolResult(ok=False, error="builder 或工作目录不可用")
+    tc.builder.get_slide(payload.slide_id)
+    output = tc.workspace_root / "renders" / f"{payload.slide_id}.pptx"
+    tc.builder.render(output)
+    if tc.emitter is not None:
+        await tc.emitter.emit_domain("slide.rendered", message=f"{payload.slide_id} 已刷新预览", slide={"slide_id": payload.slide_id}, payload={"preview_file": str(output.relative_to(tc.workspace_root)), "deck_render": True})
+    return ToolResult(ok=True, output={"slide_id": payload.slide_id, "file_path": str(output.relative_to(tc.workspace_root)), "deck_render": True})
 
 
 class RenderDeckPreviewInput(BaseModel):
@@ -49,7 +70,9 @@ async def _render_deck_preview(tc: ToolContext, _: RenderDeckPreviewInput) -> To
 
 
 def register_render_tools():
-    register_tool(Tool("render_preview", "把当前 builder 渲染为动态 PPTX（供 QA 检查）", RenderPreviewInput, _render_preview))
+    register_tool(Tool("render_preview", "把当前 builder 渲染为动态 PPTX（供 QA 检查）", RenderPreviewInput, _render_preview, timeout_seconds=120, idempotent=True))
+    register_tool(Tool("render_slide", "仅刷新指定页面的版本化预览（当前实现复用 deck render）", RenderSlideInput, _render_slide, timeout_seconds=120, idempotent=True))
+    register_tool(Tool("get_slide_preview", "获取指定页面的最新预览", RenderSlideInput, _render_slide, timeout_seconds=120, idempotent=True))
     register_tool(Tool("render_deck_preview", "把 15 页角色内容映射到真实 deck 模板渲染", RenderDeckPreviewInput, _render_deck_preview))
 
 

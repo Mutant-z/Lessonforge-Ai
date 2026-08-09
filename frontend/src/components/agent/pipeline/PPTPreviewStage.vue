@@ -49,7 +49,7 @@ function toggleFullscreen() {
 }
 </script>
 
-<<template>
+<template>
   <div class="stage-container" :class="{ fullscreen: isFullscreen }">
     <!-- Stage Header Toolbar -->
     <div class="stage-toolbar">

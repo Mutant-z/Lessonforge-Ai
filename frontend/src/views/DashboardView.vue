@@ -3,6 +3,7 @@ import { computed, ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore } from '../stores/auth';
 import { useCourseStore } from '../stores/courses';
+import { useCourseIntakeStore } from '../stores/courseIntake';
 import StatusBadge from '../components/feedback/StatusBadge.vue';
 import EmptyState from '../components/feedback/EmptyState.vue';
 
@@ -18,8 +19,6 @@ import HomeFooter from '../components/home/HomeFooter.vue';
 import { 
   Plus, 
   FolderOpened, 
-  DataAnalysis, 
-  Clock, 
   Cpu, 
   CircleCheck, 
   Search,
@@ -28,16 +27,21 @@ import {
   ArrowRight,
   Select,
   MagicStick,
-  Check
+  Bell,
+  Operation,
+  VideoPlay
 } from '@element-plus/icons-vue';
 
 const auth = useAuthStore();
 const store = useCourseStore();
+const intake = useCourseIntakeStore();
 const router = useRouter();
 const route = useRoute();
 
 const searchQuery = ref((route.query.search as string) || '');
 const activeStatusFilter = ref('all');
+const quickPromptInput = ref('');
+const startingIntake = ref(false);
 
 onMounted(async () => {
   if (auth.user) {
@@ -48,7 +52,7 @@ onMounted(async () => {
 const counts = computed(() => {
   const total = store.items.length;
   const running = store.items.filter(x => ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(x.status)).length;
-  const review = store.items.filter(x => ['blueprint_review', 'teacher_review'].includes(x.status)).length;
+  const review = store.items.filter(x => ['blueprint_review', 'teacher_review', 'requirement_review', 'draft'].includes(x.status)).length;
   const done = store.items.filter(x => x.status === 'completed').length;
   const completionRate = total > 0 ? Math.round((done / total) * 100) : 0;
   const savedHours = Math.round(total * 4.5);
@@ -62,7 +66,7 @@ const filteredCourses = computed(() => {
     if (activeStatusFilter.value === 'running') {
       list = list.filter(x => ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(x.status));
     } else if (activeStatusFilter.value === 'review') {
-      list = list.filter(x => ['blueprint_review', 'teacher_review'].includes(x.status));
+      list = list.filter(x => ['blueprint_review', 'teacher_review', 'requirement_review', 'draft'].includes(x.status));
     } else if (activeStatusFilter.value === 'completed') {
       list = list.filter(x => x.status === 'completed');
     }
@@ -76,6 +80,59 @@ const filteredCourses = computed(() => {
     x.grade_level.toLowerCase().includes(q)
   );
 });
+
+// Pending actions items computed inline
+const pendingActionItems = computed(() => {
+  const list: any[] = [];
+  store.items.forEach(course => {
+    if (['blueprint_review', 'teacher_review'].includes(course.status)) {
+      list.push({
+        id: course.id,
+        title: course.title,
+        type: 'blueprint',
+        tag: '待确认蓝图',
+        target: `/courses/${course.id}/blueprint`
+      });
+    } else if (course.status === 'draft' || course.status === 'requirement_review') {
+      list.push({
+        id: course.id,
+        title: course.title,
+        type: 'draft',
+        tag: '草稿待完善',
+        target: `/courses/${course.id}/workspace`
+      });
+    }
+  });
+  return list;
+});
+
+// Running agent items computed inline
+const runningAgentItems = computed(() => {
+  return store.items.filter(x => ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(x.status));
+});
+
+const recentEditedCourse = computed(() => {
+  if (!store.items.length) return null;
+  return store.items[0];
+});
+
+async function handleQuickIntakeSubmit() {
+  if (!quickPromptInput.value.trim() || startingIntake.value) return;
+  startingIntake.value = true;
+  try {
+    const session = await intake.create(null);
+    await intake.send(quickPromptInput.value.trim());
+    await router.push({ path: '/courses/new', query: { session: session.id } });
+  } catch (e) {
+    router.push('/courses/new');
+  } finally {
+    startingIntake.value = false;
+  }
+}
+
+function applyQuickPromptChip(text: string) {
+  quickPromptInput.value = text;
+}
 
 async function createSampleCourse() {
   try {
@@ -114,10 +171,11 @@ async function createSampleCourse() {
       <HomeFooter />
     </div>
 
-    <!-- 2. Project Completion & Status Dashboard for Authenticated Teachers -->
+    <!-- 2. Single-Page (100vh Viewport) Simple & Clean Dashboard -->
     <div v-else class="workspace-page-container animate-fade-in">
       <div class="master-workbench-card">
-        <!-- Master Header: Title + Action -->
+        
+        <!-- Top Navigation / Title Strip -->
         <div class="master-header-strip">
           <div class="header-titles">
             <span class="eyebrow-tag">DASHBOARD</span>
@@ -126,13 +184,13 @@ async function createSampleCourse() {
           </div>
 
           <div class="header-action">
-            <el-button type="primary" size="default" :icon="Plus" @click="router.push('/courses/new')">
+            <el-button type="primary" size="default" :icon="Plus" class="create-main-btn" @click="router.push('/courses/new')">
               新建微课项目
             </el-button>
           </div>
         </div>
 
-        <!-- Master Overview Band: Project Completion & Progress Summary Banner -->
+        <!-- Metric Band: Simple Progress & Clean Stat Badges -->
         <div class="master-overview-band">
           <div class="overview-banner-card">
             <div class="banner-welcome">
@@ -181,12 +239,74 @@ async function createSampleCourse() {
           </div>
         </div>
 
-        <!-- Master Main Split: Full Width Course Library -->
-        <div class="master-body-split">
-          <!-- Primary Column: Course Projects Workspace -->
-          <div class="master-courses-col">
+        <!-- Clean AI Quick Creation Bar -->
+        <div class="inline-ai-quick-strip">
+          <div class="quick-prompt-input-row">
+            <div class="prompt-input-wrapper">
+              <el-icon class="magic-input-icon"><MagicStick /></el-icon>
+              <input 
+                v-model="quickPromptInput"
+                type="text" 
+                class="inline-prompt-input"
+                placeholder="输入教学主题一键生成微课，例如：高一物理《牛顿第二定律》，时长 15 分钟…" 
+                @keyup.enter="handleQuickIntakeSubmit"
+              />
+              <button 
+                type="button" 
+                class="inline-send-btn"
+                :disabled="!quickPromptInput.trim() || startingIntake"
+                @click="handleQuickIntakeSubmit"
+              >
+                <span>AI 极速生成</span>
+                <el-icon><ArrowRight /></el-icon>
+              </button>
+            </div>
 
+            <div v-if="recentEditedCourse" class="recent-resume-box">
+              <button 
+                type="button" 
+                class="resume-pill-btn"
+                @click="router.push(`/courses/${recentEditedCourse.id}/workspace`)"
+              >
+                <el-icon><VideoPlay /></el-icon>
+                <span>继续编辑：{{ recentEditedCourse.title.length > 10 ? recentEditedCourse.title.slice(0, 10) + '...' : recentEditedCourse.title }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="prompt-chips-row">
+            <span class="chips-label">快捷示例：</span>
+            <span class="chip-tag" @click="applyQuickPromptChip('高一物理《牛顿第二定律》，时长 15 分钟')">高一物理《牛顿第二定律》</span>
+            <span class="chip-tag" @click="applyQuickPromptChip('初中数学《勾股定理及其应用》，互动教学')">初中数学《勾股定理》</span>
+            <span class="chip-tag" @click="applyQuickPromptChip('高中化学《氧化还原反应核心规律解析》')">高中化学《氧化还原反应》</span>
+          </div>
+        </div>
+
+        <!-- Status Alert Notification Strip (If any) -->
+        <div v-if="pendingActionItems.length || runningAgentItems.length" class="inline-status-alert-strip">
+          <div v-if="pendingActionItems.length" class="status-alert-item warning">
+            <el-icon class="alert-ic"><Bell /></el-icon>
+            <span class="alert-txt">今日待处理：有 {{ pendingActionItems.length }} 门微课等待教师确认蓝图或审核</span>
+            <button type="button" class="alert-action-link" @click="router.push(pendingActionItems[0].target)">
+              <span>立即处理</span>
+              <el-icon><ArrowRight /></el-icon>
+            </button>
+          </div>
+
+          <div v-if="runningAgentItems.length" class="status-alert-item agent">
+            <span class="pulse-live-dot animate-pulse"></span>
+            <span class="alert-txt">Agent 队列：{{ runningAgentItems.length }} 门微课正由 Agent 团队并发生成中</span>
+            <button type="button" class="alert-action-link" @click="activeStatusFilter = 'running'">
+              <span>查看生成状态</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Main Workspace Course Projects List -->
+        <div class="master-body-split">
+          <div class="master-courses-col">
             <div class="dashboard-content-panel">
+              
               <div class="dashboard-toolbar">
                 <div class="toolbar-left">
                   <h3 class="lf-card-title">我的微课项目库</h3>
@@ -288,7 +408,7 @@ async function createSampleCourse() {
                   </div>
                 </div>
 
-                <!-- Empty Filter Search Results -->
+                <!-- Empty Search Results -->
                 <EmptyState
                   v-else-if="!filteredCourses.length"
                   title="暂无匹配的微课项目"
@@ -297,7 +417,7 @@ async function createSampleCourse() {
                   @action="searchQuery = ''; activeStatusFilter = 'all';"
                 />
 
-                <!-- Course Cards List -->
+                <!-- Clean & Balanced Course Cards Grid -->
                 <div v-else class="courses-grid-list">
                   <div 
                     v-for="course in filteredCourses" 
@@ -312,16 +432,37 @@ async function createSampleCourse() {
                           <span class="meta-tag grade">{{ course.grade_level }}</span>
                           <span class="meta-tag duration">{{ course.duration_minutes }} 分钟</span>
                         </div>
-                        <h3 class="course-card-title">{{ course.title }}</h3>
+                        <h3 class="course-card-title" :title="course.title">{{ course.title }}</h3>
                       </div>
                       <StatusBadge :status="course.status" size="small" />
                     </div>
 
-                    <div class="course-resources-preview">
-                      <span class="res-item doc"><el-icon><Document /></el-icon> 教学设计</span>
-                      <span class="res-item ppt"><el-icon><Files /></el-icon> 16:9 PPT</span>
-                      <span class="res-item sheet"><el-icon><CircleCheck /></el-icon> 任务单</span>
-                      <span class="res-item script"><el-icon><Cpu /></el-icon> 脚本</span>
+                    <!-- 5 Key Deliverable Items Progress Status Bar -->
+                    <div class="course-deliverables-bar">
+                      <div class="deliv-item" :class="{ ready: course.status === 'completed' }">
+                        <el-icon class="deliv-ic doc"><Document /></el-icon>
+                        <span>教学设计</span>
+                      </div>
+
+                      <div class="deliv-item" :class="{ ready: course.status === 'completed' }">
+                        <el-icon class="deliv-ic ppt"><Files /></el-icon>
+                        <span>16:9 PPT</span>
+                      </div>
+
+                      <div class="deliv-item" :class="{ ready: course.status === 'completed' }">
+                        <el-icon class="deliv-ic sheet"><CircleCheck /></el-icon>
+                        <span>任务单</span>
+                      </div>
+
+                      <div class="deliv-item" :class="{ ready: course.status === 'completed' }">
+                        <el-icon class="deliv-ic script"><Cpu /></el-icon>
+                        <span>逐字脚本</span>
+                      </div>
+
+                      <div class="deliv-item" :class="{ ready: course.status === 'completed' }">
+                        <el-icon class="deliv-ic quiz"><Operation /></el-icon>
+                        <span>互动试题</span>
+                      </div>
                     </div>
 
                     <div class="course-card-footer">
@@ -333,10 +474,12 @@ async function createSampleCourse() {
                     </div>
                   </div>
                 </div>
+
               </div>
             </div>
           </div>
         </div>
+
       </div>
     </div>
   </div>
@@ -355,8 +498,11 @@ async function createSampleCourse() {
 
 .landing-page-shell {
   min-height: 100vh;
+  height: 100%;
   position: relative;
   overflow-x: hidden;
+  overflow-y: auto;
+  scroll-behavior: smooth;
   background: var(--page-bg);
 }
 
@@ -389,13 +535,13 @@ async function createSampleCourse() {
   overflow: hidden;
 }
 
-/* Section 1: Integrated Top Header & Metrics Bar */
+/* Section 1: Integrated Top Header Bar */
 .master-header-strip {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 14px 20px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--border-light);
   background: var(--surface-secondary);
   flex-shrink: 0;
@@ -427,92 +573,16 @@ async function createSampleCourse() {
 .subtitle-text {
   font-size: 13px;
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.unified-metrics-inline {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--surface-primary);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-pill);
-  padding: 4px 14px;
-  box-shadow: var(--shadow-xs);
+.create-main-btn {
+  font-weight: 800 !important;
 }
 
-.metric-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  padding: 4px 10px;
-  border-radius: var(--radius-pill);
-  transition: background var(--motion-fast);
-}
-
-.metric-item:hover {
-  background: var(--bg-hover);
-}
-
-.metric-item.active {
-  background: var(--color-primary-soft);
-}
-
-.metric-ic {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-size: 12.5px;
-}
-
-.metric-ic.blue { background: var(--color-primary-soft); color: var(--color-primary); }
-.metric-ic.agent { background: var(--accent-violet-soft); color: var(--accent-violet); }
-.metric-ic.warning { background: var(--accent-amber-soft); color: var(--accent-amber); }
-.metric-ic.success { background: var(--accent-mint-soft); color: var(--accent-mint); }
-
-.metric-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.metric-meta .label {
-  font-size: 12.5px;
-  color: var(--text-muted);
-  font-weight: 700;
-}
-
-.metric-meta .val {
-  font-size: 15.5px;
-  font-weight: 900;
-  color: var(--text-primary);
-  line-height: 1;
-}
-
-.metric-meta .agent-text { color: var(--accent-violet); }
-
-.metric-meta .val small {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.metric-sep {
-  width: 1px;
-  height: 16px;
-  background: var(--border-default);
-}
-
-.header-action {
-  display: flex;
-  align-items: center;
-}
-
-/* Section 2: Project Completion & Progress Overview Banner */
+/* Section 2: Progress Summary & Metrics Band */
 .master-overview-band {
-  padding: 16px 20px;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--border-light);
   background: linear-gradient(135deg, var(--surface-primary) 0%, var(--surface-secondary) 100%);
   flex-shrink: 0;
@@ -521,7 +591,7 @@ async function createSampleCourse() {
 .overview-banner-card {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .banner-welcome {
@@ -539,7 +609,7 @@ async function createSampleCourse() {
 }
 
 .welcome-user-info p {
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   font-size: 13px;
   color: var(--text-muted);
 }
@@ -548,7 +618,7 @@ async function createSampleCourse() {
   min-width: 300px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .overall-progress-header {
@@ -558,13 +628,13 @@ async function createSampleCourse() {
 }
 
 .progress-title {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 800;
   color: var(--text-secondary);
 }
 
 .progress-percentage-num {
-  font-size: 15.5px;
+  font-size: 15px;
   font-weight: 900;
   color: var(--color-primary);
 }
@@ -599,7 +669,7 @@ async function createSampleCourse() {
   background: var(--surface-primary);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-control);
-  padding: 10px 14px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -627,7 +697,7 @@ async function createSampleCourse() {
 }
 
 .stat-num {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 900;
   line-height: 1.2;
 }
@@ -639,18 +709,202 @@ async function createSampleCourse() {
 .stat-num.mint { color: var(--accent-cyan); }
 
 .stat-num small {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--text-muted);
 }
 
 .stat-label {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--text-muted);
 }
 
-/* Section 3: Master Main Workspace Split */
+/* Section 3: Inline AI Quick Creation Strip */
+.inline-ai-quick-strip {
+  padding: 10px 20px;
+  background: var(--surface-secondary);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.quick-prompt-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.prompt-input-wrapper {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-primary);
+  border: 1.5px solid var(--color-primary-border);
+  border-radius: var(--radius-control);
+  padding: 4px 6px 4px 14px;
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.06);
+  transition: all var(--motion-fast);
+}
+
+.prompt-input-wrapper:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 3px 12px rgba(79, 70, 229, 0.15);
+}
+
+.magic-input-icon {
+  font-size: 18px;
+  color: var(--color-primary);
+}
+
+.inline-prompt-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.inline-send-btn {
+  border: none;
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--accent-violet) 100%);
+  color: #ffffff;
+  padding: 7px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all var(--motion-fast);
+}
+
+.inline-send-btn:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateX(1px);
+}
+
+.inline-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.recent-resume-box {
+  flex-shrink: 0;
+}
+
+.resume-pill-btn {
+  border: 1px solid var(--color-primary-border);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+  border-radius: var(--radius-pill);
+  padding: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all var(--motion-fast);
+}
+
+.resume-pill-btn:hover {
+  background: var(--color-primary);
+  color: #ffffff;
+}
+
+.prompt-chips-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.chips-label {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.chip-tag {
+  background: var(--surface-primary);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all var(--motion-fast);
+}
+
+.chip-tag:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
+/* Inline Alert Strip */
+.inline-status-alert-strip {
+  padding: 8px 20px;
+  background: var(--surface-tertiary);
+  border-bottom: 1px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.status-alert-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: var(--radius-pill);
+}
+
+.status-alert-item.warning {
+  background: var(--accent-amber-soft);
+  color: var(--accent-amber);
+}
+
+.status-alert-item.agent {
+  background: var(--accent-violet-soft);
+  color: var(--accent-violet);
+}
+
+.alert-ic {
+  font-size: 14px;
+}
+
+.pulse-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-violet);
+}
+
+.alert-txt {
+  font-size: 12.5px;
+}
+
+.alert-action-link {
+  border: none;
+  background: transparent;
+  color: currentColor;
+  font-weight: 900;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  margin-left: 6px;
+}
+
+/* Section 4: Master Main Workspace */
 .master-body-split {
   flex: 1;
   min-height: 0;
@@ -661,14 +915,12 @@ async function createSampleCourse() {
 }
 
 .master-courses-col {
-  padding: 18px 24px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
-
-
 
 .dashboard-content-panel {
   box-sizing: border-box;
@@ -683,7 +935,7 @@ async function createSampleCourse() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   flex-shrink: 0;
   gap: 16px;
 }
@@ -762,31 +1014,30 @@ async function createSampleCourse() {
 
 .courses-grid-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 16px;
 }
-
 
 .course-card {
   background: #ffffff;
   border: 1.5px solid #e2e8f0;
-  border-radius: 16px;
-  padding: 18px 20px;
+  border-radius: 14px;
+  padding: 16px 18px;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.03);
-  transition: all 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.03);
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
   overflow: hidden;
+  gap: 12px;
 }
 
 .course-card:hover {
   border-color: #c7d2fe;
-  transform: translateY(-3px);
-  box-shadow: 0 12px 28px rgba(79, 70, 229, 0.12);
-  background: #ffffff;
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(79, 70, 229, 0.1);
 }
 
 .course-card-header {
@@ -794,7 +1045,6 @@ async function createSampleCourse() {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  margin-bottom: 12px;
 }
 
 .title-and-tags {
@@ -805,17 +1055,16 @@ async function createSampleCourse() {
 .course-tags-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 6px;
+  margin-bottom: 6px;
 }
 
 .meta-tag {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
   white-space: nowrap;
-  line-height: 1.4;
 }
 
 .meta-tag.subject { background: #eef2ff; color: #4338ca; border: 1px solid #c7d2fe; }
@@ -824,75 +1073,79 @@ async function createSampleCourse() {
 
 .course-card-title {
   margin: 0;
-  font-size: 16.5px;
+  font-size: 16px;
   font-weight: 800;
   color: #0f172a;
-  line-height: 1.45;
+  line-height: 1.4;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  letter-spacing: -0.01em;
 }
 
-.course-resources-preview {
+/* Clean 5 Deliverables Status Row */
+.course-deliverables-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 4px;
+  padding: 8px 10px;
   background: #f8fafc;
-  border-radius: 12px;
-  margin-bottom: 14px;
+  border-radius: 10px;
   border: 1px solid #e2e8f0;
 }
 
-.res-item {
-  font-size: 12.5px;
-  color: #334155;
-  font-weight: 700;
+.deliv-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #94a3b8;
 }
 
-.res-item .el-icon {
-  font-size: 14px;
+.deliv-item.ready {
+  color: #059669;
 }
 
-.res-item.doc .el-icon { color: #4f46e5; }
-.res-item.ppt .el-icon { color: #d97706; }
-.res-item.sheet .el-icon { color: #059669; }
-.res-item.script .el-icon { color: #7c3aed; }
+.deliv-ic {
+  font-size: 13px;
+}
+
+.deliv-ic.doc { color: #4f46e5; }
+.deliv-ic.ppt { color: #d97706; }
+.deliv-ic.sheet { color: #059669; }
+.deliv-ic.script { color: #7c3aed; }
+.deliv-ic.quiz { color: #0891b2; }
 
 .course-card-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-top: 12px;
+  padding-top: 10px;
   border-top: 1px dashed #e2e8f0;
 }
 
 .update-time {
-  font-size: 12.5px;
+  font-size: 11.5px;
   color: #64748b;
   font-weight: 500;
 }
 
 .enter-btn {
-  font-size: 12.5px !important;
+  font-size: 12px !important;
   font-weight: 700 !important;
   color: #ffffff !important;
   background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
   border: 0 !important;
   border-radius: 999px !important;
-  padding: 6px 14px !important;
-  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.25) !important;
+  padding: 5px 14px !important;
+  box-shadow: 0 3px 10px rgba(79, 70, 229, 0.2) !important;
   transition: all 180ms ease !important;
 }
 
 .enter-btn:hover {
   transform: translateX(2px) !important;
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35) !important;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3) !important;
 }
 
 /* Compact Zero Courses Guided Onboarding Styles */
@@ -972,6 +1225,8 @@ async function createSampleCourse() {
   gap: 12px;
 }
 </style>
+
+
 
 
 

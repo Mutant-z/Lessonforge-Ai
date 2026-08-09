@@ -97,7 +97,7 @@ const resources = [
 </script>
 
 <template>
-  <section class="bento-resources-section">
+  <section id="resources" class="bento-resources-section">
     <div class="section-header">
       <span class="section-eyebrow">FULL-STACK RESOURCES</span>
       <h2 class="section-title">一套课程蓝图，<span class="text-gradient">全套交付级教学资源。</span></h2>

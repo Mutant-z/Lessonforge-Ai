@@ -5,6 +5,7 @@ export function useAutoScroll(containerRef: Ref<HTMLElement | null>) {
   const unreadCount = ref(0);
   let boundContainer: HTMLElement | null = null;
   let frameId: number | null = null;
+  let lastUnreadKey = '';
 
   function handleScroll() {
     if (!containerRef.value) return;
@@ -19,6 +20,7 @@ export function useAutoScroll(containerRef: Ref<HTMLElement | null>) {
       // User is at bottom
       isAutoScrollActive.value = true;
       unreadCount.value = 0;
+      lastUnreadKey = '';
     }
   }
 
@@ -34,13 +36,15 @@ export function useAutoScroll(containerRef: Ref<HTMLElement | null>) {
     });
     isAutoScrollActive.value = true;
     unreadCount.value = 0;
+    lastUnreadKey = '';
   }
 
-  function notifyNewContent(smooth = false) {
+  function notifyNewContent(smooth = false, unreadKey?: string) {
     if (isAutoScrollActive.value) {
       scrollToBottom(smooth);
-    } else {
+    } else if (!unreadKey || unreadKey !== lastUnreadKey) {
       unreadCount.value++;
+      lastUnreadKey = unreadKey || '';
     }
   }
 

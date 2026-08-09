@@ -117,6 +117,7 @@ defineExpose({
           :model-value="modelConfigId"
           :disabled="disabled || modelDisabled"
           compact
+          label="主模型"
           @update:model-value="emit('update:modelConfigId', $event)"
           @change="emit('modelChange', $event)"
         />

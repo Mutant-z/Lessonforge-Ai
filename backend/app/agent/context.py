@@ -63,12 +63,18 @@ class ContextState:
     _order: int = 0
     decisions: list[dict[str, Any]] = field(default_factory=list)
 
-    def append_tool_result(self, tool_call_id: str, agent_key: str, tool_name: str, output: dict[str, Any], error: str | None = None):
+    def append_tool_result(
+        self, tool_call_id: str, agent_key: str, tool_name: str, output: dict[str, Any],
+        error: str | None = None, error_code: str | None = None, retryable: bool = False,
+    ):
         self._order += 1
         self.tool_results.append(ContextBlock(
             kind="tool_result",
             title=f"{tool_name}({tool_call_id[:8]})",
-            payload={"ok": error is None, "output": output, "error": error} if error else {"ok": True, "output": output},
+            payload={
+                "ok": error is None, "output": output, "error": error,
+                "error_code": error_code, "retryable": retryable,
+            } if error else {"ok": True, "output": output},
             agent_key=agent_key,
             tool_name=tool_name,
             tool_call_id=tool_call_id,

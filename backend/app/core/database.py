@@ -90,6 +90,16 @@ async def create_schema() -> None:
                 "agent_chat_sessions": {
                     "image_model_config_id": "VARCHAR(36)",
                     "vision_model_config_id": "VARCHAR(36)",
+                    "video_model_config_id": "VARCHAR(36)",
+                    "speech_model_config_id": "VARCHAR(36)",
+                },
+                "artifact_assets": {
+                    "duration_ms": "INTEGER NOT NULL DEFAULT 0",
+                    "source_scene_id": "VARCHAR(80) NOT NULL DEFAULT ''",
+                    "metadata_json": "JSON NOT NULL DEFAULT '{}'",
+                },
+                "pipeline_tool_calls": {
+                    "model_call_id": "VARCHAR(120) NOT NULL DEFAULT ''",
                 },
             }
             for table_name, definitions in compatibility_columns.items():

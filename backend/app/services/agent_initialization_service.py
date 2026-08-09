@@ -274,17 +274,18 @@ async def create_initialization_run(db, course: CourseProject, trigger_type: str
     if active:
         return active, False
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course.id)))
-    if len(tasks) != 6:
+    if len({task.task_type for task in tasks} & set(TASK_INFO)) != 6:
         from app.services.course_task_service import ensure_course_tasks
         tasks = await ensure_course_tasks(db, course.id)
+    agent_tasks = [task for task in tasks if task.task_type in TASK_INFO]
     current_profiles = []
-    for task in tasks:
+    for task in agent_tasks:
         if task.current_agent_profile_id:
             current_profiles.append(await db.get(CourseTaskAgentProfile, task.current_agent_profile_id))
     active_templates = {}
     if len(current_profiles) == 6:
         try:
-            active_templates = {task.agent_type: await active_prompt_template(db, task.agent_type) for task in tasks}
+            active_templates = {task.agent_type: await active_prompt_template(db, task.agent_type) for task in agent_tasks}
         except RuntimeError:
             active_templates = {}
     if len(active_templates) == 6 and len(current_profiles) == 6 and all(
@@ -301,7 +302,7 @@ async def create_initialization_run(db, course: CourseProject, trigger_type: str
         if completed:
             # 修复：之前的失败运行可能把任务留在 agent_profile_status=failed；
             # 既然专属配置已就绪且与当前蓝图/模板匹配，将任务状态复位为 ready。
-            for task in tasks:
+            for task in agent_tasks:
                 task.agent_profile_status = "ready"
                 task.agent_profile_error_json = None
             await db.commit()
@@ -312,7 +313,7 @@ async def create_initialization_run(db, course: CourseProject, trigger_type: str
     )
     db.add(run)
     await db.flush()
-    for task in tasks:
+    for task in agent_tasks:
         task.agent_profile_status = "initializing"
         task.agent_profile_error_json = None
     await _emit(db, run, "agent_initialization_started", status="queued", progress=0)
@@ -342,8 +343,9 @@ async def execute_initialization_run(run_id: str):
             if not blueprint or not requirement:
                 raise RuntimeError("课程蓝图或需求快照缺失")
             tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course.id).order_by(CourseTask.display_order)))
-            if len(tasks) != 6:
-                raise RuntimeError("项目必须包含六个子任务")
+            agent_tasks = [task for task in tasks if task.task_type in TASK_INFO]
+            if len(agent_tasks) != 6:
+                raise RuntimeError("项目必须包含六个内容 Agent 任务")
             run.status = "running"
             run.started_at = utcnow()
             run.progress = 10
@@ -373,7 +375,7 @@ async def execute_initialization_run(run_id: str):
             model_name = resolved_model_name(provider, model_config)
             profile_model_name = "lessonforge-blueprint-recovery-v1" if extraction_warning else model_name
             created_profiles = []
-            by_task = {task.task_type: task for task in tasks}
+            by_task = {task.task_type: task for task in agent_tasks}
             for specialized in bundle.profiles:
                 task = by_task[specialized.task_type]
                 template = await active_prompt_template(db, task.agent_type)
@@ -452,6 +454,10 @@ async def execute_initialization_run(run_id: str):
                 course.status = "needs_attention"
                 tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course.id)))
                 for task in tasks:
+                    if task.task_type not in TASK_INFO:
+                        task.agent_profile_status = "ready"
+                        task.agent_profile_error_json = None
+                        continue
                     task.agent_profile_status = "failed"
                     task.agent_profile_error_json = error
             await _emit(db, run, "agent_initialization_failed", status="failed", progress=run.progress, error=error)

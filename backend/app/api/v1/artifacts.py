@@ -34,15 +34,17 @@ from app.agents.generators import make_exercises, make_task_sheet, to_markdown
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.quality_service import validate_exercise, validate_video_script
 from app.services.ppt_template_service import get_ppt_template, resolve_ppt_template
+from app.schemas.video import VideoGenerationContent, video_generation_markdown
 
 router = APIRouter(tags=["课程资源"])
-MODULES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report", "citation_report"}
+MODULES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "video_generation", "verbatim", "quality_report", "citation_report"}
 MODULE_SCHEMAS = {
     "lesson_plan": LessonPlanContent,
     "ppt": PPTContent,
     "task_sheet": TaskSheetContent,
     "exercise": ExerciseContent,
     "video_script": VideoScriptContent,
+    "video_generation": VideoGenerationContent,
     "verbatim": VerbatimContent,
     "quality_report": QualityReportContent,
     "citation_report": CitationReportContent,
@@ -208,6 +210,37 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
             raise HTTPException(422, detail=blocking)
         content_json = validated.model_dump()
         content_markdown = to_markdown("video_script", validated)
+    elif source.artifact_type == "video_generation":
+        try:
+            validated_video = VideoGenerationContent.model_validate(payload.content_json)
+        except ValidationError as exc:
+            raise HTTPException(422, detail=exc.errors()) from exc
+        referenced_assets = {
+            asset_id
+            for scene in validated_video.scenes
+            for asset_id in (scene.video_asset_id, scene.audio_asset_id, scene.thumbnail_asset_id)
+            if asset_id
+        } | {
+            asset_id
+            for asset_id in (
+                validated_video.outputs.preview_asset_id,
+                validated_video.outputs.final_asset_id,
+                validated_video.outputs.subtitle_asset_id,
+                validated_video.outputs.thumbnail_asset_id,
+            )
+            if asset_id
+        }
+        for asset_id in referenced_assets:
+            asset = await db.scalar(select(ArtifactAsset).where(
+                ArtifactAsset.id == asset_id,
+                ArtifactAsset.course_id == source.course_id,
+                ArtifactAsset.owner_id == user.id,
+                ArtifactAsset.status == "approved",
+            ))
+            if not asset:
+                raise HTTPException(422, f"视频资源 {asset_id} 不属于当前课程或尚未通过检查")
+        content_json = validated_video.model_dump()
+        content_markdown = video_generation_markdown(validated_video)
     version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == source.course_id, Artifact.artifact_type == source.artifact_type)) or 0) + 1
     item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=content_json, content_markdown=content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary, source_versions_json=source.source_versions_json, agent_profile_id=source.agent_profile_id)
     db.add(item)
@@ -331,12 +364,54 @@ async def versions(artifact_id: str, user: User = Depends(current_user), db: Asy
     return [serialize(x) for x in items]
 
 
+@router.post("/artifacts/{artifact_id}/restore", status_code=201)
+async def restore_artifact_version(
+    artifact_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    source = await db.get(Artifact, artifact_id)
+    if not source:
+        raise HTTPException(404, "资源版本不存在")
+    await owned_course(source.course_id, user, db)
+    version = (await db.scalar(select(func.max(Artifact.version)).where(
+        Artifact.course_id == source.course_id,
+        Artifact.artifact_type == source.artifact_type,
+    )) or 0) + 1
+    restored = Artifact(
+        course_id=source.course_id,
+        artifact_type=source.artifact_type,
+        version=version,
+        blueprint_version=source.blueprint_version,
+        content_json=json.loads(json.dumps(source.content_json, ensure_ascii=False)),
+        content_markdown=source.content_markdown,
+        status="draft",
+        model_name=source.model_name,
+        prompt_version=source.prompt_version,
+        change_summary=f"恢复自 V{source.version}",
+        source_versions_json=dict(source.source_versions_json or {}),
+        agent_profile_id=source.agent_profile_id,
+    )
+    db.add(restored)
+    await db.flush()
+    await register_artifact_version(db, restored, invalidate_dependents=True)
+    await db.commit()
+    await db.refresh(restored)
+    return serialize(restored)
+
+
 @router.get("/courses/{course_id}/modules/{module_type}/chat/history")
 async def chat_history(course_id: str, module_type: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     course = await owned_course(course_id, user, db)
     if module_type not in MODULES:
         raise HTTPException(404, "模块不存在")
-    rows = await db.scalars(select(AgentMessage).where(AgentMessage.course_id == course_id, AgentMessage.module_type == module_type).order_by(AgentMessage.created_at))
+    rows = await db.scalars(select(AgentMessage).where(
+        AgentMessage.course_id == course_id,
+        AgentMessage.module_type == module_type,
+        # 模块对话（chat/send）无 run_id；带 run_id 的是 pipeline 对话单线（PPT 工作台上下文），
+        # 不属于模块聊天，排除避免污染历史。
+        AgentMessage.run_id.is_(None),
+    ).order_by(AgentMessage.created_at))
     chat_session = await _chat_session(course_id, module_type, db)
     _, config = await resolve_provider(
         db,

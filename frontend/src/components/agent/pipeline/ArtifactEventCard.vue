@@ -8,7 +8,7 @@ const props = defineProps<{
   data: Record<string, any>;
 }>();
 
-const isArtifact = computed(() => props.type === 'artifact_created');
+const isArtifact = computed(() => ['artifact_created', 'artifact_started', 'artifact_patch'].includes(props.type));
 const isAsset = computed(() => props.type === 'asset_generated');
 const isQa = computed(() => props.type === 'qa_completed');
 const isRevision = computed(() => props.type === 'revision_started' || props.type === 'revision_completed');
@@ -16,6 +16,9 @@ const isRevision = computed(() => props.type === 'revision_started' || props.typ
 const eventLabelsMap: Record<string, string> = {
   pipeline_completed: '流水线推演完成',
   pipeline_failed: '流水线运行中断',
+  artifact_started: '开始生成草稿',
+  artifact_patch: '草稿页面已更新',
+  qa_issue_found: '发现 QA 问题',
   task_paused: '任务已暂停',
   task_resumed: '任务已恢复运行',
 };
@@ -30,8 +33,9 @@ const icon = computed(() => (isAsset.value ? Picture : isQa.value ? DataAnalysis
     <el-icon class="event-icon"><component :is="icon" /></el-icon>
     <div class="event-body">
       <template v-if="isArtifact">
-        <div class="event-title">创建产物：{{ artifactLabel }} <span class="ver">v{{ data.version }}</span></div>
+        <div class="event-title">{{ eventLabel }}：{{ artifactLabel }} <span v-if="data.version" class="ver">v{{ data.version }}</span></div>
         <div v-if="data.producer_agent" class="event-sub">由 {{ data.producer_agent }} 生成</div>
+        <div v-if="data.summary" class="event-sub">{{ data.summary }}</div>
       </template>
       <template v-else-if="isAsset">
         <div class="event-title">生成视觉素材</div>

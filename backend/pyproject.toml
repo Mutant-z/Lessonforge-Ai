@@ -24,7 +24,8 @@ dependencies = [
   "cairosvg>=2.7,<3",
   "pypdf>=5,<7",
   "structlog>=24,<26",
-  "cryptography>=44,<47"
+  "cryptography>=44,<47",
+  "imageio-ffmpeg>=0.5,<1"
 ]
 
 [project.optional-dependencies]

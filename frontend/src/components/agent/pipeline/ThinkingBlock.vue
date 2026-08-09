@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue';
+import { ref, watch } from 'vue';
 import MarkdownRenderer from '../../content-renderers/MarkdownRenderer.vue';
 
 const props = defineProps<{
@@ -7,57 +7,25 @@ const props = defineProps<{
   active: boolean;
 }>();
 
-/** 打字机：逐步揭示目标文本；流式期间每帧揭示若干字符，结束后一次性补全。 */
+/** 服务器已经按增量发送；这里只做轻量 Markdown 更新，不再二次延迟输出。 */
 const displayed = ref('');
-let timer: number | null = null;
-let targetLength = 0;
-
-function tick() {
-  if (targetLength < props.text.length) {
-    targetLength = Math.min(props.text.length, targetLength + 4);
-    displayed.value = props.text.slice(0, targetLength);
-  } else {
-    stop();
-  }
-}
-
-function start() {
-  if (timer !== null) return;
-  timer = window.setInterval(tick, 18);
-}
-
-function stop() {
-  if (timer !== null) {
-    window.clearInterval(timer);
-    timer = null;
-  }
-}
 
 watch(
   () => props.text,
   () => {
-    if (props.active) {
-      // 流式：继续逐字揭示；若首次到达则启动定时器
-      if (timer === null) start();
-    } else {
-      // 结束：一次性补全
-      displayed.value = props.text;
-      stop();
-    }
+    displayed.value = props.text;
   },
   { immediate: true },
 );
-
-onUnmounted(stop);
 </script>
 
 <template>
   <div class="thinking-block" :class="{ active }">
     <div v-if="displayed" class="thinking-label">
-      <span class="pulse-dot" /> 思考过程
+      <span class="pulse-dot" /> 执行摘要
     </div>
     <MarkdownRenderer :content="displayed" is-streaming />
-    <span v-if="active && targetLength < text.length" class="typing-cursor" />
+    <span v-if="active" class="typing-cursor" />
   </div>
 </template>
 

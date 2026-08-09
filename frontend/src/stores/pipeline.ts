@@ -2,6 +2,22 @@ import { defineStore } from 'pinia';
 import { pipelineApi } from '../api/pipeline';
 import type { PipelineDetail, PipelineStatus } from '../types/agentPipeline';
 import { useProjectStore } from './project';
+import { adaptPPTAgentEvent } from '../services/pptAgentEventAdapter';
+
+const RENDER_MODES = new Set(['semantic', 'hybrid', 'absolute']);
+
+function isCompleteSlidePatch(value: unknown): value is Record<string, any> {
+  if (!value || typeof value !== 'object') return false;
+  const slide = value as Record<string, any>;
+  return typeof slide.id === 'string'
+    && typeof slide.title === 'string'
+    && typeof slide.purpose === 'string'
+    && Array.isArray(slide.body)
+    && Array.isArray(slide.blocks)
+    && typeof slide.speaker_notes === 'string'
+    && Array.isArray(slide.elements)
+    && RENDER_MODES.has(String(slide.render_mode || ''));
+}
 
 /** 流水线时间线条目（SSE 事件与历史事件统一） */
 export interface PipelineTimelineItem {
@@ -18,8 +34,19 @@ export const usePipelineStore = defineStore('pipeline', {
     error: '',
     pauseLoading: false,
     resumeLoading: false,
-    /** agent_key → 累计思考文本（单调累加，不受 project.pipelineEvents 裁剪影响） */
+    /** legacy thought text, isolated by run/agent key for old history consumers */
     thoughts: {} as Record<string, string>,
+    /** run/agent scoped visible execution summaries */
+    statusTexts: {} as Record<string, string>,
+    statusRunIds: {} as Record<string, string>,
+    draftArtifact: null as Record<string, any> | null,
+    draftRunId: '' as string,
+    draftCourseId: '' as string,
+    draftTaskId: '' as string,
+    processedEventIds: new Set<number>(),
+    canonicalEvents: [] as ReturnType<typeof adaptPPTAgentEvent>[],
+    selectedSlideIds: [] as string[],
+    requestEpoch: 0,
   }),
   getters: {
     run: state => state.detail?.run ?? null,
@@ -55,33 +82,133 @@ export const usePipelineStore = defineStore('pipeline', {
     agentThoughts(): Record<string, string> {
       return this.thoughts;
     },
+    agentStatusTexts(): Record<string, string> {
+      return this.statusTexts;
+    },
   },
   actions: {
     /** 从历史（detail.events）重建思考文本（刷新恢复） */
     restoreThoughtsFromHistory() {
+      const terminalRun = ['completed', 'failed', 'cancelled'].includes(this.status);
       const apply = (type: string, data: Record<string, any>) => {
         if (type !== 'agent_thought_chunk' || !data.agent_key) return;
-        const prev = this.thoughts[data.agent_key] || '';
+        const key = `${data.run_id || 'legacy'}:${data.agent_key}`;
+        const prev = this.thoughts[key] || '';
         const text = String(data.text || '');
-        if (!prev.includes(text)) this.thoughts[data.agent_key] = prev + text;
+        if (!prev.includes(text)) this.thoughts[key] = prev + text;
       };
-      for (const item of this.detail?.events ?? []) apply(item.event_type, item.data);
+      for (const item of this.detail?.events ?? []) {
+        this.processedEventIds.add(item.id);
+        apply(item.event_type, item.data);
+        // Historical page patches belong to a draft that was already finalized.
+        // Replaying them after refresh makes an old intermediate slide replace
+        // the authoritative artifact for a few seconds.
+        if (!(terminalRun && item.event_type === 'artifact_patch')) {
+          this.applyStreamEvent(item.event_type, item.data);
+        }
+      }
+      if (terminalRun) this.draftArtifact = null;
     },
     /** 把 project store 收件箱的实时思考增量单调累加（幂等：已累加过的片段跳过） */
     syncThoughts() {
       const project = useProjectStore();
+      const activeRunId = String(this.run?.generation_run_id || '');
+      // SSE reconnect replays course-wide history. Until Pipeline Detail tells
+      // us which run owns this workspace, no historical event may mutate the
+      // active draft or the user will briefly see an old presentation.
+      if (!activeRunId) return;
       for (const ev of project.pipelineEvents) {
-        if (ev.type !== 'agent_thought_chunk' || !ev.data.agent_key) continue;
-        const prev = this.thoughts[ev.data.agent_key] || '';
-        const text = String(ev.data.text || '');
-        if (!prev.includes(text)) this.thoughts[ev.data.agent_key] = prev + text;
+        if (this.processedEventIds.has(ev.event_id)) continue;
+        const eventRunId = String(ev.data.run_id || '');
+        if (eventRunId && eventRunId !== activeRunId) {
+          this.processedEventIds.add(ev.event_id);
+          continue;
+        }
+        this.processedEventIds.add(ev.event_id);
+        if (ev.type === 'agent_thought_chunk' && ev.data.agent_key) {
+          const key = `${ev.data.run_id || 'legacy'}:${ev.data.agent_key}`;
+          const prev = this.thoughts[key] || '';
+          const text = String(ev.data.text || '');
+          if (!prev.includes(text)) this.thoughts[key] = prev + text;
+        }
+        if (ev.type !== 'agent_thought_chunk') this.applyStreamEvent(ev.type, ev.data);
+        this.canonicalEvents.push(adaptPPTAgentEvent(ev.type, ev.data, ev.event_id));
+        if (this.canonicalEvents.length > 800) this.canonicalEvents.splice(0, this.canonicalEvents.length - 800);
+      }
+    },
+    applyStreamEvent(type: string, data: Record<string, any>) {
+      const activeRunId = String(this.run?.generation_run_id || '');
+      const eventRunId = String(data.run_id || '');
+      if (activeRunId && eventRunId && eventRunId !== activeRunId) return;
+      const runId = eventRunId || activeRunId;
+      const agentKey = String(data.agent_key || '');
+      if (this.detail?.run && ['task_paused', 'run.paused'].includes(type)) {
+        this.detail.run.status = 'paused';
+      } else if (this.detail?.run && ['task_resumed', 'run.resumed'].includes(type)) {
+        this.detail.run.status = 'queued';
+      } else if (this.detail?.run && ['pipeline_completed', 'run.completed'].includes(type)) {
+        this.detail.run.status = 'completed';
+      } else if (this.detail?.run && ['pipeline_failed', 'run.failed'].includes(type)) {
+        this.detail.run.status = 'failed';
+        this.clearDraft();
+      } else if (this.detail?.run && type === 'run.cancelled') {
+        this.detail.run.status = 'cancelled';
+        this.clearDraft();
+      }
+      if (type === 'pipeline_started' && runId) {
+        for (const key of Object.keys(this.statusTexts)) {
+          if (this.statusRunIds[key] !== runId) delete this.statusTexts[key];
+        }
+        this.clearDraft();
+      }
+      if (agentKey && type === 'agent_status_delta') {
+        this.statusTexts[agentKey] = `${this.statusRunIds[agentKey] === runId ? this.statusTexts[agentKey] || '' : ''}${String(data.text || '')}`;
+        this.statusRunIds[agentKey] = runId;
+      } else if (agentKey && type === 'agent_status_completed') {
+        this.statusTexts[agentKey] = String(data.text || this.statusTexts[agentKey] || '');
+        this.statusRunIds[agentKey] = runId;
+      }
+      if (type === 'artifact_patch' && data.patch) {
+        if (['completed', 'failed', 'cancelled'].includes(this.status)) return;
+        const project = useProjectStore();
+        const currentTask = project.currentTask;
+        if (!currentTask
+          || String(data.course_id || currentTask.course_id) !== currentTask.course_id
+          || String(data.task_id || currentTask.id) !== currentTask.id
+          || runId !== String(this.run?.generation_run_id || '')) return;
+        const draft = { ...(this.draftArtifact || {}), slides: [...((this.draftArtifact?.slides as any[]) || [])] } as Record<string, any>;
+        let applied = false;
+        for (const operation of data.patch as Array<Record<string, any>>) {
+          const match = typeof operation.path === 'string' && operation.path.match(/^\/slides\/(\d+)$/);
+          if (match && ['add', 'replace'].includes(String(operation.op)) && isCompleteSlidePatch(operation.value)) {
+            draft.slides[Number(match[1])] = operation.value;
+            applied = true;
+          }
+        }
+        if (!applied) return;
+        draft.last_patch = data.patch;
+        draft.artifact_id = data.artifact_id;
+        draft.artifact_type = data.artifact_type;
+        this.draftArtifact = draft;
+        this.draftRunId = runId;
+        this.draftCourseId = currentTask.course_id;
+        this.draftTaskId = currentTask.id;
       }
     },
     async load(courseId: string, taskType: string) {
+      const epoch = ++this.requestEpoch;
       this.loading = true;
       this.error = '';
       try {
-        this.detail = await pipelineApi.get(courseId, taskType);
+        const detail = await pipelineApi.get(courseId, taskType);
+        if (epoch !== this.requestEpoch) return null;
+        const project = useProjectStore();
+        const activeRunId = project.currentTask?.active_run_id;
+        if (activeRunId && detail.run?.generation_run_id !== activeRunId) {
+          this.error = '流水线快照尚未对齐当前任务，正在重新同步。';
+          return null;
+        }
+        this.detail = detail;
         return this.detail;
       } catch (cause: any) {
         this.error = cause?.message || '流水线详情加载失败';
@@ -94,7 +221,7 @@ export const usePipelineStore = defineStore('pipeline', {
       this.pauseLoading = true;
       try {
         const result = await pipelineApi.pause(courseId, taskType);
-        if (this.detail?.run) this.detail.run.status = 'paused';
+        if (this.detail?.run) this.detail.run.status = result.status === 'paused' ? 'paused' : 'pausing';
         return result;
       } finally {
         this.pauseLoading = false;
@@ -113,6 +240,35 @@ export const usePipelineStore = defineStore('pipeline', {
     reset() {
       this.detail = null;
       this.error = '';
+      this.thoughts = {};
+      this.statusTexts = {};
+      this.statusRunIds = {};
+      this.draftArtifact = null;
+      this.draftRunId = '';
+      this.draftCourseId = '';
+      this.draftTaskId = '';
+      this.processedEventIds = new Set<number>();
+      this.canonicalEvents = [];
+      this.selectedSlideIds = [];
+    },
+    beginRun() {
+      this.detail = null;
+      this.error = '';
+      this.thoughts = {};
+      this.statusTexts = {};
+      this.statusRunIds = {};
+      this.draftArtifact = null;
+      this.draftRunId = '';
+      this.draftCourseId = '';
+      this.draftTaskId = '';
+      this.processedEventIds = new Set<number>();
+      this.canonicalEvents = [];
+    },
+    clearDraft() {
+      this.draftArtifact = null;
+      this.draftRunId = '';
+      this.draftCourseId = '';
+      this.draftTaskId = '';
     },
   },
 });

@@ -2,7 +2,7 @@
 import { computed, defineComponent, h, onBeforeUnmount, ref, watchEffect, type PropType } from 'vue';
 import { api } from '../../api/client';
 import type { ExerciseContent, ExerciseQuestion, ExerciseQuestionGroup, ExerciseStimulus } from '../../types';
-import { Check, Clock, Document, Reading, Star, Warning } from '@element-plus/icons-vue';
+import { Check, Clock, Document, Reading, Star, Warning, Printer, EditPen } from '@element-plus/icons-vue';
 
 const props = defineProps<{
   content: ExerciseContent;
@@ -11,6 +11,7 @@ const props = defineProps<{
 
 const mode = ref<'student' | 'teacher'>('teacher');
 const assetUrls = ref<Record<string, string>>({});
+const studentAnswers = ref<Record<string, string>>({});
 
 const questionTypeLabels: Record<string, string> = {
   single_choice: '单选题',
@@ -21,6 +22,22 @@ const questionTypeLabels: Record<string, string> = {
   calculation: '计算题',
   case_analysis: '案例分析',
   practical_task: '实践任务',
+};
+
+const cognitiveLabels: Record<string, { label: string; class: string }> = {
+  remember: { label: '记忆识记', class: 'cog-remember' },
+  understand: { label: '理解领会', class: 'cog-understand' },
+  apply: { label: '应用实践', class: 'cog-apply' },
+  analyze: { label: '分析关联', class: 'cog-analyze' },
+  transfer: { label: '迁移创新', class: 'cog-transfer' },
+  evaluate: { label: '评价反思', class: 'cog-evaluate' },
+  create: { label: '创造设计', class: 'cog-create' },
+};
+
+const difficultyLabels: Record<string, { label: string; class: string }> = {
+  basic: { label: '基础巩固', class: 'diff-basic' },
+  core: { label: '核心应用', class: 'diff-core' },
+  advanced: { label: '迁移挑战', class: 'diff-advanced' },
 };
 
 const ExerciseQuestionView = defineComponent({
@@ -35,12 +52,17 @@ const ExerciseQuestionView = defineComponent({
       || componentProps.item.answer_key.accepted_answers.join('、')
       || componentProps.item.answer_key.reference_answer;
 
+    const diffInfo = computed(() => difficultyLabels[componentProps.item.difficulty] || { label: '综合练习', class: 'diff-core' });
+    const cogInfo = computed(() => cognitiveLabels[componentProps.item.cognitive_level] || { label: '理解应用', class: 'cog-understand' });
+
     return () => h('article', { class: 'fancy-question-card' }, [
       // Card Header
       h('header', { class: 'fancy-q-header' }, [
         h('div', { class: 'q-header-left' }, [
           h('span', { class: 'q-number-badge' }, String(componentProps.number).padStart(2, '0')),
           h('span', { class: 'q-type-chip' }, questionTypeLabels[componentProps.item.question_type] || '练习题'),
+          h('span', { class: `q-diff-badge ${diffInfo.value.class}` }, diffInfo.value.label),
+          h('span', { class: `q-cog-badge ${cogInfo.value.class}` }, cogInfo.value.label),
           h('span', { class: 'q-score-chip' }, `${componentProps.item.score} 分`),
           h('span', { class: 'q-time-chip' }, `⏱ ${componentProps.item.estimated_minutes} 分钟`),
         ]),
@@ -56,17 +78,41 @@ const ExerciseQuestionView = defineComponent({
 
       // Options (if choice question)
       componentProps.item.options.length
-        ? h('div', { class: 'fancy-options-grid' }, componentProps.item.options.map(option => h('div', { key: option.id, class: 'fancy-option-item' }, [
-            h('span', { class: 'opt-letter' }, option.id),
-            h('span', { class: 'opt-text' }, option.text),
-          ])))
+        ? h('div', { class: 'fancy-options-grid' }, componentProps.item.options.map(option => {
+            const isSelected = studentAnswers.value[componentProps.item.id] === option.id;
+            return h('div', {
+              key: option.id,
+              class: ['fancy-option-item', isSelected ? 'is-selected' : ''],
+              onClick: () => {
+                if (!componentProps.teacher) {
+                  studentAnswers.value[componentProps.item.id] = option.id;
+                }
+              }
+            }, [
+              h('span', { class: 'opt-letter' }, option.id),
+              h('span', { class: 'opt-text' }, option.text),
+            ]);
+          }))
         : null,
 
       // Student Answer Space
       !componentProps.teacher && componentProps.item.answer_space.mode !== 'none'
         ? h('div', { class: 'fancy-answer-space' }, [
-            h('span', { class: 'space-label' }, '【请在此处书写解答】'),
-            ...Array.from({ length: Math.max(1, componentProps.item.answer_space.lines || componentProps.item.answer_space.blank_rows) }, (_, index) => h('i', { key: index, class: 'space-line' })),
+            h('div', { class: 'space-header' }, [
+              h('span', { class: 'space-label' }, '✍️ 学生作答区')
+            ]),
+            componentProps.item.options.length ? null : h('textarea', {
+              class: 'student-textarea-input',
+              rows: Math.max(3, componentProps.item.answer_space.lines || componentProps.item.answer_space.blank_rows || 3),
+              placeholder: '请在此输入解答思路与步骤...',
+              value: studentAnswers.value[componentProps.item.id] || '',
+              onInput: (e: Event) => {
+                studentAnswers.value[componentProps.item.id] = (e.target as HTMLTextAreaElement).value;
+              }
+            }),
+            h('div', { class: 'paper-print-ruled-lines' },
+              Array.from({ length: Math.max(2, componentProps.item.answer_space.lines || componentProps.item.answer_space.blank_rows || 2) }, (_, index) => h('i', { key: index, class: 'ruled-line' }))
+            )
           ])
         : null,
 
@@ -84,7 +130,7 @@ const ExerciseQuestionView = defineComponent({
         componentProps.item.analysis
           ? h('div', { class: 'teacher-callout analysis-callout' }, [
               h('div', { class: 'callout-title' }, [
-                h('span', { class: 'callout-badge violet' }, '💡 详细解析'),
+                h('span', { class: 'callout-badge violet' }, '💡 详细解析与思路引导'),
               ]),
               h('p', { class: 'callout-body' }, componentProps.item.analysis),
             ])
@@ -94,7 +140,7 @@ const ExerciseQuestionView = defineComponent({
         componentProps.item.scoring_points.length
           ? h('div', { class: 'teacher-callout rubric-callout' }, [
               h('div', { class: 'callout-title' }, [
-                h('span', { class: 'callout-badge blue' }, '📝 评分得分点'),
+                h('span', { class: 'callout-badge blue' }, '📝 阶梯得分点与采分标准'),
               ]),
               h('ul', { class: 'rubric-list' }, componentProps.item.scoring_points.map(point => h('li', { key: point.id }, [
                 h('span', { class: 'rubric-pts' }, `+${point.points}分`),
@@ -108,7 +154,7 @@ const ExerciseQuestionView = defineComponent({
         componentProps.item.common_errors.length
           ? h('div', { class: 'teacher-callout warning-callout' }, [
               h('div', { class: 'callout-title' }, [
-                h('span', { class: 'callout-badge amber' }, '⚠️ 常见易错点与防坑提示'),
+                h('span', { class: 'callout-badge amber' }, '⚠️ 常见易错点与避坑策略'),
               ]),
               h('p', { class: 'callout-body' }, componentProps.item.common_errors.join('；')),
             ])
@@ -157,10 +203,25 @@ function visualStatus(stimulus: ExerciseStimulus) {
   if (status === 'reviewing') return '配图复核中';
   return '配图准备中';
 }
+
+function handlePrint() {
+  window.print();
+}
 </script>
 
 <template>
   <article class="fancy-exercise-paper">
+    <!-- Quick Print Control Bar -->
+    <div class="print-control-bar no-print">
+      <div class="control-left">
+        <span class="control-badge">🎯 梯度精选试题集</span>
+        <span class="control-hint">点击模式按钮切换学生作答卡与教师讲评版</span>
+      </div>
+      <el-button type="primary" size="small" :icon="Printer" class="print-btn" @click="handlePrint">
+        打印 / 导出 PDF 卷面
+      </el-button>
+    </div>
+
     <!-- Header Banner -->
     <header class="fancy-paper-header">
       <div class="header-main-info">
@@ -169,27 +230,27 @@ function visualStatus(stimulus: ExerciseStimulus) {
         </span>
         <h1 class="paper-title">{{ content.paper_settings.title }}</h1>
         <div class="paper-meta-row">
-          <span class="meta-tag">{{ content.course_info.subject }}</span>
-          <span class="meta-tag">{{ content.course_info.grade_level || content.course_info.audience }}</span>
+          <span class="meta-tag subject-tag">{{ content.course_info.subject }}</span>
+          <span class="meta-tag grade-tag">{{ content.course_info.grade_level || content.course_info.audience }}</span>
         </div>
       </div>
 
       <!-- Mode Switcher Pill -->
-      <div class="mode-switch-wrapper">
+      <div class="mode-switch-wrapper no-print">
         <div class="mode-switch-pill" role="tablist">
           <button
             type="button"
             :class="{ active: mode === 'student' }"
             @click="mode = 'student'"
           >
-            学生答题模式
+            <el-icon><EditPen /></el-icon> 学生答题卷
           </button>
           <button
             type="button"
             :class="{ active: mode === 'teacher' }"
             @click="mode = 'teacher'"
           >
-            教师解析模式
+            <el-icon><Reading /></el-icon> 教师讲评卷
           </button>
         </div>
       </div>
@@ -307,14 +368,45 @@ function visualStatus(stimulus: ExerciseStimulus) {
 </template>
 
 <style scoped>
+<style scoped>
 .fancy-exercise-paper {
-  max-width: 920px;
+  max-width: 960px;
   margin: 0 auto;
-  padding: 32px 36px;
+  padding: 32px 40px;
   color: var(--text-primary, #0f172a);
   background: #ffffff;
   font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", sans-serif;
   box-sizing: border-box;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.04);
+  border-radius: 12px;
+}
+
+.print-control-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-bottom: 24px;
+}
+
+.control-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.control-badge {
+  font-size: 13px;
+  font-weight: 700;
+  color: #4338ca;
+}
+
+.control-hint {
+  font-size: 12px;
+  color: #64748b;
 }
 
 .fancy-paper-header {
@@ -353,10 +445,23 @@ function visualStatus(stimulus: ExerciseStimulus) {
 .meta-tag {
   font-size: 11px;
   font-weight: 700;
-  color: #64748b;
-  background: #f1f5f9;
   padding: 2px 10px;
   border-radius: 999px;
+}
+
+.subject-tag {
+  color: #4338ca;
+  background: #e0e7ff;
+}
+
+.grade-tag {
+  color: #0284c7;
+  background: #e0f2fe;
+}
+
+.unit-tag {
+  color: #059669;
+  background: #d1fae5;
 }
 
 .mode-switch-wrapper {
@@ -372,6 +477,9 @@ function visualStatus(stimulus: ExerciseStimulus) {
 }
 
 .mode-switch-pill button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   border: 0;
   padding: 6px 14px;
   border-radius: 999px;

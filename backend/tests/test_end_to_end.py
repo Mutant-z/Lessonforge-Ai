@@ -36,10 +36,10 @@ async def test_full_api_generation_and_export(client, auth_headers):
     await schedule_ready_tasks(course["id"])
     for _ in range(200):
         project = (await client.get(f"/api/v1/courses/{course['id']}/project", headers=auth_headers)).json()
-        if all(task["status"] in {"review", "approved", "stale", "failed"} for task in project["tasks"]):
+        if all(task["status"] in {"review", "approved", "stale", "failed", "ready_to_generate"} for task in project["tasks"]):
             break
         await asyncio.sleep(0.02)
-    assert all(task["status"] in {"review", "approved", "stale"} for task in project["tasks"]), project
+    assert all(task["status"] in {"review", "approved", "stale", "ready_to_generate"} for task in project["tasks"]), project
     assert project["quality"]["score"] is not None, project
     artifacts = await client.get(f"/api/v1/courses/{course['id']}/artifacts", headers=auth_headers)
     assert {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report", "citation_report"} <= {x["artifact_type"] for x in artifacts.json()}

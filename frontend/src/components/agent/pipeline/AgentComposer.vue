@@ -2,11 +2,15 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { Close, Loading, MagicStick, Promotion, VideoPause } from '@element-plus/icons-vue';
 import ModelSelector from '../ModelSelector.vue';
+import { isImageGenerationInstruction } from '../../../utils/imageModelSelection';
 
 const props = defineProps<{
   targetSlide?: number | null;
+  targetSlides?: number[];
   isRunning?: boolean;
   modelConfigId?: string | null;
+  imageModelConfigId?: string | null;
+  imageModelAvailableCount?: number;
   pauseLoading?: boolean;
 }>();
 
@@ -15,6 +19,8 @@ const emit = defineEmits<{
   (e: 'pause'): void;
   (e: 'clear-target-slide'): void;
   (e: 'change-model', modelId: string): void;
+  (e: 'change-image-model', modelId: string): void;
+  (e: 'image-model-required'): void;
 }>();
 
 const input = ref('');
@@ -49,7 +55,6 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 function applyQuickPrompt(promptText: string) {
-  if (props.isRunning) return;
   if (input.value.trim()) {
     input.value = `${input.value.trim()}，${promptText}`;
   } else {
@@ -69,12 +74,30 @@ function handleButtonClick() {
   handleSubmit();
 }
 
+function handleGenerateImage() {
+  if (props.isRunning) return;
+  
+  // 特殊指令触发图片生成
+  const imagePrompt = '生成一张高清图片，风格专业，适合PPT插入';
+  const finalText = `[图片生成] ${imagePrompt}`;
+  
+  emit('send', finalText);
+  input.value = '';
+  adjustHeight();
+}
+
 function handleSubmit() {
   const rawText = input.value.trim();
-  if (!rawText || props.isRunning) return;
+  if (!rawText) return;
+  if (isImageGenerationInstruction(rawText) && !props.imageModelConfigId) {
+    emit('image-model-required');
+    return;
+  }
 
   let finalText = rawText;
-  if (props.targetSlide !== undefined && props.targetSlide !== null && props.targetSlide >= 0) {
+  if (props.targetSlides?.length) {
+    finalText = `[针对第 ${props.targetSlides.map(index => index + 1).join('、')} 页] ${rawText}`;
+  } else if (props.targetSlide !== undefined && props.targetSlide !== null && props.targetSlide >= 0) {
     finalText = `[针对第 ${props.targetSlide + 1} 页] ${rawText}`;
   }
 
@@ -102,7 +125,6 @@ function clearSlideTarget() {
             :key="chip"
             type="button"
             class="quick-chip-btn"
-            :disabled="isRunning"
             @click="applyQuickPrompt(chip)"
           >
             + {{ chip }}
@@ -111,9 +133,10 @@ function clearSlideTarget() {
       </div>
 
       <!-- Active Target Slide Context Chip -->
-      <div v-if="targetSlide !== undefined && targetSlide !== null && targetSlide >= 0" class="slide-target-chip">
+      <div v-if="targetSlides?.length || (targetSlide !== undefined && targetSlide !== null && targetSlide >= 0)" class="slide-target-chip">
         <span class="chip-dot" />
-        <span>已定位：<strong>第 {{ targetSlide + 1 }} 页</strong></span>
+        <span v-if="targetSlides?.length">修改范围：<strong>{{ targetSlides.map(index => index + 1).join('、') }} 页</strong></span>
+        <span v-else>已定位：<strong>第 {{ (targetSlide ?? 0) + 1 }} 页</strong></span>
         <button type="button" class="clear-target-btn" title="清除页面定位" @click="clearSlideTarget">
           <el-icon><Close /></el-icon>
         </button>
@@ -125,8 +148,7 @@ function clearSlideTarget() {
           ref="inputRef"
           v-model="input"
           rows="2"
-          :disabled="isRunning"
-          :placeholder="isRunning ? 'Agent 正在推演 PPT 页面，请稍候…' : (targetSlide !== undefined && targetSlide !== null && targetSlide >= 0 ? `详细描述您希望如何修改 第 ${targetSlide + 1} 页 PPT 课件…` : '详细描述您希望如何修改 PPT 课件…')"
+          :placeholder="isRunning ? 'Agent 正在推演；输入新要求后可加入执行队列…' : (targetSlide !== undefined && targetSlide !== null && targetSlide >= 0 ? `详细描述您希望如何修改 第 ${targetSlide + 1} 页 PPT 课件…` : '详细描述您希望如何修改 PPT 课件…')"
           @keydown="onKeydown"
         />
       </div>
@@ -137,13 +159,42 @@ function clearSlideTarget() {
           <ModelSelector
             :model-value="modelConfigId || null"
             compact
-            label=""
+            label="文本"
             :disabled="isRunning"
             @change="emit('change-model', $event)"
           />
+          <ModelSelector
+            :model-value="imageModelConfigId || null"
+            capability="image_generation"
+            compact
+            label="绘图"
+            :disabled="isRunning"
+            @change="emit('change-image-model', $event)"
+          />
+          <RouterLink
+            v-if="!imageModelConfigId"
+            class="image-model-warning"
+            to="/settings"
+            title="图片生成采用严格模式；请先配置并选择具备 image_generation 能力的模型"
+          >
+            {{ imageModelAvailableCount ? '请选择图片模型' : '未配置图片模型' }}
+          </RouterLink>
         </div>
         <div class="bottom-right">
           <span class="tip-key">Shift+Enter 换行</span>
+<button v-if="isRunning && input.trim()" type="button" class="queue-btn" @click="handleSubmit">
+  加入队列
+</button>
+<button 
+  v-if="!isRunning && !props.imageModelConfigId" 
+  type="button" 
+  class="send-circle-btn"
+  @click="handleGenerateImage()"
+  title="一键生成图片"
+>
+  <el-icon><Picture /></el-icon>
+</button>
+
           <button
             type="button"
             class="send-circle-btn"
@@ -320,6 +371,30 @@ function clearSlideTarget() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.bottom-left {
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.bottom-left::-webkit-scrollbar {
+  display: none;
+}
+
+.image-model-warning {
+  flex-shrink: 0;
+  color: #b45309;
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.image-model-warning:hover {
+  color: #92400e;
+  text-decoration: underline;
 }
 
 .tip-key {

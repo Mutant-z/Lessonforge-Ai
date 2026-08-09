@@ -26,8 +26,10 @@ from app.models.entities import (
     QualityIssue,
     QualityReport,
     User,
+    ArtifactAsset,
 )
 from app.services.course_task_service import (
+    CONTENT_TASK_TYPES,
     TASK_SPEC_BY_TYPE,
     create_task_run,
     ensure_course_tasks,
@@ -50,6 +52,10 @@ router = APIRouter(tags=["课程项目任务"])
 
 class TaskRunRequest(BaseModel):
     action: str = "retry"
+    resolution: str = "1920x1080"
+    voice_style: str = "natural"
+    subtitle_enabled: bool = True
+    background_music_enabled: bool = False
 
 
 class TaskMessageRequest(BaseModel):
@@ -60,6 +66,27 @@ class TaskModelRequest(BaseModel):
     model_config_id: str | None = None
     image_model_config_id: str | None = None
     vision_model_config_id: str | None = None
+    video_model_config_id: str | None = None
+    speech_model_config_id: str | None = None
+
+
+async def _course_event_cursor(db: AsyncSession, course_id: str) -> int:
+    """Return the durable cursor preceding a course/task snapshot.
+
+    Events committed after this read are intentionally replayed by SSE; events
+    at or before it are already represented by the authoritative snapshot.
+    """
+    value = await db.scalar(
+        select(func.max(GenerationEvent.id))
+        .join(GenerationRun, GenerationRun.id == GenerationEvent.run_id)
+        .where(GenerationRun.course_id == course_id)
+    )
+    return int(value or 0)
+
+
+def _generation_event_payload(row: GenerationEvent) -> dict:
+    """Build a canonical SSE envelope whose durable sequence cannot be spoofed."""
+    return {**(row.data_json or {}), "event_id": row.id, "sequence": row.id}
 
 
 async def _owned_task(course_id: str, task_type: str, user: User, db: AsyncSession):
@@ -104,6 +131,8 @@ async def _quality_summary(db, course_id: str):
 @router.get("/courses/{course_id}/project")
 async def get_project(course_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     course = await owned_course(course_id, user, db)
+    event_cursor = await _course_event_cursor(db, course_id)
+    snapshot_at = datetime.now(timezone.utc).isoformat()
     tasks = await ensure_course_tasks(db, course_id)
     requirement = await db.scalar(select(CourseRequirement).where(
         CourseRequirement.course_id == course_id,
@@ -117,6 +146,8 @@ async def get_project(course_id: str, user: User = Depends(current_user), db: As
     ).order_by(GenerationRun.created_at.desc()))
     await db.commit()
     return {
+        "event_cursor": event_cursor,
+        "snapshot_at": snapshot_at,
         "course": course,
         "intent": intent_summary(course, requirement),
         "planning": {
@@ -171,6 +202,9 @@ async def list_tasks(course_id: str, user: User = Depends(current_user), db: Asy
 
 @router.get("/courses/{course_id}/tasks/{task_type}")
 async def get_task(course_id: str, task_type: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    await owned_course(course_id, user, db)
+    event_cursor = await _course_event_cursor(db, course_id)
+    snapshot_at = datetime.now(timezone.utc).isoformat()
     task = await _owned_task(course_id, task_type, user, db)
     course = await owned_course(course_id, user, db)
     rows = list(await db.scalars(select(AgentMessage).where(
@@ -183,6 +217,8 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
     ))
     _, config = await resolve_provider(db, user.id, (chat_session.model_config_id if chat_session else None) or course.model_config_id)
     payload = await task_payload(db, task)
+    payload["event_cursor"] = event_cursor
+    payload["snapshot_at"] = snapshot_at
     payload["messages"] = [{
         "id": row.id,
         "role": row.role,
@@ -195,12 +231,44 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
     payload["model_config_id"] = config.id if config else None
     payload["image_model_config_id"] = chat_session.image_model_config_id if chat_session else None
     payload["vision_model_config_id"] = chat_session.vision_model_config_id if chat_session else None
+    payload["video_model_config_id"] = chat_session.video_model_config_id if chat_session else None
+    payload["speech_model_config_id"] = chat_session.speech_model_config_id if chat_session else None
     return payload
 
 
 @router.post("/courses/{course_id}/tasks/{task_type}/runs", status_code=202)
 async def run_task(course_id: str, task_type: str, payload: TaskRunRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     task = await _owned_task(course_id, task_type, user, db)
+    if task_type == "video_generation":
+        if payload.action == "cancel":
+            if not task.active_run_id:
+                raise HTTPException(409, "当前视频任务没有正在运行的任务")
+            from app.services.video_generation_service import cancel_video_provider_jobs
+            await cancel_video_provider_jobs(db, task)
+            job = task_jobs.get(task.active_run_id)
+            if job:
+                job.cancel()
+            else:
+                run = await db.get(GenerationRun, task.active_run_id)
+                if run:
+                    run.status = "cancelled"
+                    run.finished_at = datetime.now(timezone.utc)
+                task.status = "cancelled"
+                task.active_run_id = None
+                await db.commit()
+            return {"task_id": task.id, "status": "cancelled"}
+        if payload.action not in {"initial", "retry", "recompose", "sync_dependencies"}:
+            raise HTTPException(422, "视频生成不支持该任务操作")
+        from app.schemas.video import VideoGenerationRunRequest
+        from app.services.video_generation_service import create_video_generation_run
+        try:
+            request = VideoGenerationRunRequest.model_validate(payload.model_dump())
+            run = await create_video_generation_run(db, task, request)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await db.commit()
+        start_task_run(run.id)
+        return {"run_id": run.id, "task_id": task.id, "status": "queued"}
     allowed = {"initial", "retry", "sync_dependencies", "sync_context"}
     if payload.action not in allowed:
         raise HTTPException(422, "不支持的任务操作")
@@ -256,6 +324,15 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
         status="pending",
     )
     db.add(message)
+    if task_type == "video_generation":
+        from app.services.video_generation_service import create_video_instruction_run
+        try:
+            run = await create_video_instruction_run(db, task, message)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        await db.commit()
+        start_task_run(run.id)
+        return {"message_id": message.id, "run_id": run.id, "task_id": task.id, "status": "queued"}
     try:
         run = await create_task_run(db, task, "message", message)
     except ValueError as exc:
@@ -268,7 +345,10 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
 @router.patch("/courses/{course_id}/tasks/{task_type}/model")
 async def change_task_model(course_id: str, task_type: str, payload: TaskModelRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await _owned_task(course_id, task_type, user, db)
-    if not any((payload.model_config_id, payload.image_model_config_id, payload.vision_model_config_id)):
+    if not any((
+        payload.model_config_id, payload.image_model_config_id, payload.vision_model_config_id,
+        payload.video_model_config_id, payload.speech_model_config_id,
+    )):
         raise HTTPException(422, "至少选择一种模型配置")
     session = await db.scalar(select(AgentChatSession).where(
         AgentChatSession.course_id == course_id,
@@ -290,11 +370,23 @@ async def change_task_model(course_id: str, task_type: str, payload: TaskModelRe
         if "vision_review" not in (vision_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明视觉复核能力")
         session.vision_model_config_id = vision_config.id
+    if payload.video_model_config_id:
+        video_config = await owned_model_config(db, user.id, payload.video_model_config_id)
+        if "video_generation" not in (video_config.capabilities_json or []):
+            raise HTTPException(422, "所选模型未声明视频生成能力")
+        session.video_model_config_id = video_config.id
+    if payload.speech_model_config_id:
+        speech_config = await owned_model_config(db, user.id, payload.speech_model_config_id)
+        if "speech_generation" not in (speech_config.capabilities_json or []):
+            raise HTTPException(422, "所选模型未声明语音生成能力")
+        session.speech_model_config_id = speech_config.id
     await db.commit()
     return {
         "model_config_id": session.model_config_id,
         "image_model_config_id": session.image_model_config_id,
         "vision_model_config_id": session.vision_model_config_id,
+        "video_model_config_id": session.video_model_config_id,
+        "speech_model_config_id": session.speech_model_config_id,
     }
 
 
@@ -304,6 +396,11 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     if not task.current_artifact_id:
         raise HTTPException(409, "任务文件尚未生成")
     artifact = await db.get(Artifact, task.current_artifact_id)
+    if task_type == "video_generation":
+        final_asset_id = ((artifact.content_json or {}).get("outputs") or {}).get("final_asset_id")
+        final_asset = await db.get(ArtifactAsset, final_asset_id) if final_asset_id else None
+        if not final_asset or final_asset.status != "approved":
+            raise HTTPException(409, "最终视频尚未通过媒体质量检查")
     if task.current_agent_profile_id and artifact.agent_profile_id != task.current_agent_profile_id:
         raise HTTPException(409, "当前文件尚未同步最新项目专属 Agent 配置")
     artifact.status = "approved"
@@ -312,7 +409,10 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     task.completed_at = datetime.now(timezone.utc)
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course_id)))
     course = await owned_course(course_id, user, db)
-    course.status = "completed" if all(item.status == "approved" for item in tasks) else "teacher_review"
+    content_ready = all(item.status == "approved" for item in tasks if item.task_type in CONTENT_TASK_TYPES)
+    video_task = next((item for item in tasks if item.task_type == "video_generation"), None)
+    video_ready = not video_task or video_task.status in {"ready_to_generate", "approved"}
+    course.status = "completed" if content_ready and video_ready else "teacher_review"
     await db.commit()
     return await task_payload(db, task)
 
@@ -323,6 +423,9 @@ async def cancel_task(course_id: str, task_type: str, user: User = Depends(curre
     if not task.active_run_id:
         raise HTTPException(409, "当前任务没有正在运行的 Agent")
     run_id = task.active_run_id
+    if task_type == "video_generation":
+        from app.services.video_generation_service import cancel_video_provider_jobs
+        await cancel_video_provider_jobs(db, task)
     job = task_jobs.get(run_id)
     if job:
         job.cancel()
@@ -368,7 +471,7 @@ async def task_events(course_id: str, request: Request, token: str, after: int =
                 ))
                 for row in rows:
                     cursor = row.id
-                    payload = {"event_id": row.id, **row.data_json}
+                    payload = _generation_event_payload(row)
                     yield f"id: {row.id}\nevent: {row.event_type}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
             now = time.monotonic()
             if rows:

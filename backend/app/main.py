@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.v1 import artifact_assets, artifacts, auth, blueprints, courses, exports, intakes, materials, ppt_pipeline, ppt_templates, projects, quality, settings
+from app.api.v1 import artifact_assets, artifacts, auth, blueprints, courses, exports, intakes, materials, ppt_agent, ppt_pipeline, ppt_templates, projects, quality, settings, video_generation
 from app.core.config import get_settings
 from app.core.database import SessionLocal, create_schema
 from app.services.project_planning_service import planning_jobs
@@ -27,11 +27,21 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
-        pending = list(planning_jobs.values()) + list(intake_tasks.values()) + list(task_jobs.values()) + list(initialization_jobs.values())
+        pending = list(dict.fromkeys(
+            list(planning_jobs.values()) + list(intake_tasks.values())
+            + list(task_jobs.values()) + list(initialization_jobs.values())
+        ))
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            # Provider calls may delay cancellation. Shutdown must remain bounded so
+            # restart/测试 teardown cannot hang behind an abandoned generation job.
+            done, still_pending = await asyncio.wait(pending, timeout=3)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+            for task in still_pending:
+                task.cancel()
 
 
 app = FastAPI(title="LessonForge AI API", version="0.1.0", lifespan=lifespan)
@@ -46,6 +56,11 @@ async def request_id(request: Request, call_next):
     except Exception:
         response = JSONResponse(status_code=500, content={"detail": "服务器处理请求失败", "request_id": value})
     response.headers["X-Request-ID"] = value
+    content_type = response.headers.get("content-type", "")
+    if request.method == "GET" and request.url.path.startswith("/api/v1/") and "application/json" in content_type:
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
@@ -54,5 +69,5 @@ async def health():
     return {"status": "ok", "service": "lessonforge-api"}
 
 
-for module in (auth, courses, materials, intakes, blueprints, artifacts, artifact_assets, ppt_templates, ppt_pipeline, projects, quality, exports, settings):
+for module in (auth, courses, materials, intakes, blueprints, artifacts, artifact_assets, ppt_templates, ppt_pipeline, ppt_agent, video_generation, projects, quality, exports, settings):
     app.include_router(module.router, prefix="/api/v1")

@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     app_name: str = "LessonForge AI"
     environment: str = "development"
     secret_key: str = "development-only-change-this-secret-key"
-    access_token_expire_minutes: int = 480
+    access_token_expire_minutes: int = 60 * 24 * 30  # 记住我模式默认30天
+    access_token_expire_minutes_session: int = 60 * 24  # 未记住我模式默认1天
     database_url: str = "sqlite+aiosqlite:///../storage/app.db"
     storage_root: Path = Path("../storage")
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:8080"]
@@ -20,6 +21,12 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
     llm_timeout_seconds: int = 180
     llm_max_tokens: int = 16000
+    ppt_agent_runtime_enabled: bool = True
+    ffmpeg_binary: str = ""
+    ffprobe_binary: str = ""
+    video_max_mb: int = 500
+    video_max_concurrency: int = 2
+    video_max_duration_seconds: int = 1800
     default_language: str = "zh-CN"
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
@@ -36,4 +43,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

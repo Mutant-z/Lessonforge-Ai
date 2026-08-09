@@ -1,7 +1,7 @@
 /** 多 Agent 流水线（PPT）类型：运行 / 产物图 / 工具调用 / 事件。 */
 
 export type PipelineStatus =
-  | 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  | 'queued' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
 export interface PipelineRunInfo {
   id: string;
@@ -36,6 +36,7 @@ export interface PipelineArtifact {
 
 export interface PipelineToolCall {
   id: string;
+  model_call_id?: string;
   agent_key: string;
   tool_name: string;
   input: Record<string, unknown>;
@@ -100,6 +101,7 @@ export const AGENT_PIPELINE_LABELS: Record<string, string> = {
 export const PIPELINE_STATUS_LABELS: Record<string, string> = {
   queued: '排队中',
   running: '运行中',
+  pausing: '暂停中',
   paused: '已暂停',
   completed: '已完成',
   failed: '失败',

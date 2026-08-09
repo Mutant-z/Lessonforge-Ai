@@ -8,7 +8,7 @@ const router = useRouter();
 </script>
 
 <template>
-  <section class="home-hero-section">
+  <section id="features" class="home-hero-section">
     <div class="hero-container">
       <!-- Left Content Column -->
       <div class="hero-left-col">
@@ -61,7 +61,7 @@ const router = useRouter();
       </div>
 
       <!-- Right Multi-Agent Interactive Workstation Demo -->
-      <div class="hero-right-col">
+      <div id="workflow" class="hero-right-col">
         <AgentWorkflowDemo />
       </div>
     </div>

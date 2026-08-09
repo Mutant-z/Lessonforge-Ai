@@ -207,19 +207,19 @@ const starterTemplates = [
 }
 
 .mini-avatar {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 
 .mini-avatar.assistant {
   background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
   color: #ffffff;
-  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.3);
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
 }
 
 .mini-avatar.user {
@@ -237,8 +237,8 @@ const starterTemplates = [
 }
 
 .message-role {
-  color: var(--text-muted, #64748b);
-  font-size: 11.5px;
+  color: #64748b;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -248,11 +248,11 @@ const starterTemplates = [
 }
 
 .welcome-card {
-  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 60%, #eef2ff 100%);
-  border: 1px solid var(--border-default, #e2e8f0);
-  border-radius: var(--radius-card, 18px);
-  padding: 16px 20px;
-  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.04);
+  background: linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #eef2ff 100%);
+  border: 1.5px solid #e2e8f0;
+  border-radius: 18px;
+  padding: 18px 22px;
+  box-shadow: 0 4px 18px rgba(15, 23, 42, 0.04);
   position: relative;
   overflow: hidden;
 }
@@ -262,28 +262,28 @@ const starterTemplates = [
 .welcome-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 14px;
+  margin-bottom: 12px;
 }
 
 .agent-avatar-badge {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 12px;
-  background: linear-gradient(135deg, #6366f1 0%, #4338ca 100%);
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
   color: #ffffff;
   display: grid;
   place-items: center;
-  font-size: 18px;
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.28);
+  font-size: 20px;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.3);
   flex-shrink: 0;
 }
 
 .header-info h3 {
   margin: 2px 0 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 800;
-  color: var(--text-primary, #0f172a);
+  color: #0f172a;
   letter-spacing: -0.01em;
 }
 
@@ -291,22 +291,23 @@ const starterTemplates = [
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
-  color: var(--primary-600, #4f46e5);
+  color: #4f46e5;
 }
 
 .version-badge {
   background: #e0e7ff;
   color: #4338ca;
   font-size: 10px;
-  padding: 1px 6px;
+  padding: 1px 7px;
   border-radius: 999px;
-  font-weight: 700;
+  font-weight: 800;
+  border: 1px solid #c7d2fe;
 }
 
 .welcome-desc {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   color: #334155;
   font-size: 13.5px;
   line-height: 1.6;
@@ -316,26 +317,33 @@ const starterTemplates = [
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .cap-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   background: #ffffff;
   border: 1px solid #c7d2fe;
   color: #4338ca;
-  padding: 4px 12px;
-  border-radius: var(--radius-pill, 999px);
-  font-size: 11.5px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  font-size: 12px;
   font-weight: 700;
   box-shadow: 0 2px 6px rgba(99, 102, 241, 0.06);
+  transition: all 180ms ease;
+}
+
+.cap-chip:hover {
+  transform: translateY(-1px);
+  background: #f5f3ff;
+  border-color: #a5b4fc;
 }
 
 .quick-starters {
-  margin-top: 10px;
-  padding-top: 12px;
+  margin-top: 12px;
+  padding-top: 14px;
   border-top: 1px dashed #cbd5e1;
 }
 
@@ -343,45 +351,51 @@ const starterTemplates = [
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--text-secondary, #334155);
-  font-size: 12px;
+  color: #334155;
+  font-size: 12.5px;
   font-weight: 800;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .starter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 1024px) {
+  .starter-grid {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
 }
 
 .starter-card {
   background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
-  padding: 10px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 12px 14px;
   text-align: left;
   cursor: pointer;
-  transition: all 200ms var(--ease-out-smooth, ease);
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .starter-card:hover {
-  border-color: #a5b4fc;
-  background: #f8fafc;
+  border-color: #4f46e5;
+  background: linear-gradient(135deg, #ffffff 0%, #f5f3ff 100%);
   transform: translateY(-2px);
-  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.1);
+  box-shadow: 0 6px 20px rgba(79, 70, 229, 0.12);
 }
 
 .card-title-line {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--primary-600, #4f46e5);
-  margin-bottom: 3px;
+  color: #4f46e5;
+  margin-bottom: 4px;
 }
 
 .card-title-line strong {
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 800;
 }
 
@@ -389,7 +403,7 @@ const starterTemplates = [
   margin: 0;
   font-size: 11.5px;
   color: #64748b;
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
 .message-bubble {
@@ -397,23 +411,21 @@ const starterTemplates = [
   padding: 12px 18px;
   font-size: 14.5px;
   line-height: 1.65;
-  /* 由 MarkdownRenderer 统一排版，禁止保留块级标签之间的换行造成大段空白 */
   white-space: normal;
   min-width: 0;
   max-width: 100%;
 }
 
-/* 整条消息一个气泡，而不是 markdown 里每个段落各成一个气泡 */
 .message.assistant .message-bubble {
   background: #ffffff;
-  border: 1px solid #e2e8f0;
+  border: 1.5px solid #e2e8f0;
   border-radius: 18px 18px 18px 4px;
-  color: var(--text-primary, #0f172a);
-  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
+  color: #0f172a;
+  box-shadow: 0 3px 14px rgba(15, 23, 42, 0.04);
 }
 
 .message.user .message-bubble {
-  background: linear-gradient(135deg, #4f46e5 0%, #4338ca 100%);
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
   border: 0;
   color: #ffffff;
   border-radius: 18px 18px 4px 18px;
@@ -421,7 +433,6 @@ const starterTemplates = [
   font-weight: 500;
 }
 
-/* 用户气泡内 markdown 文字继承白色，保证在渐变底上可读 */
 .message.user .message-bubble :deep(.markdown-rendered-body),
 .message.user .message-bubble :deep(.markdown-rendered-body) strong {
   color: #ffffff;
@@ -441,7 +452,7 @@ const starterTemplates = [
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-secondary, #334155) !important;
+  color: #334155 !important;
   font-weight: 600;
 }
 
@@ -450,7 +461,7 @@ const starterTemplates = [
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--primary-500, #6366f1);
+  background: #6366f1;
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
 }
 
@@ -458,7 +469,7 @@ const starterTemplates = [
   display: inline-block;
   width: 2.5px;
   height: 16px;
-  background: var(--primary-600, #4f46e5);
+  background: #4f46e5;
   margin-left: 4px;
   vertical-align: middle;
   animation: blink 0.9s infinite;
@@ -469,6 +480,6 @@ const starterTemplates = [
 }
 
 .failed-alert {
-  border-radius: var(--radius-control, 12px);
+  border-radius: 12px;
 }
 </style>

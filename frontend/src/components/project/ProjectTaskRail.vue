@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRouter } from 'vue-router';
-import { CircleCheck, Clock, Loading, RefreshRight, Warning } from '@element-plus/icons-vue';
+import { CircleCheck, Clock, Loading, RefreshRight, VideoCamera, Warning } from '@element-plus/icons-vue';
 import type { CourseTask } from '../../types';
 
 const props = defineProps<{ courseId: string; tasks: CourseTask[]; activeType?: string }>();
@@ -9,8 +9,11 @@ const router = useRouter();
 
 const statusMeta = computed(() => ({
   waiting_dependency: { label: '等待依赖', icon: Clock },
+  ready_to_generate: { label: '可生成', icon: VideoCamera },
   queued: { label: '排队中', icon: Clock },
   running: { label: '生成中', icon: Loading },
+  pausing: { label: '暂停中', icon: Loading },
+  paused: { label: '已暂停', icon: Clock },
   review: { label: '待确认', icon: CircleCheck },
   approved: { label: '已确认', icon: CircleCheck },
   stale: { label: '上游已更新', icon: RefreshRight },
@@ -20,6 +23,13 @@ const statusMeta = computed(() => ({
 
 function openTask(type: string) {
   router.push(`/courses/${props.courseId}/tasks/${type}`);
+}
+
+function taskStatusLabel(task: CourseTask) {
+  if (task.task_type === 'video_generation' && task.status === 'running' && task.progress >= 10) {
+    return `部分完成 ${task.progress}%`;
+  }
+  return statusMeta.value[task.status].label;
 }
 </script>
 
@@ -40,10 +50,10 @@ function openTask(type: string) {
         <span class="step-num">{{ String(task.display_order).padStart(2, '0') }}</span>
         <span class="step-name">{{ task.display_name }}</span>
         <span class="step-badge" :class="[task.status, { active: activeType === task.task_type }]">
-          <el-icon :class="{ spinning: task.status === 'running' }"><component :is="statusMeta[task.status].icon" /></el-icon>
-          <span>{{ task.agent_profile_status === 'initializing' ? '专属化中' : task.agent_profile_status === 'failed' ? '失败' : statusMeta[task.status].label }}</span>
+          <el-icon :class="{ spinning: ['running', 'pausing'].includes(task.status) }"><component :is="statusMeta[task.status].icon" /></el-icon>
+          <span>{{ task.agent_profile_status === 'initializing' ? '专属化中' : task.agent_profile_status === 'failed' ? '失败' : taskStatusLabel(task) }}</span>
         </span>
-        <span v-if="['running', 'queued'].includes(task.status) && task.progress" class="step-mini-bar" aria-hidden="true">
+        <span v-if="['running', 'queued', 'pausing'].includes(task.status) && task.progress" class="step-mini-bar" aria-hidden="true">
           <i :style="{ width: `${task.progress}%` }" />
         </span>
       </button>
@@ -165,6 +175,12 @@ function openTask(type: string) {
   border: 1px solid #bfdbfe;
 }
 
+.step-badge.ready_to_generate:not(.active) {
+  color: #002fa7;
+  background: #eef3ff;
+  border: 1px solid #b9c9f7;
+}
+
 .step-badge.stale:not(.active) {
   color: #d97706;
   background: #fffbeb;
@@ -223,5 +239,3 @@ function openTask(type: string) {
   to { transform: rotate(360deg); }
 }
 </style>
-
-

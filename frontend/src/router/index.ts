@@ -24,12 +24,20 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach(to => {
-  const hasToken = Boolean(localStorage.getItem('lessonforge_token'))
-  if (to.meta.requiresAuth && !hasToken) {
+import { useAuthStore } from '../stores/auth'
+
+router.beforeEach(async to => {
+  const auth = useAuthStore()
+  if (!auth.initialized) {
+    await auth.restore()
+  }
+  // 恢复登录态期间服务器暂不可达（retryPending 为真）时，不要强制跳到登录页
+  if (to.meta.requiresAuth && !auth.user && !auth.retryPending) {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
-  if (to.path === '/login' && hasToken) return '/'
+  if (to.path === '/login' && auth.user) {
+    return '/'
+  }
 })
 
 export default router

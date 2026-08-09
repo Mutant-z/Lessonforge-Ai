@@ -32,7 +32,7 @@ const sampleCourses = [
 </script>
 
 <template>
-  <section class="course-example-section">
+  <section id="examples" class="course-example-section">
     <div class="section-header">
       <span class="section-eyebrow">READY-TO-USE OUTPUT</span>
       <h2 class="section-title">真实示例：<span class="text-gradient-cyan">直接交付课堂使用</span></h2>

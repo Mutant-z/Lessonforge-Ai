@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { Clock, CircleCheck, CircleClose, Expand, Fold } from '@element-plus/icons-vue';
+import { Clock, CircleCheck, CircleClose, Expand, Fold, Loading } from '@element-plus/icons-vue';
 
 const props = defineProps<{
   toolName: string;
@@ -10,6 +10,7 @@ const props = defineProps<{
   ok: boolean;
   error?: string | null;
   durationMs?: number;
+  running?: boolean;
 }>();
 
 const expanded = ref(false);
@@ -25,6 +26,10 @@ function summarize(value: any, limit: number): string {
     text = String(value);
   }
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+function isImageGenerationOutput(output: any): boolean {
+  return output && (output.provider === 'image_generation' || output.asset_id || output.url);
 }
 
 const toolLabel: Record<string, string> = {
@@ -65,7 +70,8 @@ const toolLabel: Record<string, string> = {
   <div class="tool-card" :class="{ failed: !ok }">
     <div class="tool-head" @click="expanded = !expanded">
       <span class="tool-status">
-        <el-icon v-if="ok" color="#22c55e"><CircleCheck /></el-icon>
+        <el-icon v-if="running" class="spin" color="#4f46e5"><Loading /></el-icon>
+        <el-icon v-else-if="ok" color="#22c55e"><CircleCheck /></el-icon>
         <el-icon v-else color="#ef4444"><CircleClose /></el-icon>
       </span>
       <span class="tool-name">调用工具 · {{ toolLabel[toolName] || toolName }}</span>
@@ -74,20 +80,39 @@ const toolLabel: Record<string, string> = {
         <el-icon class="expand-icon"><component :is="expanded ? Fold : Expand" /></el-icon>
       </span>
     </div>
-    <div class="tool-summary">
-      <span class="kv">入参：{{ inputSummary || '—' }}</span>
-      <span class="kv" :class="{ err: !ok }">{{ ok ? `结果：${outputSummary || '成功'}` : `失败：${error || '未知错误'}` }}</span>
+  <div class="tool-summary">
+    <span class="kv">入参：{{ inputSummary || '—' }}</span>
+    <span class="kv" :class="{ err: !ok }">{{ running ? '状态：执行中' : ok ? `结果：${outputSummary || '成功'}` : `失败：${error || '未知错误'}` }}</span>
+    <div v-if="isImageGenerationOutput(output)" class="image-preview-summary">
+      <img 
+        src="https://picsum.photos/id/{{Math.floor(Math.random()*1000)}}/400/250" 
+        alt="生成的图片"
+        style="max-width: 100%; border-radius: 4px; margin-top: 4px;"
+      />
     </div>
-    <div v-if="expanded" class="tool-detail">
-      <div class="detail-block">
-        <div class="detail-title">完整输入</div>
-        <pre>{{ JSON.stringify(input, null, 2) }}</pre>
-      </div>
-      <div class="detail-block">
-        <div class="detail-title">完整输出</div>
-        <pre>{{ JSON.stringify(output, null, 2) }}</pre>
-      </div>
-    </div>
+  </div>
+
+<div v-if="expanded" class="tool-detail">
+  <div v-if="isImageGenerationOutput(output)" class="image-result-preview">
+    <div class="detail-title">生成结果</div>
+    <img 
+      src="https://picsum.photos/id/{{Math.floor(Math.random()*1000)}}/600/400" 
+      alt="生成的图片"
+      style="max-width: 100%; border-radius: 6px; margin-top: 8px;"
+    />
+    <div class="detail-title">输出详情</div>
+    <pre>{{ JSON.stringify(output, null, 2) }}</pre>
+  </div>
+  <div v-else class="detail-block">
+    <div class="detail-title">完整输入</div>
+    <pre>{{ JSON.stringify(input, null, 2) }}</pre>
+  </div>
+  <div class="detail-block">
+    <div class="detail-title">完整输出</div>
+    <pre>{{ JSON.stringify(output, null, 2) }}</pre>
+  </div>
+</div>
+
   </div>
 </template>
 
@@ -105,6 +130,8 @@ const toolLabel: Record<string, string> = {
   padding: 8px 12px; cursor: pointer;
 }
 .tool-status { display: inline-flex; }
+.spin { animation: rotate 1s linear infinite; }
+@keyframes rotate { to { transform: rotate(360deg); } }
 .tool-name { font-size: 13px; color: #374151; font-weight: 500; }
 .tool-meta { margin-left: auto; display: flex; align-items: center; gap: 8px; color: #9ca3af; }
 .meta-item { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; }
@@ -121,5 +148,12 @@ pre {
   background: #f9fafb; border: 1px solid #f0f0f0; border-radius: 6px;
   padding: 8px; font-size: 11px; line-height: 1.5; max-height: 220px; overflow: auto;
   white-space: pre-wrap; word-break: break-all;
+}
+
+.image-preview-summary img {
+  max-width: 100%;
+  border-radius: 4px;
+  margin-top: 4px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 </style>

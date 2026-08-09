@@ -18,6 +18,7 @@ from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 from app.services.ppt_template_service import resolve_ppt_template
+from app.agent.slide_rendering import infer_render_mode, semantic_body_texts
 
 SLIDE_WIDTH = 13.333
 SLIDE_HEIGHT = 7.5
@@ -61,8 +62,8 @@ TEMPLATE_DECOR: dict[str, dict[str, Any]] = {
 }
 
 
-def _rgb(value: str) -> RGBColor:
-    value = value.removeprefix("#")
+def _rgb(value: str | None, fallback: str = "#000000") -> RGBColor:
+    value = (value or fallback).removeprefix("#")
     return RGBColor(int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
 
 
@@ -105,7 +106,9 @@ class PresentationBuilder:
             "id": slide_id, "page_type": page_type, "title": title, "purpose": purpose,
             "body": [], "layout": layout, "visual_suggestion": "",
             "speaker_notes": "", "duration_seconds": 0, "blocks": [],
+            "script_segment_ids": [],
             "background": None, "elements": [],
+            "render_mode": "semantic",
         })
         return slide_id
 
@@ -134,8 +137,14 @@ class PresentationBuilder:
         return slide_id
 
     def add_textbox(self, slide_id: str, text: str, x: float, y: float, w: float, h: float,
-                    style: dict[str, Any] | None = None, role: str = "") -> str:
-        return self._add_element(slide_id, "textbox", x, y, w, h, text=text, style=style or {}, role=role)
+                    style: dict[str, Any] | None = None, role: str = "", content_ref: str = "") -> str:
+        # A caller that starts placing textboxes is defining the complete
+        # editable geometry layer. Media-only additions use hybrid instead.
+        self.get_slide(slide_id)["render_mode"] = "absolute"
+        return self._add_element(
+            slide_id, "textbox", x, y, w, h, text=text, style=style or {}, role=role,
+            content_ref=content_ref,
+        )
 
     def add_shape(self, slide_id: str, shape_type: str = "rect", x: float = 0, y: float = 0,
                   w: float = 1, h: float = 1, fill: str | None = None, line: str | None = None,
@@ -146,11 +155,22 @@ class PresentationBuilder:
         )
 
     def add_image(self, slide_id: str, file_path: str, x: float, y: float, w: float, h: float,
-                  role: str = "image") -> str:
-        return self._add_element(slide_id, "image", x, y, w, h, asset_path=file_path, role=role)
+                  role: str = "image", asset_id: str = "", provider: str = "", degraded: bool = False,
+                  visual_slot: str = "primary_visual") -> str:
+        slide = self.get_slide(slide_id)
+        if infer_render_mode(slide) == "semantic":
+            slide["render_mode"] = "hybrid"
+        return self._add_element(
+            slide_id, "image", x, y, w, h,
+            asset_path=file_path, asset_id=asset_id, provider=provider, degraded=degraded, role=role,
+            visual_slot=visual_slot,
+        )
 
     def add_chart(self, slide_id: str, chart_type: str, data: dict[str, Any], x: float, y: float,
                   w: float, h: float, role: str = "chart") -> str:
+        slide = self.get_slide(slide_id)
+        if infer_render_mode(slide) == "semantic":
+            slide["render_mode"] = "hybrid"
         return self._add_element(slide_id, "chart", x, y, w, h, chart={"type": chart_type, "data": data}, role=role)
 
     def move_element(self, slide_id: str, element_id: str, x: float, y: float) -> str:
@@ -197,7 +217,13 @@ class PresentationBuilder:
         """从既有 PPTContent 恢复为可编辑模型（修订路径）。"""
         self.apply_template(content.get("theme") or self.template["id"])
         self.slides = []
+        self._element_seq = 0
         for slide in content.get("slides") or []:
+            elements = [dict(element) for element in (slide.get("elements") or [])]
+            for element in elements:
+                element_id = str(element.get("id") or "")
+                if element_id.startswith("E") and element_id[1:].isdigit():
+                    self._element_seq = max(self._element_seq, int(element_id[1:]))
             self.slides.append({
                 "id": slide.get("id", f"S{len(self.slides) + 1:02d}"),
                 "page_type": slide.get("page_type", "concept"),
@@ -208,21 +234,26 @@ class PresentationBuilder:
                 "visual_suggestion": slide.get("visual_suggestion", ""),
                 "speaker_notes": slide.get("speaker_notes", ""),
                 "duration_seconds": slide.get("duration_seconds", 0),
+                "script_segment_ids": list(slide.get("script_segment_ids") or []),
                 "blocks": list(slide.get("blocks") or []),
-                "background": None,
-                "elements": [dict(element) for element in (slide.get("elements") or [])],
+                "background": slide.get("background"),
+                "elements": elements,
+                "render_mode": infer_render_mode(slide),
             })
         return self
 
     def to_ppt_content(self) -> dict[str, Any]:
-        """输出 Schema 合法的 PPTContent（body 由 blocks 扁平投影，保持兼容）。"""
-        from app.agents.generators import _blocks_flat_text
+        """输出 Schema 合法的 PPTContent，同时保持原语义字段逐字不变。"""
         slides = []
         for slide in self.slides:
             body = [str(value) for value in (slide.get("body") or [])]
             blocks = slide.get("blocks") or []
-            if blocks:
-                body = [str(value) for value in _blocks_flat_text(blocks)] or body
+            # Historical Artifacts may intentionally keep a terse ``body`` and
+            # richer structured ``blocks``.  A render round-trip must not
+            # rewrite body (or its preservation hash).  Only synthesize body
+            # for newly-created pages that truly omitted it.
+            if blocks and not body:
+                body = semantic_body_texts(slide)
             out = {
                 "id": slide["id"],
                 "page_type": slide["page_type"],
@@ -233,10 +264,13 @@ class PresentationBuilder:
                 "visual_suggestion": slide.get("visual_suggestion", ""),
                 "speaker_notes": slide.get("speaker_notes", ""),
                 "duration_seconds": int(slide.get("duration_seconds") or 0),
-                "script_segment_ids": [],
+                "script_segment_ids": list(slide.get("script_segment_ids") or []),
             }
             if blocks:
                 out["blocks"] = blocks
+            if slide.get("elements"):
+                out["elements"] = [dict(element) for element in slide["elements"]]
+            out["render_mode"] = infer_render_mode(slide)
             slides.append(out)
         return {"theme": self.template["id"], "slides": slides}
 
@@ -244,7 +278,7 @@ class PresentationBuilder:
         """输出每元素几何（供几何 QA 检查越界/重叠/文字溢出）。"""
         report = []
         for slide in self.slides:
-            for element in slide["elements"]:
+            for element in self.render_elements(slide):
                 report.append({
                     "slide_id": slide["id"], "element_id": element["id"], "kind": element["kind"],
                     "x": element["x"], "y": element["y"], "w": element["w"], "h": element["h"],
@@ -252,6 +286,48 @@ class PresentationBuilder:
                     "style": element.get("style", {}),
                 })
         return report
+
+    def _semantic_elements(self, slide: dict[str, Any]) -> list[dict[str, Any]]:
+        """Materialize semantic content for PPTX/QA without mutating the Artifact."""
+        template_id = str(self.template.get("id") or "")
+        start_x = 2.45 if template_id == "lessonforge_deck_smart_ai" else (2.2 if template_id == "lessonforge_deck_academic" else 0.9)
+        media = [item for item in (slide.get("elements") or []) if item.get("kind") in {"image", "chart"}]
+        media_x = min((float(item.get("x") or SLIDE_WIDTH) for item in media), default=SLIDE_WIDTH)
+        width = max(3.2, min(SLIDE_WIDTH - start_x - 0.65, media_x - start_x - 0.3))
+        title = str(slide.get("title") or "")
+        body = semantic_body_texts(slide)
+        page_type = str(slide.get("page_type") or "concept")
+        elements: list[dict[str, Any]] = [{
+            "id": "semantic-title", "kind": "textbox", "role": "title", "content_ref": "title",
+            "text": title, "x": start_x, "y": 1.65 if page_type == "cover" else 0.7,
+            "w": width, "h": 1.35 if page_type == "cover" else 0.75, "z": 1,
+            "style": {"size": 38 if page_type == "cover" else 28, "bold": True, "color": "primary"},
+        }]
+        if body:
+            elements.append({
+                "id": "semantic-body", "kind": "textbox", "role": "body", "content_ref": "body",
+                "text": "\n".join(body), "x": start_x, "y": 3.15 if page_type == "cover" else 1.7,
+                "w": width, "h": 1.2 if page_type == "cover" else 4.25, "z": 2,
+                "style": {"size": 18 if page_type == "cover" else 17, "color": "text"},
+            })
+        if page_type == "cover" and slide.get("purpose"):
+            elements.append({
+                "id": "semantic-purpose", "kind": "textbox", "role": "purpose", "content_ref": "purpose",
+                "text": str(slide.get("purpose") or ""), "x": start_x, "y": 4.75,
+                "w": width, "h": 0.75, "z": 3,
+                "style": {"size": 15, "bold": True, "color": "primary"},
+            })
+        return elements
+
+    def render_elements(self, slide: dict[str, Any]) -> list[dict[str, Any]]:
+        mode = infer_render_mode(slide)
+        if mode == "absolute":
+            return list(slide.get("elements") or [])
+        semantic = self._semantic_elements(slide)
+        if mode == "hybrid":
+            overlays = [item for item in (slide.get("elements") or []) if item.get("kind") in {"image", "chart"}]
+            return [*semantic, *overlays]
+        return semantic
 
     # ---------- 渲染 ----------
     def render(self, output: Path) -> Path:
@@ -276,8 +352,8 @@ class PresentationBuilder:
                 fill = _color(palette, slide["background"]) if slide["background"] in palette else _rgb(slide["background"])
                 target.background.fill.solid()
                 target.background.fill.fore_color.rgb = fill
-            # 元素按 z 升序绘制
-            for element in sorted(slide["elements"], key=lambda item: item.get("z", 0)):
+            # semantic/hybrid/absolute 统一解析为最终渲染元素。
+            for element in sorted(self.render_elements(slide), key=lambda item: item.get("z", 0)):
                 self._draw_element(target, element, palette, fonts)
             target.notes_slide.notes_text_frame.text = slide.get("speaker_notes", "")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +385,7 @@ class PresentationBuilder:
         if kind == "textbox":
             text = element.get("text", "")
             size = style.get("size", 18)
-            color = _color(palette, style["color"]) if style.get("color") in palette else _rgb(style.get("color", "#1A1A1A"))
+            color = _color(palette, style["color"]) if style.get("color") in palette else _rgb(style.get("color"), "#1A1A1A")
             _textbox(
                 slide, text, x, y, w, h,
                 font=font, size=float(size), color=color,
@@ -318,7 +394,7 @@ class PresentationBuilder:
                 valign=_pp_anchor(style.get("valign")),
             )
         elif kind == "shape":
-            fill = _color(palette, element["fill"]) if element.get("fill") in palette else _rgb(element.get("fill", "#FFFFFF"))
+            fill = _color(palette, element["fill"]) if element.get("fill") in palette else _rgb(element.get("fill"), "#FFFFFF")
             line = _color(palette, element["line"]) if element.get("line") in palette else (_rgb(element["line"]) if element.get("line") else None)
             _shape(slide, element.get("shape_type", "rect"), x, y, w, h, fill, line, radius=bool(element.get("radius", False)))
         elif kind == "image":

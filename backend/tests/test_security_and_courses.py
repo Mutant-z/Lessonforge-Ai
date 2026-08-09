@@ -1,6 +1,14 @@
 import pytest
 
 
+def _tiny_png() -> bytes:
+    from io import BytesIO
+    from PIL import Image
+    output = BytesIO()
+    Image.new("RGB", (12, 8), "blue").save(output, format="PNG")
+    return output.getvalue()
+
+
 @pytest.mark.asyncio
 async def test_auth_and_course_crud(client, auth_headers):
     assert (await client.get("/api/v1/auth/me", headers=auth_headers)).status_code == 200
@@ -95,3 +103,37 @@ async def test_model_selection_rejects_another_users_config(client, auth_headers
         json={"model_config_id": config["id"]},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_image_connection_test_calls_image_transport(client, auth_headers, monkeypatch):
+    created = await client.post(
+        "/api/v1/settings/models", headers=auth_headers, json={
+            "name": "图片连通性模型",
+            "provider": "openai_compatible",
+            "base_url": "https://images.example/v1",
+            "model_name": "image-model",
+            "timeout_seconds": 30,
+            "capabilities": ["image_generation"],
+            "api_mode": "custom_image_http",
+            "adapter_config": {"endpoint_path": "/render", "response_base64_path": "image"},
+            "is_active": False,
+        },
+    )
+    assert created.status_code == 200, created.text
+    calls = []
+
+    async def fake_generate(config, prompt, size):
+        calls.append((config.api_mode, config.adapter_config_json, prompt, size))
+        return _tiny_png(), "image/png"
+
+    monkeypatch.setattr("app.services.exercise_visual_service.generate_image", fake_generate)
+    tested = await client.post("/api/v1/settings/test-connection", headers=auth_headers, json={
+        "config_id": created.json()["id"],
+        "test_capability": "image_generation",
+    })
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["success"] is True
+    assert tested.json()["mime_type"] == "image/png"
+    assert calls[0][0] == "custom_image_http"
+    assert calls[0][1]["endpoint_path"] == "/render"

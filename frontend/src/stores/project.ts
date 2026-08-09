@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { api, errorMessage } from '../api/client';
-import type { CourseProjectWorkspace, CourseTask, ProjectAgentMessage, ProjectTaskEvent } from '../types';
+import { pipelineApi } from '../api/pipeline';
+import type { Artifact, ArtifactUpdateSource, CourseProjectWorkspace, CourseTask, HydrationStatus, ProjectAgentMessage, ProjectTaskEvent } from '../types';
 import { useCourseStore } from './courses';
 
 const TASK_EVENTS = [
@@ -16,6 +17,15 @@ const TASK_EVENTS = [
   'artifact_version_created',
   'task_dependency_stale',
   'task_failed',
+  'video_generation_started',
+  'video_scene_started',
+  'video_scene_progress',
+  'video_scene_completed',
+  'video_scene_failed',
+  'video_composition_started',
+  'video_composition_completed',
+  'video_generation_completed',
+  'video_generation_failed',
   'quality_updated',
   'agent_initialization_started',
   'agent_initialization_progress',
@@ -24,11 +34,18 @@ const TASK_EVENTS = [
   // 多 Agent 流水线（PPT）事件
   'agent_started',
   'agent_completed',
+  'pipeline_started',
+  'agent_status_delta',
+  'agent_status_completed',
   'tool_call_started',
+  'tool_call_delta',
   'tool_call_completed',
   'artifact_created',
+  'artifact_started',
+  'artifact_patch',
   'asset_generated',
   'qa_completed',
+  'qa_issue_found',
   'revision_started',
   'revision_completed',
   'task_paused',
@@ -36,14 +53,32 @@ const TASK_EVENTS = [
   'pipeline_completed',
   'pipeline_failed',
   'agent_thought_chunk',
+  'run.started', 'run.completed', 'run.failed', 'run.paused', 'run.resumed',
+  'plan.created', 'agent.started', 'agent.progress', 'agent.completed', 'agent.handoff',
+  'skill.discovered', 'skill.loaded', 'skill.completed', 'skill.failed',
+  'tool.started', 'tool.progress', 'tool.completed', 'tool.failed',
+  'artifact.created', 'artifact.updated', 'slide.planned', 'slide.started',
+  'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
+  'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed',
+  'qa.started', 'qa.issue', 'qa.completed', 'repair.started', 'repair.completed',
+  'human.required', 'run.instruction.queued', 'run.instruction.merged',
 ];
 
 /** 流水线事件被路由到项目 store 的收件箱，工作台据此渲染时间线 */
 const PIPELINE_EVENT_TYPES = new Set([
-  'agent_started', 'agent_completed', 'tool_call_started', 'tool_call_completed',
-  'artifact_created', 'asset_generated', 'qa_completed', 'revision_started',
+  'pipeline_started', 'agent_started', 'agent_completed', 'agent_status_delta', 'agent_status_completed',
+  'tool_call_started', 'tool_call_delta', 'tool_call_completed',
+  'artifact_started', 'artifact_patch', 'artifact_created', 'asset_generated', 'qa_issue_found', 'qa_completed', 'revision_started',
   'revision_completed', 'task_paused', 'task_resumed', 'pipeline_completed', 'pipeline_failed',
   'agent_thought_chunk',
+  'run.started', 'run.completed', 'run.failed', 'run.paused', 'run.resumed',
+  'plan.created', 'agent.started', 'agent.progress', 'agent.completed', 'agent.handoff',
+  'skill.discovered', 'skill.loaded', 'skill.completed', 'skill.failed',
+  'tool.started', 'tool.progress', 'tool.completed', 'tool.failed',
+  'artifact.created', 'artifact.updated', 'slide.planned', 'slide.started',
+  'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
+  'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed', 'qa.started', 'qa.issue',
+  'repair.started', 'repair.completed', 'human.required', 'run.instruction.queued', 'run.instruction.merged',
 ]);
 
 function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessage[] {
@@ -55,6 +90,49 @@ function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessa
     result.push(m);
   }
   return result;
+}
+
+function reconcileArtifact(
+  incoming: Artifact | null,
+  existing: Artifact | null | undefined,
+  source: ArtifactUpdateSource,
+): { artifact: Artifact | null; conflict: boolean } {
+  if (!incoming) return { artifact: existing || null, conflict: false };
+  if (!existing) return { artifact: incoming, conflict: false };
+  if (incoming.course_id !== existing.course_id || incoming.artifact_type !== existing.artifact_type) {
+    return { artifact: existing, conflict: true };
+  }
+  if (incoming.version < existing.version) {
+    if (import.meta.env.DEV) console.info('[artifact-version] rejected stale artifact', {
+      source, incoming_id: incoming.id, incoming_version: incoming.version,
+      official_id: existing.id, official_version: existing.version,
+    });
+    return { artifact: existing, conflict: false };
+  }
+  if (incoming.version === existing.version && incoming.id !== existing.id) {
+    console.warn('[artifact-version] same version has different ids', {
+      source, incoming_id: incoming.id, incoming_version: incoming.version,
+      official_id: existing.id, official_version: existing.version,
+    });
+    return { artifact: existing, conflict: true };
+  }
+  if (incoming.id === existing.id) {
+    Object.assign(existing, incoming);
+    return { artifact: existing, conflict: false };
+  }
+  return { artifact: incoming, conflict: false };
+}
+
+function reconcileTaskArtifact(incoming: CourseTask, existing: CourseTask | null | undefined, source: ArtifactUpdateSource): {
+  task: CourseTask;
+  conflict: boolean;
+} {
+  const existingArtifact = existing?.id === incoming.id ? existing.current_artifact : null;
+  const result = reconcileArtifact(incoming.current_artifact, existingArtifact, source);
+  return {
+    task: result.artifact === incoming.current_artifact ? incoming : { ...incoming, current_artifact: result.artifact },
+    conflict: result.conflict,
+  };
 }
 
 export const useProjectStore = defineStore('project', {
@@ -73,6 +151,12 @@ export const useProjectStore = defineStore('project', {
     activeTaskPollInFlight: false,
     pipelineEvents: [] as Array<{ type: string; data: Record<string, any>; event_id: number }>,
     pipelineStatus: '' as string,
+    officialArtifact: null as Artifact | null,
+    viewedArtifact: null as Artifact | null,
+    hydrationStatus: 'idle' as HydrationStatus,
+    projectRequestEpoch: 0,
+    taskRequestEpoch: 0,
+    artifactConflict: null as Record<string, unknown> | null,
   }),
   getters: {
     tasks: state => state.project?.tasks || [],
@@ -82,11 +166,63 @@ export const useProjectStore = defineStore('project', {
     },
   },
   actions: {
+    setHydrationStatus(status: HydrationStatus) {
+      this.hydrationStatus = status;
+    },
+    viewArtifact(artifact: Artifact | null) {
+      this.viewedArtifact = artifact;
+    },
+    acceptCurrentArtifact(artifact: Artifact, source: ArtifactUpdateSource = 'refresh') {
+      if (!this.currentTask
+        || artifact.course_id !== this.currentTask.course_id
+        || artifact.artifact_type !== this.currentTask.task_type) return false;
+      const result = reconcileArtifact(artifact, this.currentTask.current_artifact, source);
+      if (result.conflict) {
+        this.artifactConflict = {
+          source, incoming_artifact_id: artifact.id, incoming_version: artifact.version,
+          official_artifact_id: this.currentTask.current_artifact?.id,
+          official_version: this.currentTask.current_artifact?.version,
+        };
+        return false;
+      }
+      this.currentTask.current_artifact = result.artifact;
+      this.syncOfficialArtifact();
+      this.replaceTask(this.currentTask);
+      return true;
+    },
+    syncOfficialArtifact() {
+      const previousId = this.officialArtifact?.id;
+      this.officialArtifact = this.currentTask?.current_artifact || null;
+      if (previousId && this.officialArtifact?.id !== previousId) this.viewedArtifact = null;
+      if (this.viewedArtifact?.course_id !== this.officialArtifact?.course_id
+        || this.viewedArtifact?.artifact_type !== this.officialArtifact?.artifact_type) {
+        this.viewedArtifact = null;
+      }
+    },
     async open(courseId: string) {
+      const epoch = ++this.projectRequestEpoch;
       this.loading = true;
+      this.hydrationStatus = 'loading_project';
       try {
         const { data } = await api.get<CourseProjectWorkspace>(`/courses/${courseId}/project`);
+        if (epoch !== this.projectRequestEpoch) return data;
+        const previousTasks = this.project?.course.id === courseId ? this.project.tasks : [];
+        data.tasks = data.tasks.map(task => reconcileTaskArtifact(
+          task,
+          previousTasks.find(item => item.id === task.id),
+          'project_snapshot',
+        ).task);
+        const courseChanged = Boolean(this.project && this.project.course.id !== courseId);
         this.project = data;
+        this.lastEventId = courseChanged
+          ? Number(data.event_cursor || 0)
+          : Math.max(this.lastEventId, Number(data.event_cursor || 0));
+        if (courseChanged) {
+          this.pipelineEvents = [];
+          this.pipelineStatus = '';
+          this.officialArtifact = null;
+          this.viewedArtifact = null;
+        }
         const courses = useCourseStore();
         courses.current = data.course as any;
         const existing = courses.items.findIndex(item => item.id === data.course.id);
@@ -107,22 +243,41 @@ export const useProjectStore = defineStore('project', {
       }
     },
     async openTask(courseId: string, taskType: string) {
+      const epoch = ++this.taskRequestEpoch;
+      this.hydrationStatus = 'loading_task_snapshot';
+      this.viewedArtifact = null;
       if (!this.project || this.project.course.id !== courseId) {
         await this.open(courseId);
       } else {
         this.connect(courseId);
       }
       const { data } = await api.get<CourseTask>(`/courses/${courseId}/tasks/${taskType}`);
-      this.currentTask = data;
-      this.replaceTask(data);
-      if (['queued', 'running'].includes(data.status)) this.startActiveTaskPolling(courseId, taskType);
+      if (epoch !== this.taskRequestEpoch) return data;
+      const result = reconcileTaskArtifact(
+        data,
+        this.currentTask || this.project?.tasks.find(item => item.id === data.id),
+        'task_snapshot',
+      );
+      const hydrated = result.task;
+      if (result.conflict) {
+        this.artifactConflict = { source: 'task_snapshot', task_id: data.id, incoming_artifact_id: data.current_artifact?.id };
+      }
+      if (this.currentTask?.id === hydrated.id) Object.assign(this.currentTask, hydrated);
+      else this.currentTask = hydrated;
+      this.lastEventId = Math.max(this.lastEventId, Number(data.event_cursor || 0));
+      this.syncOfficialArtifact();
+      this.replaceTask(hydrated);
+      if (['queued', 'running'].includes(hydrated.status)) this.startActiveTaskPolling(courseId, taskType);
       else this.stopActiveTaskPolling();
-      return data;
+      return hydrated;
     },
     replaceTask(task: CourseTask) {
       if (!this.project) return;
       const index = this.project.tasks.findIndex(item => item.id === task.id);
-      if (index >= 0) this.project.tasks[index] = { ...this.project.tasks[index], ...task };
+      if (index >= 0) {
+        const result = reconcileTaskArtifact(task, this.project.tasks[index], 'refresh');
+        this.project.tasks[index] = { ...this.project.tasks[index], ...result.task };
+      }
     },
     async sendMessage(courseId: string, taskType: string, content: string) {
       const local: ProjectAgentMessage = {
@@ -130,6 +285,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
       try {
@@ -147,8 +303,67 @@ export const useProjectStore = defineStore('project', {
         throw cause;
       }
     },
-    async runTask(courseId: string, taskType: string, action: 'initial' | 'retry' | 'sync_dependencies' | 'sync_context') {
-      const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/runs`, { action });
+    async enqueuePPTInstruction(runId: string, content: string, selectedSlideIds: string[] = []) {
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        run_id: runId,
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      try {
+        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds);
+        Object.assign(local, data.message, { status: 'completed' as const });
+        if (this.currentTask) this.currentTask.messages = deduplicateMessages([...(this.currentTask.messages || [])]);
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || [])];
+        throw cause;
+      }
+    },
+    async createPPTRun(courseId: string, content: string, selectedSlideIds: string[] = []) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousTaskStatus = this.currentTask?.status;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineEvents = [];
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'ppt');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineStatus = previousPipelineStatus;
+        if (this.currentTask && previousTaskStatus) this.currentTask.status = previousTaskStatus;
+        throw cause;
+      }
+    },
+    async runTask(
+      courseId: string,
+      taskType: string,
+      action: 'initial' | 'retry' | 'sync_dependencies' | 'sync_context' | 'recompose',
+      options: Record<string, unknown> = {},
+    ) {
+      const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/runs`, { action, ...options });
       await this.openTask(courseId, taskType);
       this.startActiveTaskPolling(courseId, taskType);
       return data;
@@ -172,8 +387,10 @@ export const useProjectStore = defineStore('project', {
     },
     async approveTask(courseId: string, taskType: string) {
       const { data } = await api.post<CourseTask>(`/courses/${courseId}/tasks/${taskType}/approve`);
-      this.currentTask = { ...(this.currentTask || data), ...data };
-      this.replaceTask(data);
+      const result = reconcileTaskArtifact(data, this.currentTask, 'approve');
+      this.currentTask = { ...(this.currentTask || result.task), ...result.task };
+      this.syncOfficialArtifact();
+      this.replaceTask(result.task);
       return data;
     },
     async setTaskModel(courseId: string, taskType: string, modelConfigId: string) {
@@ -181,11 +398,27 @@ export const useProjectStore = defineStore('project', {
       if (this.currentTask) this.currentTask.model_config_id = data.model_config_id;
       return data;
     },
+    async setTaskImageModel(courseId: string, taskType: string, modelConfigId: string) {
+      const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType}/model`, { image_model_config_id: modelConfigId });
+      if (this.currentTask) this.currentTask.image_model_config_id = data.image_model_config_id;
+      return data;
+    },
     applyEvent(type: string, event: ProjectTaskEvent) {
       if (event.event_id && event.event_id <= this.lastEventId) return;
       this.lastEventId = Math.max(this.lastEventId, event.event_id || 0);
       if (PIPELINE_EVENT_TYPES.has(type)) {
         this.pipelineEvents.push({ type, data: event as Record<string, any>, event_id: event.event_id || 0 });
+        if (type === 'run.instruction.queued' && event.payload?.user_message && this.currentTask) {
+          const userMessage = event.payload.user_message as ProjectAgentMessage;
+          const messages = this.currentTask.messages || [];
+          const optimisticIndex = messages.findIndex(message =>
+            message.id === userMessage.id
+            || (message.id.startsWith('local-') && message.run_id === userMessage.run_id && message.content === userMessage.content),
+          );
+          if (optimisticIndex >= 0) messages[optimisticIndex] = { ...messages[optimisticIndex], ...userMessage };
+          else messages.push(userMessage);
+          this.currentTask.messages = deduplicateMessages(messages);
+        }
         if (event.status) this.pipelineStatus = event.status;
         if (this.pipelineEvents.length > 800) this.pipelineEvents.splice(0, this.pipelineEvents.length - 800);
         return;
@@ -213,6 +446,25 @@ export const useProjectStore = defineStore('project', {
       const task = this.project.tasks.find(item => item.id === event.task_id);
       if (!task) return;
 
+      if (event.artifact) {
+        const validScope = event.artifact.course_id === task.course_id
+          && event.artifact.artifact_type === task.task_type
+          && (!event.task_type || event.task_type === task.task_type);
+        const previousVersion = task.current_artifact?.version || 0;
+        if (!validScope || event.artifact.version < previousVersion) return;
+        const artifactResult = reconcileArtifact(event.artifact, task.current_artifact, 'event');
+        if (artifactResult.conflict) {
+          this.artifactConflict = {
+            source: 'event', event_id: event.event_id, run_id: event.run_id,
+            incoming_artifact_id: event.artifact.id, incoming_version: event.artifact.version,
+            official_artifact_id: task.current_artifact?.id, official_version: task.current_artifact?.version,
+          };
+          if (this.currentTask?.id === task.id) void this.refreshCurrentTask();
+          return;
+        }
+        task.current_artifact = artifactResult.artifact;
+      }
+
       if (type === 'task_activity_updated' && event.phase) {
         if (task.activity_run_id !== event.run_id) {
           task.activity_run_id = event.run_id || null;
@@ -239,20 +491,21 @@ export const useProjectStore = defineStore('project', {
       if (event.run_id) task.active_run_id = ['review', 'failed', 'cancelled'].includes(event.status || '') ? null : event.run_id;
       if (event.error) task.error = event.error;
       if (event.artifact) {
-        task.current_artifact = event.artifact;
         task.error = null;
         task.active_run_id = null;
       }
       if (this.currentTask?.id === task.id) {
         Object.assign(this.currentTask, task);
+        this.syncOfficialArtifact();
         const messages = this.currentTask.messages || [];
         if (type === 'agent_message_started' && event.message) {
           const existingIndex = messages.findIndex(message => message.id === event.message?.id || message.id.startsWith('local-'));
           if (existingIndex >= 0) {
-            messages[existingIndex] = { ...messages[existingIndex], ...event.message, content: '', status: 'streaming' };
+            // 保留服务端已有 content（暂停/恢复场景避免气泡被清空后闪回）
+            messages[existingIndex] = { ...messages[existingIndex], ...event.message, content: event.message.content ?? messages[existingIndex].content ?? '', status: 'streaming' };
             this.currentTask.messages = [...messages];
           } else {
-            this.currentTask.messages = [...messages, { ...event.message, content: '', status: 'streaming' }];
+            this.currentTask.messages = [...messages, { ...event.message, content: event.message.content ?? '', status: 'streaming' }];
           }
         } else if (type === 'agent_message_delta' && event.message_id) {
           let streaming = messages.find(message => message.id === event.message_id);
@@ -309,10 +562,26 @@ export const useProjectStore = defineStore('project', {
         }
         this.activeTaskPollInFlight = true;
         try {
+          const epoch = ++this.taskRequestEpoch;
           const { data } = await api.get<CourseTask>(`/courses/${courseId}/tasks/${taskType}`);
+          if (epoch !== this.taskRequestEpoch) return;
           if (!this.currentTask || this.currentTask.id !== data.id) return;
-          this.currentTask = data;
-          this.replaceTask(data);
+          const currentArtifact = this.currentTask.current_artifact;
+          const result = reconcileTaskArtifact(data, this.currentTask, 'poll');
+          const hydrated = result.task;
+          if (result.conflict) {
+            this.artifactConflict = { source: 'poll', task_id: data.id, incoming_artifact_id: data.current_artifact?.id };
+            return;
+          }
+          // Status polling usually returns the same large PPT artifact. Preserve
+          // its object identity so all slide previews are not rebuilt on every poll.
+          if (currentArtifact?.id && hydrated.current_artifact?.id === currentArtifact.id) {
+            hydrated.current_artifact = currentArtifact;
+          }
+          Object.assign(this.currentTask, hydrated);
+          this.lastEventId = Math.max(this.lastEventId, Number(data.event_cursor || 0));
+          this.syncOfficialArtifact();
+          this.replaceTask(this.currentTask);
           if (!['queued', 'running'].includes(data.status)) this.stopActiveTaskPolling();
         } catch {
           // The event stream remains primary; retry transient polling failures.
@@ -321,7 +590,7 @@ export const useProjectStore = defineStore('project', {
         }
       };
       void poll();
-      this.activeTaskPollTimer = window.setInterval(() => void poll(), 600);
+      this.activeTaskPollTimer = window.setInterval(() => void poll(), 1200);
     },
     stopActiveTaskPolling() {
       if (this.activeTaskPollTimer) window.clearInterval(this.activeTaskPollTimer);
@@ -329,23 +598,41 @@ export const useProjectStore = defineStore('project', {
     },
     async refreshTasks() {
       if (!this.project) return;
+      const epoch = ++this.projectRequestEpoch;
       const { data } = await api.get<CourseTask[]>(`/courses/${this.project.course.id}/tasks`);
-      this.project.tasks = data;
+      if (epoch !== this.projectRequestEpoch || !this.project) return;
+      this.project.tasks = data.map(task => reconcileTaskArtifact(
+        task,
+        this.project?.tasks.find(item => item.id === task.id),
+        'refresh',
+      ).task);
       if (this.currentTask) {
-        const next = data.find(item => item.id === this.currentTask?.id);
-        if (next) Object.assign(this.currentTask, next);
+        const next = this.project.tasks.find(item => item.id === this.currentTask?.id);
+        if (next) {
+          Object.assign(this.currentTask, next);
+          this.syncOfficialArtifact();
+        }
       }
     },
     async refreshCurrentTask() {
       if (!this.project || !this.currentTask) return;
+      const epoch = ++this.taskRequestEpoch;
       const { data } = await api.get<CourseTask>(`/courses/${this.project.course.id}/tasks/${this.currentTask.task_type}`);
-      this.currentTask = data;
-      this.replaceTask(data);
+      if (epoch !== this.taskRequestEpoch || !this.currentTask) return;
+      const result = reconcileTaskArtifact(data, this.currentTask, 'refresh');
+      const hydrated = result.task;
+      if (result.conflict) {
+        this.artifactConflict = { source: 'refresh', task_id: data.id, incoming_artifact_id: data.current_artifact?.id };
+        return;
+      }
+      Object.assign(this.currentTask, hydrated);
+      this.lastEventId = Math.max(this.lastEventId, Number(data.event_cursor || 0));
+      this.syncOfficialArtifact();
+      this.replaceTask(this.currentTask);
     },
     async connect(courseId: string) {
       if (this.connectedCourseId === courseId && this.eventSource) return;
       if (this.connectingCourseId === courseId) return;
-      if (this.connectedCourseId && this.connectedCourseId !== courseId) this.lastEventId = 0;
       this.disconnect();
       this.connectedCourseId = courseId;
       this.connectingCourseId = courseId;

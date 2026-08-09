@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -109,6 +109,10 @@ class Slide(BaseModel):
     duration_seconds: int
     script_segment_ids: list[str] = []
     blocks: list[PPTBlock] = []
+    render_mode: Literal["semantic", "hybrid", "absolute"] | None = None
+    # Persist agentic geometry so later local revisions start from the actual
+    # edited page instead of losing the LLM-designed layout.
+    elements: list[dict[str, Any]] = []
 
 
 class PPTContent(BaseModel):

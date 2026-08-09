@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { PPTSlide, PPTTemplate } from '../../types';
 import { Refresh, Microphone } from '@element-plus/icons-vue';
+import { api } from '../../api/client';
 import { DEFAULT_PPT_TEMPLATE, pptTemplateStyle } from '../../utils/pptTemplate';
+import { blockTexts, hybridSemanticWidth, inferSlideRenderMode, renderedLayoutElements } from '../../utils/slideRenderMode';
 
 const props = defineProps<{
   slide: PPTSlide;
@@ -18,14 +20,30 @@ const emit = defineEmits<{
 }>();
 
 const PPT_CANVAS_WIDTH = 960;
+const COMPACT_CANVAS_WIDTH = 108;
 const canvasFrame = ref<HTMLElement | null>(null);
-const canvasScale = ref(1);
+const canvasScale = ref(props.compact ? COMPACT_CANVAS_WIDTH / PPT_CANVAS_WIDTH : 1);
 let resizeObserver: ResizeObserver | null = null;
+const assetUrls = ref<Record<string, string>>({});
+const failedAssets = ref<Record<string, boolean>>({});
+let assetLoadEpoch = 0;
 
 const activeTemplate = computed(() => props.template || DEFAULT_PPT_TEMPLATE);
-const bullets = computed(() => props.slide.bullet_points || props.slide.body || []);
+const bullets = computed(() => props.slide.bullet_points?.length ? props.slide.bullet_points : props.slide.body || []);
 const blocks = computed(() => props.slide.blocks || []);
 const hasBlocks = computed(() => blocks.value.length > 0);
+const supplementalBody = computed(() => {
+  const represented = new Set(blocks.value.flatMap(block => blockTexts(block as unknown as Record<string, any>)).map(text => String(text).trim()));
+  return bullets.value.filter(line => !represented.has(String(line).trim()));
+});
+const renderMode = computed(() => inferSlideRenderMode(props.slide));
+const layoutElements = computed(() => renderedLayoutElements(props.slide));
+const hasLayoutElements = computed(() => layoutElements.value.length > 0);
+const shouldRenderSemantic = computed(() => renderMode.value !== 'absolute');
+const semanticBodyStyle = computed(() => {
+  const width = hybridSemanticWidth(props.slide, activeTemplate.value.id);
+  return width ? { width: `${width}px` } : undefined;
+});
 const pageType = computed(() => props.slide.page_type || 'concept');
 const slideLayout = computed(() => props.slide.layout || props.slide.layout_type || '');
 const isCover = computed(() => pageType.value === 'cover' || ['title', 'cover'].includes(slideLayout.value));
@@ -41,14 +59,79 @@ const canvasClasses = computed(() => [
   `theme-${activeTemplate.value.composition}`,
   `theme-${activeTemplate.value.id}`,
   `page-${pageType.value}`,
-  { 'is-cover': isCover.value, 'is-process': isProcess.value, 'is-split': isSplit.value, 'is-qa': isQa.value },
+  {
+    'is-cover': isCover.value, 'is-process': isProcess.value, 'is-split': isSplit.value, 'is-qa': isQa.value,
+    'is-hybrid': renderMode.value === 'hybrid',
+  },
 ]);
+
+const paletteVars: Record<string, string> = {
+  primary: 'var(--ppt-primary)', secondary: 'var(--ppt-secondary)', text: 'var(--ppt-text)',
+  muted: 'var(--ppt-muted)', background: 'var(--ppt-bg)', surface: 'var(--ppt-surface)',
+  on_primary: 'var(--ppt-on-primary)',
+};
+
+function resolveColor(value: unknown, fallback = 'transparent') {
+  if (typeof value !== 'string' || !value) return fallback;
+  return paletteVars[value] || value;
+}
+
+function elementStyle(element: NonNullable<PPTSlide['elements']>[number]) {
+  const style = (element.style || {}) as Record<string, unknown>;
+  const isShape = element.kind === 'shape';
+  return {
+    left: `${Number(element.x || 0) * 72}px`,
+    top: `${Number(element.y || 0) * 72}px`,
+    width: `${Number(element.w || 0) * 72}px`,
+    height: `${Number(element.h || 0) * 72}px`,
+    color: resolveColor(style.color, 'var(--ppt-text)'),
+    background: isShape ? resolveColor(element.fill, 'transparent') : 'transparent',
+    borderColor: resolveColor(element.line, 'transparent'),
+    borderRadius: element.shape_type === 'rounded' ? '12px' : element.shape_type === 'oval' ? '999px' : '0',
+    fontSize: `${Number(style.size || 18)}px`,
+    fontWeight: style.bold ? '800' : '400',
+    textAlign: String(style.align || 'left') as 'left' | 'center' | 'right',
+    fontFamily: String(style.font || 'var(--ppt-body-font)'),
+    zIndex: Number(element.z ?? 0),
+  };
+}
+
+const imageAssetIds = computed(() => Array.from(new Set(
+  layoutElements.value
+    .filter(element => element.kind === 'image' && element.asset_id)
+    .map(element => String(element.asset_id)),
+)));
+
+function elementImageUrl(element: NonNullable<PPTSlide['elements']>[number]) {
+  return element.asset_id ? assetUrls.value[element.asset_id] || '' : '';
+}
+
+function markImageFailed(element: NonNullable<PPTSlide['elements']>[number]) {
+  if (element.asset_id) failedAssets.value[element.asset_id] = true;
+}
+
+watch(imageAssetIds, async ids => {
+  const epoch = ++assetLoadEpoch;
+  await Promise.all(ids.map(async id => {
+    if (assetUrls.value[id] || failedAssets.value[id]) return;
+    try {
+      const response = await api.get(`/artifact-assets/${id}`, { responseType: 'blob' });
+      if (epoch !== assetLoadEpoch) return;
+      assetUrls.value[id] = URL.createObjectURL(response.data);
+    } catch {
+      if (epoch === assetLoadEpoch) failedAssets.value[id] = true;
+    }
+  }));
+}, { immediate: true });
 
 function syncCanvasScale(width: number) {
   if (width > 0) canvasScale.value = width / PPT_CANVAS_WIDTH;
 }
 
 onMounted(() => {
+  // Filmstrip thumbnails have a fixed width. Creating one ResizeObserver per
+  // slide caused the whole workspace to repeatedly reflow during task polling.
+  if (props.compact) return;
   if (!canvasFrame.value) return;
   syncCanvasScale(canvasFrame.value.clientWidth);
   resizeObserver = new ResizeObserver(([entry]) => {
@@ -57,7 +140,11 @@ onMounted(() => {
   resizeObserver.observe(canvasFrame.value);
 });
 
-onBeforeUnmount(() => resizeObserver?.disconnect());
+onBeforeUnmount(() => {
+  assetLoadEpoch += 1;
+  resizeObserver?.disconnect();
+  Object.values(assetUrls.value).forEach(url => URL.revokeObjectURL(url));
+});
 </script>
 
 <template>
@@ -72,8 +159,34 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
         <!-- 2. 页眉页码 -->
         <span class="ppt-folio">{{ String(slideIndex + 1).padStart(2, '0') }}</span>
 
-        <!-- 3. 页面主体 -->
-        <div class="ppt-body">
+        <!-- 3. LLM 生成的可执行布局；旧 Artifact 无元素几何时回退到语义版式。 -->
+        <div v-if="hasLayoutElements" class="agentic-layout" :class="{ 'is-hybrid-layout': renderMode === 'hybrid' }">
+          <div
+            v-for="(element, index) in layoutElements"
+            :key="element.id || `${element.role || element.kind}-${index}`"
+            class="agentic-element"
+            :class="[`kind-${element.kind}`, `role-${element.role || 'content'}`]"
+            :style="elementStyle(element)"
+          >
+            <span v-if="element.kind === 'textbox'">{{ element.text }}</span>
+            <template v-else-if="element.kind === 'image'">
+              <img
+                v-if="elementImageUrl(element) && !failedAssets[element.asset_id || '']"
+                class="visual-element-image"
+                :src="elementImageUrl(element)"
+                :alt="element.role || 'PPT 页面配图'"
+                @error="markImageFailed(element)"
+              >
+              <span v-else class="visual-element-label">
+                {{ failedAssets[element.asset_id || ''] ? '配图加载失败' : '配图准备中' }}
+              </span>
+              <span v-if="element.degraded" class="visual-degraded-badge">替代图</span>
+            </template>
+            <span v-else-if="element.kind === 'chart'" class="visual-element-label">数据图表</span>
+          </div>
+        </div>
+
+        <div v-if="shouldRenderSemantic" class="ppt-body" :style="semanticBodyStyle">
           <h2 class="slide-title">{{ slide.title || '无标题幻灯片' }}</h2>
 
           <template v-if="isCover">
@@ -83,6 +196,9 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
           </template>
 
           <div v-else-if="hasBlocks" class="blocks-area">
+            <ul v-if="supplementalBody.length" class="block-bullets supplemental-body">
+              <li v-for="(line, index) in supplementalBody" :key="`body-${index}`">{{ line }}</li>
+            </ul>
             <div v-for="(block, bIdx) in blocks" :key="bIdx" :class="`block-${block.kind}`" class="ppt-block">
               <template v-if="block.kind === 'lead'">
                 <p class="block-lead">{{ block.text }}</p>
@@ -154,14 +270,14 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
         </div>
 
         <!-- 4. 配图建议条 -->
-        <div v-if="slide.visual_suggestion && !isCover" class="ppt-visual-hint">{{ slide.visual_suggestion }}</div>
+        <div v-if="slide.visual_suggestion && !isCover && renderMode !== 'absolute'" class="ppt-visual-hint">{{ slide.visual_suggestion }}</div>
 
         <!-- 5. 页脚页码 -->
         <span class="ppt-footer">{{ slideIndex + 1 }} / {{ totalSlides }}</span>
       </div>
     </div>
 
-    <div class="ppt-footer-panel">
+    <div v-if="!compact" class="ppt-footer-panel">
       <div class="notes-header">
         <div class="notes-title"><el-icon><Microphone /></el-icon><span>教师讲解备注</span></div>
         <el-button size="small" :icon="Refresh" @click="emit('regenerateSlide', slideIndex)">重新生成本页 PPT</el-button>
@@ -180,6 +296,19 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
   width: 960px; height: 540px; box-sizing: border-box; position: absolute; inset: 0 auto auto 0;
   overflow: hidden; transform-origin: top left; will-change: transform;
   background: var(--ppt-bg); color: var(--ppt-text); font-family: var(--ppt-body-font);
+}
+.agentic-layout { position: absolute; inset: 0; z-index: 2; }
+.agentic-layout.is-hybrid-layout { z-index: 2; pointer-events: none; }
+.agentic-element { position: absolute; box-sizing: border-box; overflow: hidden; white-space: pre-wrap; line-height: 1.25; }
+.agentic-element.kind-shape { border-width: 1px; border-style: solid; }
+.agentic-element.kind-image,
+.agentic-element.kind-chart { display: flex; align-items: center; justify-content: center; border: 1px dashed var(--ppt-secondary); background: var(--ppt-surface); color: var(--ppt-muted); }
+.agentic-element.kind-image { border-style: solid; }
+.visual-element-image { width: 100%; height: 100%; display: block; object-fit: cover; }
+.visual-element-label { font: 700 13px/1 var(--ppt-body-font); letter-spacing: .08em; }
+.visual-degraded-badge {
+  position: absolute; right: 8px; bottom: 8px; padding: 4px 7px; border-radius: 999px;
+  background: rgb(15 23 42 / .78); color: #fff; font: 600 10px/1 var(--ppt-body-font);
 }
 
 /* 1. 模板装饰形状（对齐 pptx_renderer._decorate，坐标按 72px/英寸换算） */

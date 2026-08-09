@@ -40,6 +40,12 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
     ))
     if not pipeline_run:
         return {"run": None, "plan": [], "artifacts": [], "tool_calls": [], "events": []}
+    # 兼容旧异常路径：GenerationRun 已终止但 PipelineRun 遗留 running，会让 UI 显示无法暂停的幽灵任务。
+    if generation_run.status in {"completed", "failed", "cancelled"} and pipeline_run.status in {"queued", "running", "pausing"}:
+        pipeline_run.status = generation_run.status
+        if generation_run.error_json and not pipeline_run.error_json:
+            pipeline_run.error_json = generation_run.error_json
+        await db.commit()
     artifacts = list(await db.scalars(select(PipelineArtifact).where(
         PipelineArtifact.pipeline_run_id == pipeline_run.id,
     ).order_by(PipelineArtifact.version)))
@@ -61,7 +67,7 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
 
     def _tool(row) -> dict:
         return {
-            "id": row.id, "agent_key": row.agent_key, "tool_name": row.tool_name,
+            "id": row.id, "model_call_id": row.model_call_id, "agent_key": row.agent_key, "tool_name": row.tool_name,
             "input": row.input_json, "output": row.output_json, "status": row.status,
             "duration_ms": row.duration_ms, "error": row.error_json,
             "created_at": row.created_at.isoformat() if row.created_at else "",
@@ -102,9 +108,22 @@ async def pause_pipeline(course_id: str, task_type: str, user: User = Depends(cu
     if not task.active_run_id:
         raise HTTPException(409, "当前任务没有正在运行的 Agent")
     run_id = task.active_run_id
+    generation = await db.get(GenerationRun, run_id)
+    pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
+    if generation is None or pipeline is None or pipeline.status in {"completed", "failed", "cancelled"}:
+        raise HTTPException(409, "当前任务已经结束")
     PAUSE_EVENTS[run_id] = PAUSE_EVENTS.get(run_id) or asyncio.Event()
     PAUSE_EVENTS[run_id].set()
-    return {"task_id": task.id, "status": "paused"}
+    job = task_jobs.get(run_id)
+    # 进程重载后的孤儿 Run 没有执行器可抵达边界，直接标记 paused；活跃任务则先进入 pausing。
+    next_status = "pausing" if job is not None and not job.done() else "paused"
+    generation.status = next_status
+    pipeline.status = next_status
+    task.status = next_status
+    await db.commit()
+    if next_status == "pausing" and job is not None:
+        job.cancel()
+    return {"task_id": task.id, "run_id": run_id, "status": next_status}
 
 
 @router.post("/courses/{course_id}/tasks/{task_type}/resume", status_code=202)
@@ -117,8 +136,11 @@ async def resume_pipeline(course_id: str, task_type: str, user: User = Depends(c
     if event is not None:
         event.clear()
     run = await db.get(GenerationRun, run_id)
+    pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
     if run:
         run.status = "queued"
+    if pipeline:
+        pipeline.status = "queued"
     task.status = "queued"
     await db.commit()
     start_task_run(run_id)

@@ -12,10 +12,32 @@ onMounted(async () => {
   await auth.restore();
   if (auth.user) await courses.load();
 });
+
+async function retryConnect() {
+  auth.initialized = false;
+  auth.retryPending = false;
+  await auth.restore();
+  if (auth.user) await courses.load();
+}
 </script>
 
 <template>
-  <div v-if="auth.user" class="app-layout-shell">
+  <div v-if="!auth.initialized" class="app-auth-loading">
+    <div class="auth-loading-box">
+      <div class="brand-logo-icon animate-pulse">LF</div>
+      <span class="loading-text">正在恢复登录状态...</span>
+    </div>
+  </div>
+
+  <div v-else-if="auth.retryPending && !auth.user" class="app-auth-loading">
+    <div class="auth-loading-box">
+      <div class="brand-logo-icon animate-pulse">LF</div>
+      <span class="loading-text">服务器暂时无法连接，请检查服务是否已启动</span>
+      <button class="retry-btn" type="button" @click="retryConnect">重新连接</button>
+    </div>
+  </div>
+
+  <div v-else-if="auth.user" class="app-layout-shell">
     <AppSidebar />
 
     <div class="app-layout-main">
@@ -40,6 +62,57 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.app-auth-loading {
+  height: 100vh;
+  width: 100vw;
+  display: grid;
+  place-items: center;
+  background: var(--bg-page, #f8fafc);
+}
+
+.auth-loading-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-logo-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-weight: 900;
+  font-size: 18px;
+  box-shadow: 0 4px 16px rgba(79, 70, 229, 0.3);
+}
+
+.loading-text {
+  font-size: 13px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.retry-btn {
+  margin-top: 4px;
+  padding: 6px 18px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.retry-btn:hover {
+  border-color: #4f46e5;
+  color: #4f46e5;
+}
+
 .app-layout-shell {
   display: flex;
   height: 100vh;

@@ -3,6 +3,31 @@ import { useRouter } from 'vue-router';
 import { Plus, User, ArrowRight } from '@element-plus/icons-vue';
 
 const router = useRouter();
+
+function handleNavClick(targetId: string, event: Event) {
+  event.preventDefault();
+  const targetEl = document.getElementById(targetId);
+  if (!targetEl) return;
+
+  // 寻找滚动的容器（.landing-page-shell 或 window）
+  const container = targetEl.closest('.landing-page-shell') || document.documentElement || document.body;
+
+  if (container.classList && container.classList.contains('landing-page-shell')) {
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = targetEl.getBoundingClientRect();
+    const relativeTop = targetRect.top - containerRect.top + container.scrollTop - 70; // 扣除 70px 吸顶 Header 高度
+    container.scrollTo({
+      top: Math.max(0, relativeTop),
+      behavior: 'smooth'
+    });
+  } else {
+    const offsetTop = targetEl.getBoundingClientRect().top + window.pageYOffset - 70;
+    window.scrollTo({
+      top: Math.max(0, offsetTop),
+      behavior: 'smooth'
+    });
+  }
+}
 </script>
 
 <template>
@@ -19,10 +44,10 @@ const router = useRouter();
 
       <!-- Quick Nav Links -->
       <nav class="navbar-links">
-        <a href="#features" class="nav-link">功能特色</a>
-        <a href="#workflow" class="nav-link">Agent 流程</a>
-        <a href="#resources" class="nav-link">教学资源</a>
-        <a href="#examples" class="nav-link">示例微课</a>
+        <a href="#features" class="nav-link" @click="handleNavClick('features', $event)">功能特色</a>
+        <a href="#workflow" class="nav-link" @click="handleNavClick('workflow', $event)">Agent 流程</a>
+        <a href="#resources" class="nav-link" @click="handleNavClick('resources', $event)">教学资源</a>
+        <a href="#examples" class="nav-link" @click="handleNavClick('examples', $event)">示例微课</a>
       </nav>
 
       <!-- Auth Actions -->
@@ -53,9 +78,13 @@ const router = useRouter();
   right: 0;
   height: 68px;
   border-bottom: 1px solid var(--border-default);
-  z-index: 100;
+  z-index: 1000;
   display: flex;
   align-items: center;
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.04);
 }
 
 .navbar-container {

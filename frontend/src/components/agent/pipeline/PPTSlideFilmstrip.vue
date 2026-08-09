@@ -7,10 +7,11 @@ const props = defineProps<{
   activeSlide: number;
   template?: PPTTemplate | null;
   modifiedSlides?: Set<number>;
+  selectedSlides?: Set<number>;
 }>();
 
 const emit = defineEmits<{
-  (e: 'select-slide', index: number): void;
+  (e: 'select-slide', index: number, additive: boolean): void;
 }>();
 </script>
 
@@ -26,8 +27,13 @@ const emit = defineEmits<{
         v-for="(slide, index) in slides"
         :key="slide.id || index"
         class="filmstrip-item"
-        :class="{ active: activeSlide === index, modified: modifiedSlides?.has(index) }"
-        @click="emit('select-slide', index)"
+        :class="{ active: activeSlide === index, selected: selectedSlides?.has(index), modified: modifiedSlides?.has(index) }"
+        role="button"
+        tabindex="0"
+        :aria-label="`切换到第 ${index + 1} 页`"
+        @click.stop="emit('select-slide', index, $event.metaKey || $event.ctrlKey)"
+        @keydown.enter.prevent="emit('select-slide', index, false)"
+        @keydown.space.prevent="emit('select-slide', index, false)"
       >
         <div class="item-header">
           <span class="item-index">{{ String(index + 1).padStart(2, '0') }}</span>
@@ -98,6 +104,8 @@ const emit = defineEmits<{
   padding: 4px;
   background: #f8fafc;
   transition: all 150ms ease;
+  content-visibility: auto;
+  contain-intrinsic-size: 104px;
 }
 
 .filmstrip-item:hover {
@@ -109,6 +117,11 @@ const emit = defineEmits<{
   border-color: #4f46e5;
   background: #eef2ff;
   box-shadow: 0 0 0 1px #4f46e5;
+}
+
+.filmstrip-item.selected {
+  border-color: #7c3aed;
+  box-shadow: 0 0 0 1px #7c3aed;
 }
 
 .filmstrip-item.modified {
@@ -150,5 +163,10 @@ const emit = defineEmits<{
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 4px;
+}
+
+/* 缩略图仅负责展示，整张卡片统一处理鼠标和键盘导航。 */
+.thumbnail-aspect :deep(.slide-preview-container) {
+  pointer-events: none;
 }
 </style>

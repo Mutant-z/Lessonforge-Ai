@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { api, errorMessage } from '../api/client';
 import { useProjectStore } from '../stores/project';
@@ -18,6 +18,12 @@ const items = ref<any[]>([]);
 const busy = ref(false);
 const result = ref<any>(null);
 const error = ref('');
+const videoTask = computed(() => store.project?.tasks.find((task) => task.task_type === 'video_generation'));
+const videoIncluded = computed(() => videoTask.value?.status === 'approved');
+
+function isIncluded(item: any) {
+  return item.artifact_type !== 'video_generation' || item.status === 'approved';
+}
 
 async function loadArtifacts() {
   await store.open(courseId);
@@ -58,7 +64,7 @@ onUnmounted(() => store.disconnect());
 
 const artifactNames: Record<string, string> = {
   lesson_plan: '教学设计', ppt: 'PPT 课件', task_sheet: '学习任务单', exercise: '课后练习',
-  video_script: '视频脚本', verbatim: '教师逐字稿', quality_report: '质量报告', citation_report: '引用来源',
+  video_script: '视频脚本', video_generation: '微课视频', verbatim: '教师逐字稿', quality_report: '质量报告', citation_report: '引用来源',
 };
 </script>
 
@@ -72,12 +78,12 @@ const artifactNames: Record<string, string> = {
         <h3 class="section-title">本次打包文件</h3>
         <div class="resource-items-list">
           <div v-for="item in items" :key="item.id" class="resource-check-row">
-            <el-checkbox checked disabled />
+            <el-checkbox :model-value="isIncluded(item)" disabled />
             <div class="res-info">
               <span class="res-title">{{ artifactNames[item.artifact_type] || item.artifact_type }}</span>
               <span class="res-sub">V{{ item.version }} · 当前项目版本</span>
             </div>
-            <span class="resource-status">{{ item.status === 'approved' ? '已确认' : '当前版本' }}</span>
+            <span class="resource-status">{{ isIncluded(item) ? (item.status === 'approved' ? '已确认' : '当前版本') : '审核后加入' }}</span>
           </div>
         </div>
       </div>
@@ -86,7 +92,7 @@ const artifactNames: Record<string, string> = {
       <aside class="export-actions-aside lf-card">
         <h3 class="section-title">完整微课交付 ZIP</h3>
         <p class="aside-desc">
-          包含可编辑 PPTX、教学文档、学生版与教师版练习、质量报告、引用来源和 SHA256 校验清单。
+          包含可编辑 PPTX、教学文档、学生版与教师版练习、质量报告、引用来源和 SHA256 校验清单；已审核视频会一并打包。
         </p>
 
         <div class="meta-spec-list">
@@ -96,13 +102,22 @@ const artifactNames: Record<string, string> = {
           </div>
           <div class="spec-item">
             <span>打包交付格式:</span>
-            <strong>PPTX / DOCX / MD / ZIP</strong>
+            <strong>PPTX / DOCX / MD / MP4 / ZIP</strong>
           </div>
           <div class="spec-item">
             <span>内部规划:</span>
             <strong>已通过结构校验</strong>
           </div>
         </div>
+
+        <el-alert
+          v-if="videoTask && !videoIncluded"
+          type="warning"
+          title="视频任务尚未完成或未审核，本次仍可正常导出其他课程资源。"
+          :closable="false"
+          show-icon
+          class="video-export-alert"
+        />
 
         <el-alert v-if="error" type="error" :title="error" show-icon class="error-alert" />
 
@@ -237,6 +252,8 @@ const artifactNames: Record<string, string> = {
 .full-width-btn {
   width: 100%;
 }
+
+.video-export-alert { margin: 0 0 18px; border-radius: 0; }
 
 .ready-banner {
   display: flex;

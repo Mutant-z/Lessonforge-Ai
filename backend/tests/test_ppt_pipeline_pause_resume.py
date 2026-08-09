@@ -113,25 +113,108 @@ def _bp_model():
 
 @pytest.mark.asyncio
 async def test_pause_resume_api_endpoints(client, auth_headers):
-    from agent_pipeline_helpers import wait_tasks_terminal
     course_id = await _ready_course(client, auth_headers)
     # 无运行任务时 pause → 409；非暂停任务 resume → 409
     no_run = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/pause", headers=auth_headers)
     assert no_run.status_code == 409
     no_resume = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/resume", headers=auth_headers)
     assert no_resume.status_code == 409
-    # 触发一次 ppt 同步运行：若捕获到运行中 → pause 202（最佳努力；快速 mock 可能已完成）
-    runs = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/runs",
-                             headers=auth_headers, json={"action": "sync_context"})
-    assert runs.status_code == 202, runs.text
-    for _ in range(200):
-        project = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
-        task = next(item for item in project["tasks"] if item["task_type"] == "ppt")
-        if task["active_run_id"] and task["status"] in {"queued", "running"}:
-            # 捕获到运行中的任务：pause 应返回 202（设置暂停事件）
-            paused = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/pause", headers=auth_headers)
-            assert paused.status_code in {202, 409}
-            break
-        await asyncio.sleep(0.005)
-    await wait_tasks_terminal(client, auth_headers, course_id)
-    assert no_run.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_pause_request_persists_pausing_until_safe_boundary(client, auth_headers):
+    from agent_pipeline_helpers import build_runtime
+    from app.models.entities import CourseTask, GenerationRun
+    from app.services.course_task_service import task_jobs
+
+    course_id = await _ready_course(client, auth_headers)
+    runtime = await build_runtime(course_id, trigger="initial")
+    async with SessionLocal() as db:
+        task = await db.get(CourseTask, runtime.task.id)
+        task.active_run_id = runtime.generation_run.id
+        task.status = "running"
+        await db.commit()
+
+    blocker = asyncio.create_task(asyncio.Event().wait())
+    task_jobs[runtime.generation_run.id] = blocker
+    response = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/pause", headers=auth_headers)
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "pausing"
+
+    async with SessionLocal() as db:
+        generation = await db.get(GenerationRun, runtime.generation_run.id)
+        pipeline = await db.get(PipelineRun, runtime.pipeline_run.id)
+        task = await db.get(CourseTask, runtime.task.id)
+        assert generation.status == "pausing"
+        assert pipeline.status == "pausing"
+    assert task.status == "pausing"
+    assert PAUSE_EVENTS[runtime.generation_run.id].is_set()
+    PAUSE_EVENTS.pop(runtime.generation_run.id, None)
+    task_jobs.pop(runtime.generation_run.id, None)
+    blocker.cancel()
+
+
+@pytest.mark.asyncio
+async def test_pause_orphaned_run_becomes_paused_immediately(client, auth_headers):
+    from agent_pipeline_helpers import build_runtime
+    from app.models.entities import CourseTask
+
+    course_id = await _ready_course(client, auth_headers)
+    runtime = await build_runtime(course_id, trigger="initial")
+    async with SessionLocal() as db:
+        task = await db.get(CourseTask, runtime.task.id)
+        task.active_run_id = runtime.generation_run.id
+        task.status = "running"
+        await db.commit()
+
+    response = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/pause", headers=auth_headers)
+    assert response.status_code == 202
+    assert response.json()["status"] == "paused"
+    async with SessionLocal() as db:
+        pipeline = await db.get(PipelineRun, runtime.pipeline_run.id)
+        assert pipeline.status == "paused"
+    PAUSE_EVENTS.pop(runtime.generation_run.id, None)
+
+
+@pytest.mark.asyncio
+async def test_pause_preempts_blocked_pipeline_job(client, auth_headers, monkeypatch):
+    from app.models.entities import CourseTask
+    from app.services.course_task_service import create_task_run, start_task_run, task_jobs
+    import app.services.ppt_pipeline_service as ppt_service
+
+    course_id = await _ready_course(client, auth_headers)
+    started = asyncio.Event()
+
+    async def blocked_pipeline(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ppt_service, "run_ppt_pipeline", blocked_pipeline)
+    async with SessionLocal() as db:
+        task = await db.scalar(select(CourseTask).where(
+            CourseTask.course_id == course_id,
+            CourseTask.task_type == "ppt",
+        ))
+        run = await create_task_run(db, task, "sync_context")
+        db.add(PipelineRun(generation_run_id=run.id, status="running"))
+        await db.commit()
+        run_id = run.id
+    start_task_run(run_id)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    job = task_jobs[run_id]
+
+    response = await client.post(f"/api/v1/courses/{course_id}/tasks/ppt/pause", headers=auth_headers)
+    assert response.status_code == 202, response.text
+    assert response.json()["status"] == "pausing"
+    await asyncio.wait_for(job, timeout=2)
+
+    async with SessionLocal() as db:
+        task = await db.scalar(select(CourseTask).where(
+            CourseTask.course_id == course_id,
+            CourseTask.task_type == "ppt",
+        ))
+        pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
+        assert task.status == "paused"
+        assert task.active_run_id == run_id
+        assert pipeline.status == "paused"
+    PAUSE_EVENTS.pop(run_id, None)

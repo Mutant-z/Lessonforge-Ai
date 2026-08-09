@@ -32,6 +32,7 @@ from app.models.entities import (
     CourseTaskAgentProfile,
     GenerationEvent,
     GenerationRun,
+    PipelineRun,
     QualityIssue,
     QualityReport,
 )
@@ -46,6 +47,7 @@ from app.schemas.artifact import (
     VerbatimContent,
     VideoScriptContent,
 )
+from app.schemas.video import VideoGenerationContent
 from app.schemas.agent_profile import ExerciseProfile, TaskSheetProfile, VideoScriptProfile
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.model_config_service import resolve_provider, resolved_model_name
@@ -71,15 +73,18 @@ TASK_SPECS = (
     ("task_sheet", "学习任务单", "任务单 Agent", "task_sheet_agent", []),
     ("exercise", "课后练习", "练习 Agent", "exercise_agent", []),
     ("video_script", "视频脚本", "视频脚本 Agent", "video_script_agent", ["lesson_plan", "ppt"]),
+    ("video_generation", "视频生成", "视频生成工作流", "video_generation_pipeline", ["video_script", "ppt"]),
     ("verbatim", "教师逐字稿", "逐字稿 Agent", "verbatim_agent", ["ppt", "video_script"]),
 )
 TASK_SPEC_BY_TYPE = {item[0]: item for item in TASK_SPECS}
+CONTENT_TASK_TYPES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"}
 TASK_SCHEMAS = {
     "lesson_plan": LessonPlanContent,
     "ppt": PPTContent,
     "task_sheet": TaskSheetContent,
     "exercise": ExerciseContent,
     "video_script": VideoScriptContent,
+    "video_generation": VideoGenerationContent,
     "verbatim": VerbatimContent,
 }
 
@@ -205,10 +210,14 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
     for order, (task_type, _, _, agent_type, dependencies) in enumerate(TASK_SPECS, 1):
         if task_type in by_type:
             current = by_type[task_type]
+            if current.display_order != order:
+                current.display_order = order
             if current.agent_type != agent_type:
                 current.agent_type = agent_type
             if current.dependency_types_json != dependencies:
                 current.dependency_types_json = dependencies
+            if task_type == "video_generation":
+                current.agent_profile_status = "ready"
             continue
         artifact = await db.scalar(select(Artifact).where(
             Artifact.course_id == course_id,
@@ -225,7 +234,7 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
             dependency_types_json=dependencies,
             current_artifact_id=artifact.id if artifact else None,
             completed_at=artifact.created_at if artifact else None,
-            agent_profile_status="pending",
+            agent_profile_status="ready" if task_type == "video_generation" else "pending",
         )
         db.add(task)
         by_type[task_type] = task
@@ -358,8 +367,20 @@ async def create_task_run(db, task: CourseTask, trigger_type: str, user_message:
     return run
 
 
+async def _execute_dispatched_task_run(run_id: str):
+    async with SessionLocal() as db:
+        run = await db.get(GenerationRun, run_id)
+        task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+        task_type = task.task_type if task else ""
+    if task_type == "video_generation":
+        from app.services.video_generation_service import execute_video_generation_run
+        await execute_video_generation_run(run_id)
+        return
+    await execute_task_run(run_id)
+
+
 def start_task_run(run_id: str):
-    job = asyncio.create_task(execute_task_run(run_id))
+    job = asyncio.create_task(_execute_dispatched_task_run(run_id))
     task_jobs[run_id] = job
 
 
@@ -386,9 +407,15 @@ async def _schedule_ready_tasks(course_id: str):
         for item in items:
             if item.status != "waiting_dependency" or item.active_run_id or item.current_artifact_id:
                 continue
+            dependencies_ready = all(latest.get(dep) for dep in item.dependency_types_json)
+            if item.task_type == "video_generation":
+                if dependencies_ready:
+                    item.status = "ready_to_generate"
+                    item.progress = 0
+                continue
             if item.agent_profile_status != "ready" or not item.current_agent_profile_id:
                 continue
-            if all(latest.get(dep) for dep in item.dependency_types_json):
+            if dependencies_ready:
                 run = await create_task_run(db, item, "initial")
                 run_ids.append(run.id)
         if run_ids:
@@ -1049,7 +1076,7 @@ async def register_artifact_version(db, artifact: Artifact, invalidate_dependent
 
 async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint):
     resources = {}
-    for task_type, *_ in TASK_SPECS:
+    for task_type in CONTENT_TASK_TYPES:
         artifact = await _latest_artifact(db, course.id, task_type)
         if not artifact:
             return
@@ -1088,12 +1115,18 @@ async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint
 
 async def _refresh_course_status(db, course: CourseProject):
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course.id)))
-    statuses = {item.status for item in tasks}
-    if tasks and statuses == {"approved"}:
+    content_tasks = [item for item in tasks if item.task_type in CONTENT_TASK_TYPES]
+    video_task = next((item for item in tasks if item.task_type == "video_generation"), None)
+    statuses = {item.status for item in content_tasks}
+    if content_tasks and statuses == {"approved"} and (
+        not video_task or video_task.status in {"ready_to_generate", "approved"}
+    ):
         course.status = "completed"
-    elif "failed" in statuses:
+    elif "failed" in statuses or (video_task and video_task.status == "failed"):
         course.status = "needs_attention"
-    elif statuses & {"queued", "running", "waiting_dependency"}:
+    elif statuses & {"queued", "running", "waiting_dependency"} or (
+        video_task and video_task.status in {"queued", "running"}
+    ):
         course.status = "resource_generating"
     else:
         course.status = "teacher_review"
@@ -1133,6 +1166,7 @@ async def execute_task_run(run_id: str):
             revision = None
             user_message = None
             provider = None
+            pipeline_runtime = None
             locks = []
             await _publish_activity(run_id, "analyzing", 26, "completed")
             current_phase = "generating"
@@ -1154,6 +1188,7 @@ async def execute_task_run(run_id: str):
                 locks = result.locks
                 source_versions = result.source_versions
                 change_summary = result.change_summary
+                pipeline_runtime = result.runtime
             elif run.trigger_type == "message":
                 if not source:
                     raise RuntimeError("任务文件尚未生成")
@@ -1203,8 +1238,13 @@ async def execute_task_run(run_id: str):
             await _publish_activity(run_id, "validating", 76)
             visual_notes: list[str] = []
             if task.task_type == "ppt":
-                preserved_theme = (source.content_json or {}).get("theme") if source else content.get("theme")
-                content = {**content, "theme": resolve_ppt_template(preserved_theme)["id"]}
+                # 普通修改禁止模型暗改模板；显式模板切换则必须保留 Runtime 已通过
+                # 完整性门禁的目标模板，不能在保存前又覆写回源版本主题。
+                if pipeline_runtime and pipeline_runtime.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}:
+                    trusted_theme = pipeline_runtime.preferred_template
+                else:
+                    trusted_theme = (source.content_json or {}).get("theme") if source else content.get("theme")
+                content = {**content, "theme": resolve_ppt_template(trusted_theme)["id"]}
             if task.task_type == "exercise":
                 content, _, pipeline_notes = await process_exercise_visuals(db, course, run, content)
                 content, degraded_notes = degrade_unreviewed_visuals(content)
@@ -1273,7 +1313,9 @@ async def execute_task_run(run_id: str):
 
             reply_id = None
             streamed_reply = None
-            if user_message and revision and provider:
+            # PPT 的对话气泡生命周期由 pipeline emitter 拥有（agent_message_*），
+            # 这里跳过 _stream_verified_reply，避免创建第二条 assistant 消息。
+            if user_message and revision and provider and task.task_type != "ppt":
                 current_phase = "replying"
                 await _publish_activity(run_id, "replying", 88)
                 reply_id, streamed_reply = await _stream_verified_reply(
@@ -1315,7 +1357,13 @@ async def execute_task_run(run_id: str):
             )
             db.add(artifact)
             await db.flush()
-            if task.task_type == "exercise":
+            if task.task_type == "ppt":
+                from app.services.ppt_artifact_service import record_ppt_revision
+                await record_ppt_revision(
+                    db, run=run, artifact=artifact, content=validated, source=source,
+                    change_summary=change_summary,
+                )
+            if task.task_type in {"ppt", "exercise"}:
                 generated_assets = list(await db.scalars(select(ArtifactAsset).where(
                     ArtifactAsset.generation_run_id == run.id,
                     ArtifactAsset.course_id == course.id,
@@ -1324,6 +1372,15 @@ async def execute_task_run(run_id: str):
                 for asset in generated_assets:
                     asset.artifact_id = artifact.id
             task.current_artifact_id = artifact.id
+            # Commit the new Artifact, PPT revision, generated assets and official
+            # pointer before the pipeline emits its sole success terminal event.
+            # GenerationRun/CourseTask remain non-terminal until that event is done,
+            # so clients and test teardown cannot observe completion while the job
+            # still owns async DB work.
+            if task.task_type == "ppt":
+                await db.commit()
+                from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
+                await complete_ppt_pipeline_after_publish(pipeline_runtime, artifact.id)
             final_status = "review" if task.current_agent_profile_id == profile.id else "stale"
             task.status = final_status
             task.progress = 100
@@ -1334,7 +1391,9 @@ async def execute_task_run(run_id: str):
             run.progress = 100
             run.finished_at = utcnow()
 
-            if user_message and revision:
+            # PPT：assistant 消息已由 pipeline emitter 完成；跳过 reply 处理（reply_id 为空，
+            # 若不跳过会 raise "流式回复记录不存在"）。
+            if user_message and revision and task.task_type != "ppt":
                 stored_user_message = await db.get(AgentMessage, user_message.id)
                 if stored_user_message:
                     stored_user_message.status = "completed"
@@ -1392,13 +1451,40 @@ async def execute_task_run(run_id: str):
             await db.commit()
         await schedule_ready_tasks(course.id)
     except asyncio.CancelledError:
+        # pause API 会抢占当前 LLM/Tool await。若暂停信号存在，这是可恢复暂停，不是取消任务。
+        from app.services.ppt_pipeline_service import PAUSE_EVENTS
+        pause_event = PAUSE_EVENTS.get(run_id)
+        if pause_event is not None and pause_event.is_set():
+            async with SessionLocal() as db:
+                run = await db.get(GenerationRun, run_id)
+                task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+                pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
+                if run:
+                    run.status = "paused"
+                if pipeline:
+                    pipeline.status = "paused"
+                    pipeline.checkpoint_json = {
+                        **(pipeline.checkpoint_json or {}),
+                        "step_index": pipeline.current_step_index,
+                        "paused_agent": pipeline.current_agent or current_phase,
+                        "preempted": True,
+                    }
+                if task and run:
+                    task.status = "paused"
+                    await _emit(db, run, "task_paused", task, status="paused", reason="用户暂停")
+                    await _emit(db, run, "task_status_changed", task, status="paused", progress=task.progress)
+                await db.commit()
+            return
         await _mark_streaming_reply_failed(run_id, "任务已取消，流式回复未完成。")
         async with SessionLocal() as db:
             run = await db.get(GenerationRun, run_id)
             task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+            pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
             if run:
                 run.status = "cancelled"
                 run.finished_at = utcnow()
+            if pipeline:
+                pipeline.status = "cancelled"
             if task:
                 task.status = "cancelled"
                 task.active_run_id = None
@@ -1436,22 +1522,44 @@ async def execute_task_run(run_id: str):
             run = await db.get(GenerationRun, run_id)
             task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
             course = await db.get(CourseProject, run.course_id) if run else None
+            pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
             if not run or not task:
                 return
-            code = exc.code if isinstance(exc, LLMProviderError) else "task_generation_failed"
+            from app.agent.schemas import PPTAgentError
+            code = exc.code if isinstance(exc, (LLMProviderError, PPTAgentError)) else "task_generation_failed"
+            internal_detail = str(exc).strip()[:500]
+            safe_runtime_prefixes = (
+                "流水线", "页面内容 Agent", "LLM 布局", "PPT 编辑", "布局结果", "Agent ",
+            )
             message = (
                 exc.user_message
-                if isinstance(exc, LLMProviderError)
+                if isinstance(exc, (LLMProviderError, PPTAgentError))
+                else internal_detail
+                if isinstance(exc, RuntimeError) and internal_detail.startswith(safe_runtime_prefixes)
                 else "任务生成暂时失败，请重试或切换模型。"
             )
-            retryable = exc.retryable if isinstance(exc, LLMProviderError) else True
+            retryable = exc.retryable if isinstance(exc, (LLMProviderError, PPTAgentError)) else True
             error = {"code": code, "message": message, "retryable": retryable}
+            if isinstance(exc, PPTAgentError) and exc.details:
+                error["details"] = exc.details
             run.status = "failed"
             run.error_json = error
             run.finished_at = utcnow()
             task.status = "failed"
             task.active_run_id = None
             task.error_json = error
+            if pipeline:
+                pipeline.status = "failed"
+                pipeline.error_json = {**error, "internal_detail": internal_detail}
+                from app.models.entities import PPTHumanRequest
+                pending_human_requests = list(await db.scalars(select(PPTHumanRequest).where(
+                    PPTHumanRequest.pipeline_run_id == pipeline.id,
+                    PPTHumanRequest.status == "pending",
+                )))
+                for human_request in pending_human_requests:
+                    human_request.status = "cancelled"
+                    human_request.response_json = {"reason": "run_failed", "error_code": code}
+                    human_request.resolved_at = utcnow()
             message_row = await db.scalar(select(AgentMessage).where(
                 AgentMessage.run_id == run.id,
                 AgentMessage.role == "user",
@@ -1475,6 +1583,15 @@ async def execute_task_run(run_id: str):
             )
             await _emit(db, run, "task_failed", task, status="failed", progress=task.progress, error=error)
             await db.commit()
+            if pipeline:
+                from app.agent.events import PipelineEventEmitter
+                failure_emitter = await PipelineEventEmitter.for_run(run, pipeline)
+                await failure_emitter.pipeline_failed(error=message)
+                await failure_emitter.emit_domain("run.failed", message=message, payload={"error": error})
+                await failure_emitter.emit_domain(
+                    "artifact.draft.cleared", message="本轮草稿已清除，继续显示原正式 PPT",
+                    payload={"run_id": run.id, "reason": code},
+                )
     finally:
         task_jobs.pop(run_id, None)
 
@@ -1484,10 +1601,23 @@ async def resume_incomplete_task_runs():
     async with SessionLocal() as db:
         runs = list(await db.scalars(select(GenerationRun).where(
             GenerationRun.run_type == "task",
-            GenerationRun.status.in_(["queued", "running", "paused"]),
+            GenerationRun.status.in_(["queued", "running", "pausing"]),
         )))
         for run in runs:
+            pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run.id))
+            if run.status == "pausing":
+                run.status = "paused"
+                if pipeline:
+                    pipeline.status = "paused"
+                if run.course_task_id:
+                    task = await db.get(CourseTask, run.course_task_id)
+                    if task:
+                        task.status = "paused"
+                        task.active_run_id = run.id
+                continue
             run.status = "queued"
+            if pipeline:
+                pipeline.status = "queued"
             if run.course_task_id:
                 task = await db.get(CourseTask, run.course_task_id)
                 if task:

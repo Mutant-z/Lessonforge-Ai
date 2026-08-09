@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import type { Artifact } from '../../types';
-import { Clock } from '@element-plus/icons-vue';
+import { Clock, RefreshRight } from '@element-plus/icons-vue';
 
 defineProps<{
   versions: Artifact[];
   currentVersion?: number;
+  allowRestore?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'select', version: Artifact): void;
+  (e: 'restore', version: Artifact): void;
   (e: 'close'): void;
 }>();
 </script>
@@ -37,6 +39,14 @@ const emit = defineEmits<{
         <span class="v-time">
           <el-icon><Clock /></el-icon> {{ new Date(v.created_at).toLocaleString('zh-CN') }}
         </span>
+        <el-button
+          v-if="allowRestore && v.version !== currentVersion"
+          size="small"
+          plain
+          :icon="RefreshRight"
+          class="restore-button"
+          @click.stop="emit('restore', v)"
+        >恢复为新版本</el-button>
       </div>
     </div>
   </el-drawer>
@@ -100,4 +110,6 @@ const emit = defineEmits<{
   align-items: center;
   gap: 4px;
 }
+
+.restore-button { width: 100%; margin-top: 10px; border-radius: 0; }
 </style>

@@ -1,5 +1,23 @@
 import type { Artifact } from './artifact';
 
+export type HydrationStatus =
+  | 'idle'
+  | 'loading_project'
+  | 'loading_task_snapshot'
+  | 'loading_pipeline_snapshot'
+  | 'applying_current_run_events'
+  | 'ready'
+  | 'failed';
+
+export type ArtifactUpdateSource = 'project_snapshot' | 'task_snapshot' | 'poll' | 'refresh' | 'event' | 'approve';
+
+export interface ArtifactPreviewState {
+  officialArtifact: Artifact | null;
+  viewedArtifact: Artifact | null;
+  hydrationStatus: HydrationStatus;
+  eventCursor: number;
+}
+
 export interface ProjectCourse {
   id: string;
   title: string;
@@ -17,8 +35,11 @@ export interface ProjectCourse {
 
 export type CourseTaskStatus =
   | 'waiting_dependency'
+  | 'ready_to_generate'
   | 'queued'
   | 'running'
+  | 'pausing'
+  | 'paused'
   | 'review'
   | 'approved'
   | 'stale'
@@ -57,9 +78,13 @@ export interface CourseTask {
   model_config_id?: string | null;
   image_model_config_id?: string | null;
   vision_model_config_id?: string | null;
+  video_model_config_id?: string | null;
+  speech_model_config_id?: string | null;
   activity_run_id?: string | null;
   activities?: TaskActivity[];
   current_activity?: TaskActivity | null;
+  event_cursor?: number;
+  snapshot_at?: string;
 }
 
 export type TaskActivityPhase =
@@ -140,6 +165,8 @@ export interface ProjectQuality {
 }
 
 export interface CourseProjectWorkspace {
+  event_cursor?: number;
+  snapshot_at?: string;
   course: ProjectCourse;
   intent: TeachingIntent;
   planning: { status: string; progress: number; error: CourseTaskError | null };
@@ -168,4 +195,5 @@ export interface ProjectTaskEvent {
   message_id?: string;
   delta?: string;
   reset?: boolean;
+  payload?: Record<string, any>;
 }

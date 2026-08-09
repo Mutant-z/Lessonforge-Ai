@@ -235,6 +235,34 @@ class GenerationStep(Base, TimestampMixin):
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
+class VideoSceneJob(Base, TimestampMixin):
+    __tablename__ = "video_scene_jobs"
+    __table_args__ = (UniqueConstraint("generation_run_id", "scene_id", "attempt"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    generation_run_id: Mapped[str] = mapped_column(
+        ForeignKey("generation_runs.id", ondelete="CASCADE"), index=True
+    )
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("course_projects.id", ondelete="CASCADE"), index=True
+    )
+    source_artifact_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scene_id: Mapped[str] = mapped_column(String(80), index=True)
+    operation: Mapped[str] = mapped_column(String(40), default="generate")
+    provider_job_id: Mapped[str] = mapped_column(String(200), default="", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifact_assets.id", ondelete="SET NULL"), nullable=True
+    )
+    error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class GenerationEvent(Base):
     __tablename__ = "generation_events"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -297,6 +325,9 @@ class PipelineArtifact(Base, TimestampMixin):
 class PipelineToolCall(Base):
     __tablename__ = "pipeline_tool_calls"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    # LLM/provider supplied ids are only scoped to one model response and may be
+    # reused by later runs. Keep them for diagnostics, never as the row PK.
+    model_call_id: Mapped[str] = mapped_column(String(120), default="")
     pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
     agent_key: Mapped[str] = mapped_column(String(60))
     tool_name: Mapped[str] = mapped_column(String(80), index=True)
@@ -316,6 +347,86 @@ class PipelineEvent(Base):
     sequence: Mapped[int] = mapped_column(Integer, default=0)
     data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PPTRevision(Base, TimestampMixin):
+    """Immutable presentation-level revision linked to the exported Artifact."""
+
+    __tablename__ = "ppt_revisions"
+    __table_args__ = (UniqueConstraint("course_id", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    course_id: Mapped[str] = mapped_column(ForeignKey("course_projects.id", ondelete="CASCADE"), index=True)
+    pipeline_run_id: Mapped[str | None] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True, index=True)
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("ppt_revisions.id", ondelete="SET NULL"), nullable=True)
+    version: Mapped[int] = mapped_column(Integer)
+    template_id: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(30), default="draft")
+    change_summary: Mapped[str] = mapped_column(String(500), default="")
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PPTSlideArtifact(Base, TimestampMixin):
+    """Current state of one slide inside a presentation revision."""
+
+    __tablename__ = "ppt_slide_artifacts"
+    __table_args__ = (UniqueConstraint("ppt_revision_id", "slide_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    ppt_revision_id: Mapped[str] = mapped_column(ForeignKey("ppt_revisions.id", ondelete="CASCADE"), index=True)
+    pipeline_run_id: Mapped[str | None] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    slide_id: Mapped[str] = mapped_column(String(80), index=True)
+    page_number: Mapped[int] = mapped_column(Integer)
+    current_revision: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+    qa_status: Mapped[str] = mapped_column(String(30), default="pending")
+    preview_url: Mapped[str] = mapped_column(String(500), default="")
+    data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PPTSlideRevision(Base, TimestampMixin):
+    __tablename__ = "ppt_slide_revisions"
+    __table_args__ = (UniqueConstraint("slide_artifact_id", "revision"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    slide_artifact_id: Mapped[str] = mapped_column(ForeignKey("ppt_slide_artifacts.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[str | None] = mapped_column(ForeignKey("ppt_slide_revisions.id", ondelete="SET NULL"), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    data_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    diff_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    change_summary: Mapped[str] = mapped_column(String(500), default="")
+
+
+class PPTAgentInstruction(Base, TimestampMixin):
+    __tablename__ = "ppt_agent_instructions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    selected_slide_ids_json: Mapped[list] = mapped_column(JSON, default=list)
+    disposition: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    result_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class PPTHumanRequest(Base, TimestampMixin):
+    __tablename__ = "ppt_human_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    request_type: Mapped[str] = mapped_column(String(60))
+    prompt: Mapped[str] = mapped_column(Text)
+    options_json: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PPTTemplateProfile(Base, TimestampMixin):
+    __tablename__ = "ppt_template_profiles"
+    __table_args__ = (UniqueConstraint("template_id", "template_hash"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    template_id: Mapped[str] = mapped_column(String(120), index=True)
+    template_hash: Mapped[str] = mapped_column(String(64))
+    catalog_version: Mapped[str] = mapped_column(String(40), default="")
+    profile_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    preview_urls_json: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class QualityReport(Base, TimestampMixin):
@@ -374,6 +485,9 @@ class ArtifactAsset(Base, TimestampMixin):
     mime_type: Mapped[str] = mapped_column(String(100), default="image/png")
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    source_scene_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     checksum: Mapped[str] = mapped_column(String(64), index=True)
     provider: Mapped[str] = mapped_column(String(50), default="")
@@ -428,6 +542,12 @@ class AgentChatSession(Base, TimestampMixin):
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     vision_model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    video_model_config_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    speech_model_config_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_configs.id", ondelete="SET NULL"), nullable=True, index=True
     )
 

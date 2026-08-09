@@ -38,51 +38,65 @@
     </div>
 
     <template v-else>
-      <!-- 2. 超紧凑型 4 维顶部指标概览栏 -->
+      <!-- 2. 4 维顶部指标概览栏 (双层上下布局，杜绝横向挤压截断) -->
       <div class="metrics-bar">
         <!-- 1. 当前激活模型 -->
         <div class="metric-chip border-indigo">
-          <div class="metric-icon bg-indigo"><el-icon><Cpu /></el-icon></div>
-          <div class="metric-text">
-            <div class="chip-label">当前激活模型</div>
-            <div class="chip-title truncate" :title="activeConfig?.name || activeConfig?.model_name || '未激活'">
-              {{ activeConfig ? (activeConfig.name || activeConfig.model_name) : '未接入配置' }}
+          <div class="chip-top-row">
+            <div class="chip-label-wrap">
+              <div class="metric-icon bg-indigo"><el-icon><Cpu /></el-icon></div>
+              <span class="chip-label">当前激活模型</span>
+            </div>
+            <div class="status-badge-wrap">
+              <span class="status-dot" :class="{ green: activeConfig }"></span>
+              <span class="status-txt">{{ activeConfig ? getProviderLabel(activeConfig.provider) : '等待配置' }}</span>
             </div>
           </div>
-          <div class="status-badge-wrap">
-            <span class="status-dot" :class="{ green: activeConfig }"></span>
-            <span class="status-txt">{{ activeConfig ? getProviderLabel(activeConfig.provider) : '等待配置' }}</span>
+          <div class="chip-title-val" :title="activeConfig?.name || activeConfig?.model_name || '未激活'">
+            {{ activeConfig ? (activeConfig.name || activeConfig.model_name) : '未接入配置' }}
           </div>
         </div>
 
         <!-- 2. 已接入配置总数 -->
         <div class="metric-chip border-blue">
-          <div class="metric-icon bg-blue"><el-icon><Platform /></el-icon></div>
-          <div class="metric-text">
-            <div class="chip-label">配置端点</div>
-            <div class="chip-title">{{ modelConfigs.length }} <span class="chip-unit">个服务接入</span></div>
+          <div class="chip-top-row">
+            <div class="chip-label-wrap">
+              <div class="metric-icon bg-blue"><el-icon><Platform /></el-icon></div>
+              <span class="chip-label">配置端点</span>
+            </div>
+            <span class="chip-tag tag-blue">OpenAI {{ providerStats.openai }} · Anthropic {{ providerStats.anthropic }}</span>
           </div>
-          <span class="chip-tag tag-blue">OpenAI {{ providerStats.openai }} · Anthropic {{ providerStats.anthropic }}</span>
+          <div class="chip-title-val">
+            {{ modelConfigs.length }} <span class="chip-unit">个服务接入</span>
+          </div>
         </div>
 
         <!-- 3. API 密钥安全防线 -->
         <div class="metric-chip border-emerald">
-          <div class="metric-icon bg-emerald"><el-icon><Key /></el-icon></div>
-          <div class="metric-text">
-            <div class="chip-label">密钥防线</div>
-            <div class="chip-title text-emerald">Fernet AES-256</div>
+          <div class="chip-top-row">
+            <div class="chip-label-wrap">
+              <div class="metric-icon bg-emerald"><el-icon><Key /></el-icon></div>
+              <span class="chip-label">密钥防线</span>
+            </div>
+            <span class="chip-tag tag-emerald">加密隔离</span>
           </div>
-          <span class="chip-tag tag-emerald">加密隔离</span>
+          <div class="chip-title-val text-emerald">
+            Fernet AES-256
+          </div>
         </div>
 
         <!-- 4. 架构推演引擎 -->
         <div class="metric-chip border-violet">
-          <div class="metric-icon bg-violet"><el-icon><Lightning /></el-icon></div>
-          <div class="metric-text">
-            <div class="chip-label">推演引擎</div>
-            <div class="chip-title text-violet">SSE Stream Engine</div>
+          <div class="chip-top-row">
+            <div class="chip-label-wrap">
+              <div class="metric-icon bg-violet"><el-icon><Lightning /></el-icon></div>
+              <span class="chip-label">推演引擎</span>
+            </div>
+            <span class="chip-tag tag-purple">流式 Agent</span>
           </div>
-          <span class="chip-tag tag-purple">流式 Agent</span>
+          <div class="chip-title-val text-violet">
+            SSE Stream Engine
+          </div>
         </div>
       </div>
 
@@ -302,7 +316,7 @@
           </div>
         </div>
 
-        <!-- TAB 2: 默认生成偏好 (加大内部 Card 尺寸，饱满无缝隙) -->
+        <!-- TAB 2: 默认生成偏好 (精致化配对，单屏饱满无错位) -->
         <div v-else-if="activeTab === 'preferences'" class="tab-pane animate-fade-in">
           <div class="preferences-grid">
             <!-- 左侧卡片：偏好设置表单 -->
@@ -338,7 +352,7 @@
                 </el-form-item>
 
                 <div class="form-btn-row">
-                  <el-button type="primary" size="default" class="w-full shadow-glow" :loading="savingPreferences" @click="handleSavePreferences">
+                  <el-button type="primary" size="default" class="w-full shadow-glow save-pref-btn" :loading="savingPreferences" @click="handleSavePreferences">
                     <el-icon class="mr-1.5"><Select /></el-icon> 保存偏好设置
                   </el-button>
                 </div>
@@ -372,7 +386,7 @@
               </div>
             </div>
 
-            <!-- 右侧卡片：PPT 模板 Preview (加大 Card 高度与尺寸，充实无空白) -->
+            <!-- 右侧卡片：PPT 模板 Preview (动态色彩与科技感幻灯片 Cover 效果) -->
             <div class="pref-card lf-card">
               <div class="card-head">
                 <h3 class="pane-card-title">
@@ -389,14 +403,17 @@
                   :class="{ selected: preferenceForm.default_ppt_template === item.id }"
                   @click="preferenceForm.default_ppt_template = item.id"
                 >
-                  <div class="slide-thumb" :style="{ background: `linear-gradient(135deg, ${item.palette.primary} 0%, ${item.palette.secondary} 100%)` }">
-                    <div class="slide-mockup">
-                      <div class="mockup-header-bar"></div>
-                      <div class="mockup-lines">
-                        <div class="mockup-line w-80"></div>
-                        <div class="mockup-line w-50"></div>
+                  <div 
+                    class="slide-thumb-cover" 
+                    :style="{ background: `linear-gradient(135deg, ${item.palette?.primary || '#1e40af'} 0%, ${item.palette?.secondary || '#3b82f6'} 100%)` }"
+                  >
+                    <div class="slide-cover-inner">
+                      <div class="cover-top-tag"></div>
+                      <div class="cover-title-line"></div>
+                      <div class="cover-sub-lines">
+                        <span class="sub-line l1"></span>
+                        <span class="sub-line l2"></span>
                       </div>
-                      <div class="mockup-footer-dot"></div>
                     </div>
                   </div>
 
@@ -442,18 +459,6 @@
                 </div>
                 <p class="protocol-desc">适配 Claude 3.5 Sonnet / Haiku 原生 API 端点，支持 System Prompt 拆分与思考 Token 模式。</p>
                 <div class="protocol-footer">支持模型: claude-3-5-sonnet, claude-3-5-haiku</div>
-              </div>
-
-              <div class="protocol-box">
-                <div class="protocol-box-header">
-                  <div class="flex items-center gap-2">
-                    <span class="protocol-icon bg-slate-100 text-slate-700"><el-icon><Monitor /></el-icon></span>
-                    <span class="protocol-name">Mock 模拟模式</span>
-                  </div>
-                  <span class="protocol-tag tag-slate font-mono">mock://local</span>
-                </div>
-                <p class="protocol-desc">确定性本地测试模式，适合无需真实大模型 API 消耗、离线演练与 UI 演示。</p>
-                <div class="protocol-footer">支持模型: mock-model (零 API Key 依赖)</div>
               </div>
             </div>
 
@@ -577,6 +582,9 @@
               <el-checkbox value="structured_output">结构化输出</el-checkbox>
               <el-checkbox value="vision_review">视觉复核</el-checkbox>
               <el-checkbox value="image_generation">图片生成</el-checkbox>
+              <el-checkbox value="video_generation">视频生成</el-checkbox>
+              <el-checkbox value="speech_generation">语音生成</el-checkbox>
+              <el-checkbox value="media_composition">媒体合成</el-checkbox>
             </el-checkbox-group>
           </el-form-item>
 
@@ -585,19 +593,41 @@
           </el-form-item>
         </div>
 
-        <el-form-item v-if="configForm.capabilities.includes('image_generation') || configForm.capabilities.includes('vision_review')" label="图片 / 视觉接口模式">
+        <el-form-item v-if="hasSpecializedTransport" label="媒体接口模式">
           <el-select v-model="configForm.api_mode" class="w-full">
-            <el-option label="OpenAI Images / Vision" value="openai_images" />
-            <el-option label="Google Gemini Image" value="google_gemini_image" />
-            <el-option label="Google Gemini Vision" value="google_vision" />
-            <el-option label="Anthropic Vision" value="anthropic_vision" />
-            <el-option label="自定义图片 HTTP" value="custom_image_http" />
+            <el-option v-if="hasImageCapability" label="OpenAI Images / Vision" value="openai_images" />
+            <el-option v-if="hasImageCapability" label="Google Gemini Image" value="google_gemini_image" />
+            <el-option v-if="hasImageCapability" label="Google Gemini Vision" value="google_vision" />
+            <el-option v-if="hasImageCapability" label="Anthropic Vision" value="anthropic_vision" />
+            <el-option v-if="hasImageCapability" label="自定义图片 HTTP" value="custom_image_http" />
+            <el-option v-if="configForm.capabilities.includes('video_generation')" label="自定义异步视频 HTTP" value="custom_video_async_http" />
+            <el-option v-if="configForm.capabilities.includes('speech_generation')" label="自定义语音 HTTP" value="custom_speech_http" />
+            <el-option v-if="configForm.capabilities.includes('media_composition')" label="本地 FFmpeg" value="local_ffmpeg" />
+            <el-option v-if="hasMediaCapability" label="Mock 媒体服务" value="mock_media" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="configForm.api_mode === 'custom_image_http'" label="自定义接口映射（JSON）">
-          <el-input v-model="configForm.adapter_config_json_text" type="textarea" :rows="5" placeholder='{"endpoint_path":"/images/generations","prompt_field":"prompt","response_base64_path":"data.0.b64_json"}' />
-          <div class="url-hint-row">只支持字段映射，不执行脚本；远程图片 URL 必须为 HTTPS 且不能指向内网。</div>
+        <el-form-item v-if="isCustomMediaTransport" label="自定义接口映射（JSON）">
+          <el-input v-model="configForm.adapter_config_json_text" type="textarea" :rows="7" :placeholder="adapterConfigPlaceholder" />
+          <div class="url-hint-row">
+            仅支持安全字段映射，不执行脚本。视频接口可配置创建、轮询、取消、状态、进度与结果路径；远程媒体 URL 必须为 HTTPS 且不能指向内网。
+          </div>
         </el-form-item>
+        <div v-if="configForm.capabilities.includes('video_generation')" class="dialog-form-row">
+          <el-form-item label="视频并发数" class="form-col">
+            <el-input-number v-model="configForm.media_max_concurrency" :min="1" :max="16" class="w-full" />
+          </el-form-item>
+          <el-form-item label="轮询间隔（秒）" class="form-col">
+            <el-input-number v-model="configForm.media_poll_interval_seconds" :min="0.5" :max="60" :step="0.5" class="w-full" />
+          </el-form-item>
+        </div>
+        <div v-if="configForm.capabilities.includes('video_generation')" class="dialog-form-row">
+          <el-form-item label="最大视频时长（秒）" class="form-col">
+            <el-input-number v-model="configForm.media_max_duration_seconds" :min="1" :max="7200" class="w-full" />
+          </el-form-item>
+          <el-form-item label="最大媒体文件（MB）" class="form-col">
+            <el-input-number v-model="configForm.media_max_file_mb" :min="1" :max="4096" class="w-full" />
+          </el-form-item>
+        </div>
 
         <div v-if="testResult" class="test-result-banner" :class="testResult.success ? 'bg-success' : 'bg-danger'">
           <div class="banner-content">
@@ -663,7 +693,7 @@ const testingConfigId = ref<string | null>(null);
 const activatingConfigId = ref<string | null>(null);
 const testingConnection = ref(false);
 
-const activeTab = ref<'models' | 'preferences' | 'protocols'>('models');
+const activeTab = ref<'models' | 'preferences' | 'protocols'>('preferences');
 const modelConfigStore = useModelConfigStore();
 const modelConfigs = ref<ModelConfigItem[]>([]);
 const activeConfigId = ref<string | null>(null);
@@ -706,9 +736,13 @@ const configForm = reactive({
   timeout_seconds: 90,
   context_window_tokens: 1_000_000,
   supports_multimodal: false,
-  capabilities: ['text_generation', 'structured_output'] as Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>,
+  capabilities: ['text_generation', 'structured_output'] as ModelCapability[],
   api_mode: 'text_chat',
   adapter_config_json_text: '{}',
+  media_max_concurrency: 2,
+  media_poll_interval_seconds: 2,
+  media_max_duration_seconds: 1800,
+  media_max_file_mb: 500,
   is_active: true,
 });
 
@@ -718,6 +752,51 @@ const formRules: FormRules = {
   base_url: [{ required: true, message: '请输入 Base URL', trigger: 'blur' }],
   context_window_tokens: [{ required: true, message: '请输入上下文窗口', trigger: 'change' }],
 };
+
+type ModelCapability = ModelConfigItem['capabilities'][number];
+
+const hasImageCapability = computed(() => (
+  configForm.capabilities.includes('image_generation')
+  || configForm.capabilities.includes('vision_review')
+));
+const hasMediaCapability = computed(() => (
+  configForm.capabilities.includes('video_generation')
+  || configForm.capabilities.includes('speech_generation')
+  || configForm.capabilities.includes('media_composition')
+));
+const hasSpecializedTransport = computed(() => hasImageCapability.value || hasMediaCapability.value);
+const isCustomMediaTransport = computed(() => [
+  'custom_image_http',
+  'custom_video_async_http',
+  'custom_speech_http',
+].includes(configForm.api_mode));
+const adapterConfigPlaceholder = computed(() => {
+  if (configForm.api_mode === 'custom_video_async_http') {
+    return '{"endpoint_path":"/videos/generations","poll_endpoint_path":"/videos/generations/{job_id}","cancel_endpoint_path":"/videos/generations/{job_id}/cancel","job_id_path":"id","status_path":"status","progress_path":"progress","result_url_path":"output.url"}';
+  }
+  if (configForm.api_mode === 'custom_speech_http') {
+    return '{"endpoint_path":"/audio/speech","prompt_field":"input","voice_field":"voice","response_url_path":"audio.url"}';
+  }
+  return '{"endpoint_path":"/images/generations","prompt_field":"prompt","response_base64_path":"data.0.b64_json"}';
+});
+
+function preferredTestCapability(capabilities: ModelCapability[]) {
+  if (capabilities.includes('video_generation')) return 'video_generation' as const;
+  if (capabilities.includes('speech_generation')) return 'speech_generation' as const;
+  if (capabilities.includes('image_generation')) return 'image_generation' as const;
+  return 'text_generation' as const;
+}
+
+function adapterWithMediaLimits(adapter: Record<string, unknown>) {
+  if (!configForm.capabilities.includes('video_generation')) return adapter;
+  return {
+    ...adapter,
+    max_concurrency: configForm.media_max_concurrency,
+    poll_interval_seconds: configForm.media_poll_interval_seconds,
+    max_duration_seconds: configForm.media_max_duration_seconds,
+    max_file_mb: configForm.media_max_file_mb,
+  };
+}
 
 function formatContextWindow(value: number): string {
   if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M tokens`;
@@ -757,6 +836,10 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude') {
   configForm.capabilities = ['text_generation', 'structured_output'];
   configForm.api_mode = 'text_chat';
   configForm.adapter_config_json_text = '{}';
+  configForm.media_max_concurrency = 2;
+  configForm.media_poll_interval_seconds = 2;
+  configForm.media_max_duration_seconds = 1800;
+  configForm.media_max_file_mb = 500;
   if (presetType === 'deepseek') {
     configForm.name = 'DeepSeek V3 官方';
     configForm.provider = 'openai_compatible';
@@ -794,7 +877,7 @@ function getGradeLabel(level: string) {
 
 function getTemplateName(id: string) {
   const found = pptTemplates.value.find(t => t.id === id);
-  return found ? found.name : '瑞士蓝·清晰学术';
+  return found ? found.name : '学术科研·成品微课';
 }
 
 function handleProviderChange(val: string) {
@@ -874,6 +957,10 @@ function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'cla
     configForm.capabilities = ['text_generation', 'structured_output'];
     configForm.api_mode = 'text_chat';
     configForm.adapter_config_json_text = '{}';
+    configForm.media_max_concurrency = 2;
+    configForm.media_poll_interval_seconds = 2;
+    configForm.media_max_duration_seconds = 1800;
+    configForm.media_max_file_mb = 500;
   }
   configForm.is_active = modelConfigs.value.length === 0;
   dialogVisible.value = true;
@@ -894,6 +981,10 @@ function handleEditConfig(config: ModelConfigItem) {
   configForm.capabilities = [...(config.capabilities || ['text_generation', 'structured_output'])];
   configForm.api_mode = config.api_mode || 'text_chat';
   configForm.adapter_config_json_text = JSON.stringify(config.adapter_config || {}, null, 2);
+  configForm.media_max_concurrency = Number(config.adapter_config?.max_concurrency || 2);
+  configForm.media_poll_interval_seconds = Number(config.adapter_config?.poll_interval_seconds || 2);
+  configForm.media_max_duration_seconds = Number(config.adapter_config?.max_duration_seconds || 1800);
+  configForm.media_max_file_mb = Number(config.adapter_config?.max_file_mb || 500);
   configForm.is_active = config.is_active;
   dialogVisible.value = true;
 }
@@ -924,6 +1015,9 @@ async function handleTestCard(config: ModelConfigItem) {
       base_url: config.base_url,
       model_name: config.model_name,
       timeout_seconds: 15,
+      test_capability: preferredTestCapability(config.capabilities),
+      api_mode: config.api_mode,
+      adapter_config: config.adapter_config,
     });
     if (res.success) {
       ElMessage.success({ message: `[${config.name}] ${res.message}`, duration: 4000 });
@@ -957,6 +1051,9 @@ async function handleTestInDialog() {
       model_name: configForm.model_name.trim(),
       api_key: configForm.api_key.trim(),
       timeout_seconds: 15,
+      test_capability: preferredTestCapability(configForm.capabilities),
+      api_mode: configForm.api_mode,
+      adapter_config: adapterWithMediaLimits(JSON.parse(configForm.adapter_config_json_text || '{}')),
     });
     testResult.value = { success: res.success, message: res.message };
   } catch (err: any) {
@@ -999,7 +1096,7 @@ async function handleSubmitConfig() {
       supports_multimodal: configForm.capabilities.includes('vision_review'),
       capabilities: configForm.capabilities,
       api_mode: configForm.api_mode,
-      adapter_config: adapterConfig,
+      adapter_config: adapterWithMediaLimits(adapterConfig),
       is_active: configForm.is_active,
     };
 
@@ -1045,7 +1142,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  padding: 12px 24px 16px;
+  padding: 14px 24px 18px;
   max-width: var(--content-max-width);
   margin: 0 auto;
   overflow: hidden;
@@ -1056,8 +1153,8 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--border-default);
   flex-shrink: 0;
 }
@@ -1070,7 +1167,7 @@ onMounted(() => {
 .header-eyebrow {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   color: var(--color-primary);
   font-size: 11px;
   font-weight: 800;
@@ -1084,7 +1181,7 @@ onMounted(() => {
 }
 
 .header-title {
-  font-size: 19px;
+  font-size: 20px;
   font-weight: 900;
   letter-spacing: -0.02em;
   margin: 0;
@@ -1094,6 +1191,7 @@ onMounted(() => {
 .header-subtitle-inline {
   color: var(--text-muted);
   font-size: 12.5px;
+  font-weight: 500;
 }
 
 .header-actions {
@@ -1103,15 +1201,15 @@ onMounted(() => {
 }
 
 .shadow-glow {
-  box-shadow: var(--shadow-glow-primary) !important;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.25) !important;
 }
 
-/* 2. 超紧凑型 4 维顶部 Bar (动态分配列宽比例，解决右端 Tag 截断 Bug) */
+/* 2. 4 维顶部指标概览栏 (双层上下布局，完全杜绝横向挤压) */
 .metrics-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr) minmax(0, 0.88fr) minmax(0, 1.12fr);
-  gap: 10px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
   flex-shrink: 0;
 }
 
@@ -1125,9 +1223,10 @@ onMounted(() => {
   background: #ffffff;
   border: 1.5px solid #e2e8f0;
   border-radius: 14px;
-  padding: 8px 11px;
+  padding: 10px 14px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  justify-content: space-between;
   gap: 8px;
   border-left-width: 4px;
   transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -1146,13 +1245,28 @@ onMounted(() => {
 .metric-chip.border-emerald { border-left-color: #059669; }
 .metric-chip.border-violet { border-left-color: #7c3aed; }
 
+.chip-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chip-label-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .metric-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
-  font-size: 16px;
+  font-size: 15px;
   flex-shrink: 0;
 }
 
@@ -1161,31 +1275,25 @@ onMounted(() => {
 .metric-icon.bg-emerald { background: #ecfdf5; color: #059669; }
 .metric-icon.bg-violet { background: #f5f3ff; color: #7c3aed; }
 
-.metric-text {
-  flex: 1;
-  min-width: 0;
-}
-
 .chip-label {
-  font-size: 11px;
+  font-size: 12px;
   color: #64748b;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  margin-bottom: 2px;
+  white-space: nowrap;
 }
 
-.chip-title {
-  font-size: 13.5px;
+.chip-title-val {
+  font-size: 14.5px;
   font-weight: 800;
   color: #0f172a;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .chip-unit {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   color: #64748b;
 }
@@ -1194,12 +1302,12 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 700;
   color: #047857;
   background: #ecfdf5;
   border: 1px solid #a7f3d0;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
   white-space: nowrap;
   flex-shrink: 0;
@@ -1218,9 +1326,9 @@ onMounted(() => {
 }
 
 .chip-tag {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 700;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 999px;
   white-space: nowrap;
   flex-shrink: 0;
@@ -1253,7 +1361,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 16px;
+  padding: 7px 18px;
   border: 0;
   background: transparent;
   border-radius: 999px;
@@ -1271,7 +1379,7 @@ onMounted(() => {
 .tab-btn.active {
   background: #ffffff;
   color: #4f46e5;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 3px 12px rgba(79, 70, 229, 0.12);
 }
 
 .tab-badge {
@@ -1299,7 +1407,7 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 12px;
+  padding: 5px 13px;
   border-radius: 999px;
   border: 1px solid #e2e8f0;
   background: #ffffff;
@@ -1319,8 +1427,8 @@ onMounted(() => {
 }
 
 .btn-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
 }
 
@@ -1437,7 +1545,7 @@ onMounted(() => {
 .model-cards-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+  gap: 14px;
 }
 
 .config-card {
@@ -1582,18 +1690,18 @@ onMounted(() => {
   box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35) !important;
 }
 
-/* Tab 2: 偏好 Grid (加大内部模板 bar 尺寸，饱满无长空白) */
+/* Tab 2: 偏好 Grid */
 .preferences-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
+  gap: 18px;
   align-items: stretch;
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 900px) {
   .preferences-grid {
     grid-template-columns: 1fr;
     overflow-y: auto;
@@ -1601,17 +1709,18 @@ onMounted(() => {
 }
 
 .pref-card {
-  padding: 14px 18px;
+  padding: 16px 20px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 10px;
-  box-shadow: var(--shadow-xs);
-  border-radius: var(--radius-card);
-  background: var(--bg-surface);
+  gap: 12px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 16px;
+  background: #ffffff;
   height: 100%;
   box-sizing: border-box;
   overflow: hidden;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.03);
 }
 
 .card-head {
@@ -1619,31 +1728,32 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f1f5f9;
   flex-shrink: 0;
 }
 
 .pane-card-title {
-  font-size: 15.5px;
+  font-size: 16px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: #0f172a;
   margin: 0;
 }
 
 .title-sub {
-  font-size: 11.5px;
-  color: var(--text-muted);
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
 }
 
 .pref-form {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .pref-form :deep(.el-form-item) {
-  margin-bottom: 6px !important;
+  margin-bottom: 8px !important;
 }
 
 .pref-form :deep(.el-form-item__label) {
@@ -1656,12 +1766,12 @@ onMounted(() => {
 
 .pref-form :deep(.el-input__wrapper),
 .pref-form :deep(.el-select__wrapper) {
-  border-radius: 999px !important;
+  border-radius: 12px !important;
   background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%) !important;
   box-shadow: 0 0 0 1.5px #cbd5e1 inset, 0 2px 6px rgba(15, 23, 42, 0.03) !important;
   padding: 4px 14px !important;
   transition: all 200ms ease !important;
-  height: 38px !important;
+  height: 40px !important;
 }
 
 .pref-form :deep(.el-input__wrapper:hover),
@@ -1681,26 +1791,34 @@ onMounted(() => {
 }
 
 .form-btn-row {
-  margin-top: 6px;
+  margin-top: 8px;
+}
+
+.save-pref-btn {
+  font-weight: 800 !important;
+  border-radius: 12px !important;
+  height: 40px !important;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  border: 0 !important;
 }
 
 /* 左侧卡片实时偏好规约面板 */
 .preference-active-summary {
-  margin-top: 6px;
-  padding: 10px 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+  border: 1px solid #c7d2fe;
+  border-radius: 14px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .summary-title-line {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 800;
   color: #4338ca;
 }
@@ -1708,27 +1826,28 @@ onMounted(() => {
 .summary-chips-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 6px;
+  gap: 8px;
 }
 
 .summary-chip-item {
   background: #ffffff;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 6px 10px;
+  border-radius: 10px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.02);
 }
 
 .summary-chip-item .chip-k {
-  font-size: 10.5px;
+  font-size: 11px;
   color: #64748b;
   font-weight: 600;
 }
 
 .summary-chip-item .chip-v {
-  font-size: 12px;
+  font-size: 12.5px;
   color: #0f172a;
   font-weight: 700;
   overflow: hidden;
@@ -1738,20 +1857,21 @@ onMounted(() => {
 
 .summary-chip-item .chip-v.highlight {
   color: #4f46e5;
+  font-weight: 800;
 }
 
 .summary-footer-tip {
   margin: 0;
-  font-size: 11px;
+  font-size: 11.5px;
   color: #64748b;
   line-height: 1.45;
 }
 
-/* 纵向模板列表：内嵌可滚动，充满卡片高度，主视图绝对无全屏滚动 */
+/* 纵向模板列表：内嵌可滚动，充满卡片高度 */
 .template-vertical-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -1760,87 +1880,85 @@ onMounted(() => {
 
 .visual-tpl-card-compact {
   border: 1.5px solid #e2e8f0;
-  border-radius: 12px;
+  border-radius: 14px;
   overflow: hidden;
   cursor: pointer;
-  transition: all var(--motion-normal) var(--ease-out-smooth);
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
   background: #ffffff;
   display: flex;
   align-items: center;
-  padding: 10px 14px;
-  gap: 12px;
+  padding: 12px 16px;
+  gap: 14px;
   flex-shrink: 0;
-  min-height: 56px;
 }
 
 .visual-tpl-card-compact:hover {
-  border-color: var(--color-primary);
+  border-color: #a5b4fc;
   transform: translateX(3px);
-  box-shadow: var(--shadow-xs);
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.08);
 }
 
 .visual-tpl-card-compact.selected {
-  border-color: var(--color-primary);
-  background: linear-gradient(135deg, rgba(79, 70, 229, 0.05) 0%, #ffffff 100%);
-  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.12);
+  border-color: #4f46e5;
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.04) 0%, #ffffff 100%);
+  box-shadow: 0 4px 16px rgba(79, 70, 229, 0.12);
 }
 
-/* Slide Thumbnail Mockup 加大尺寸 */
-.slide-thumb {
-  width: 76px;
-  height: 48px;
-  border-radius: 6px;
-  padding: 5px;
+/* Dynamic Slide Cover Thumbnail */
+.slide-thumb-cover {
+  width: 78px;
+  height: 52px;
+  border-radius: 8px;
+  padding: 6px;
   box-sizing: border-box;
   flex-shrink: 0;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.15);
+  position: relative;
+  overflow: hidden;
 }
 
-.bg-swiss-blue { background: linear-gradient(135deg, #1e40af 0%, #3b82f6 100%); }
-.bg-nordic-clean { background: linear-gradient(135deg, #047857 0%, #10b981 100%); }
-.bg-modern-academic { background: linear-gradient(135deg, #6b21a8 0%, #a855f7 100%); }
-
-.slide-mockup {
+.slide-cover-inner {
   width: 100%;
   height: 100%;
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.2);
   backdrop-filter: blur(4px);
-  border-radius: 4px;
-  padding: 4px;
+  border-radius: 5px;
+  padding: 5px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
 }
 
-.mockup-header-bar {
-  height: 4px;
-  width: 65%;
+.cover-top-tag {
+  width: 14px;
+  height: 3px;
   background: #ffffff;
   border-radius: 1px;
 }
 
-.mockup-lines {
-  display: flex;
-  flex-direction: column;
-  gap: 2.5px;
+.cover-title-line {
+  height: 4px;
+  width: 80%;
+  background: #ffffff;
+  border-radius: 1px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
-.mockup-line {
-  height: 3px;
+.cover-sub-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sub-line {
+  height: 2.5px;
   background: rgba(255, 255, 255, 0.85);
   border-radius: 1px;
 }
 
-.mockup-line.w-80 { width: 85%; }
-.mockup-line.w-50 { width: 55%; }
-
-.mockup-footer-dot {
-  width: 3.5px;
-  height: 3.5px;
-  border-radius: 50%;
-  background: #ffffff;
-}
+.sub-line.l1 { width: 90%; }
+.sub-line.l2 { width: 60%; }
 
 .slide-info-wrap {
   flex: 1;
@@ -1851,22 +1969,23 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
 }
 
 .slide-name {
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 800;
-  color: var(--text-primary);
+  color: #0f172a;
 }
 
 .checked-badge-pill {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 800;
-  color: #15803d;
-  background: #dcfce7;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill);
+  color: #047857;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  padding: 2px 9px;
+  border-radius: 999px;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1874,49 +1993,50 @@ onMounted(() => {
 
 .slide-desc {
   font-size: 12px;
-  color: var(--text-muted);
+  color: #64748b;
   margin: 0;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 /* Tab 3: 协议 Grid */
 .protocols-grid {
   display: grid;
   grid-template-columns: 2fr 1fr;
-  gap: 14px;
+  gap: 16px;
 }
 
-.protocol-cards-column { display: flex; flex-direction: column; gap: 8px; }
+.protocol-cards-column { display: flex; flex-direction: column; gap: 10px; }
 
 .protocol-box {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
-  padding: 12px 14px;
+  background: #ffffff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
 }
 
-.protocol-box-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
-.protocol-icon { width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; font-size: 13px; }
-.protocol-name { font-size: 13.5px; font-weight: 800; color: var(--text-primary); }
-.protocol-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 6px; line-height: 1.35; }
-.protocol-footer { font-size: 11px; color: var(--text-muted); font-family: monospace; border-top: 1px solid var(--border-light); padding-top: 5px; }
+.protocol-box-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.protocol-icon { width: 26px; height: 26px; border-radius: 6px; display: grid; place-items: center; font-size: 14px; }
+.protocol-name { font-size: 14px; font-weight: 800; color: #0f172a; }
+.protocol-desc { font-size: 12.5px; color: #64748b; margin: 0 0 8px; line-height: 1.4; }
+.protocol-footer { font-size: 11.5px; color: #64748b; font-family: monospace; border-top: 1px dashed #e2e8f0; padding-top: 6px; }
 
 .runtime-status-card {
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
   color: #ffffff;
-  padding: 18px;
-  border-radius: var(--radius-card);
+  padding: 20px;
+  border-radius: 16px;
   position: relative;
   overflow: hidden;
   box-sizing: border-box;
 }
 
 .bg-watermark { position: absolute; right: -15px; bottom: -15px; font-size: 90px; opacity: 0.06; pointer-events: none; }
-.runtime-card-title { font-size: 14.5px; font-weight: 800; color: #ffffff; margin: 0 0 12px; display: flex; align-items: center; gap: 6px; }
+.runtime-card-title { font-size: 15px; font-weight: 800; color: #ffffff; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; }
 .ic-indigo { color: #818cf8; }
 
-.runtime-info-list { display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
-.runtime-info-row { display: flex; justify-content: space-between; padding-bottom: 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.runtime-info-list { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.runtime-info-row { display: flex; justify-content: space-between; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
 .runtime-info-row.no-border { border-bottom: 0; padding-bottom: 0; }
 .rt-label { color: #94a3b8; }
 .rt-val { color: #e2e8f0; font-weight: 600; }

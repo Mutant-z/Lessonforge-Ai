@@ -15,7 +15,9 @@ import SlideThumbnail from '../components/domain/SlideThumbnail.vue';
 import TeachingTimeline from '../components/domain/TeachingTimeline.vue';
 import ObjectiveCard from '../components/domain/ObjectiveCard.vue';
 import ExerciseCard from '../components/domain/ExerciseCard.vue';
+import ExercisePreview from '../components/domain/ExercisePreview.vue';
 import TaskSheetCard from '../components/domain/TaskSheetCard.vue';
+import TaskSheetPreview from '../components/domain/TaskSheetPreview.vue';
 import StoryboardItem from '../components/domain/StoryboardItem.vue';
 import VerbatimSegment from '../components/domain/VerbatimSegment.vue';
 import QualityIssueCard from '../components/domain/QualityIssueCard.vue';
@@ -379,8 +381,13 @@ onMounted(loadArtifacts);
           </template>
 
           <!-- 3. Exercises Specialized Renderer -->
-          <template v-else-if="activeTab === 'exercise' && currentArtifact.content_json?.exercises">
-            <div class="exercises-view">
+          <template v-else-if="activeTab === 'exercise' && currentArtifact.content_json">
+            <ExercisePreview
+              v-if="currentArtifact.content_json.sections"
+              :content="currentArtifact.content_json"
+              :source-versions="currentArtifact.source_versions_json"
+            />
+            <div v-else-if="currentArtifact.content_json.exercises" class="exercises-view">
               <ExerciseCard
                 v-for="(ex, eIdx) in currentArtifact.content_json.exercises"
                 :key="ex.id || eIdx"
@@ -391,8 +398,13 @@ onMounted(loadArtifacts);
           </template>
 
           <!-- 4. Task Sheet Specialized Renderer -->
-          <template v-else-if="activeTab === 'task_sheet' && currentArtifact.content_json?.tasks">
-            <div class="task-sheets-view">
+          <template v-else-if="activeTab === 'task_sheet' && currentArtifact.content_json">
+            <TaskSheetPreview
+              v-if="currentArtifact.content_json.course_info && currentArtifact.content_json.tasks"
+              :content="currentArtifact.content_json"
+              :source-versions="currentArtifact.source_versions_json"
+            />
+            <div v-else-if="currentArtifact.content_json.tasks" class="task-sheets-view">
               <TaskSheetCard
                 v-for="(tk, tIdx) in currentArtifact.content_json.tasks"
                 :key="tk.task_id || tIdx"

@@ -1,9 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import timedelta
+from typing import Optional
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.entities import User
@@ -28,11 +31,24 @@ async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=Token)
-async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    remember_me: Optional[str] = Form(default=None),
+    db: AsyncSession = Depends(get_db),
+):
     user = await db.scalar(select(User).where(or_(User.username == form.username, User.email == form.username)))
     if user is None or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
-    return Token(access_token=create_access_token(user.id))
+    
+    is_remember = True if remember_me is None or remember_me == "" else str(remember_me).lower() not in ("false", "0", "no", "off")
+    settings = get_settings()
+    expire_minutes = (
+        settings.access_token_expire_minutes
+        if is_remember
+        else settings.access_token_expire_minutes_session
+    )
+    expires_delta = timedelta(minutes=expire_minutes)
+    return Token(access_token=create_access_token(user.id, expires_delta=expires_delta))
 
 
 @router.get("/me", response_model=UserRead)

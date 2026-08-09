@@ -48,6 +48,113 @@ class AgentDecision(BaseModel):
         return self
 
 
+class LayoutElementSpec(BaseModel):
+    """LLM 可执行的页面元素几何；坐标单位为英寸。"""
+
+    kind: Literal["textbox", "shape", "image", "chart"] = "textbox"
+    role: str = ""
+    text: str = ""
+    x: float
+    y: float
+    w: float = Field(gt=0)
+    h: float = Field(gt=0)
+    style: dict[str, Any] = Field(default_factory=dict)
+    shape_type: str = "rect"
+    fill: str | None = None
+    line: str | None = None
+    file_path: str = ""
+    content_ref: str = ""
+    visual_slot: str = ""
+
+
+class PageLayoutSpec(BaseModel):
+    """一页可直接交给 layout_slide_batch 的布局结果。"""
+
+    slide_id: str
+    layout_type: str
+    designRationale: str = ""
+    elements: list[LayoutElementSpec] = Field(min_length=1)
+    visual_region: dict[str, float] | None = None
+    visual_type: str | None = None
+    render_mode: Literal["semantic", "hybrid", "absolute"] = "absolute"
+
+
+class SlideLayoutArtifact(BaseModel):
+    """布局 Agent 的强类型产物，防止模型只返回自然语言建议。"""
+
+    slides: list[PageLayoutSpec] = Field(min_length=1)
+
+
+class VisualPlacement(BaseModel):
+    """A bounded image region in slide inches."""
+
+    x: float = Field(ge=0, le=13.333)
+    y: float = Field(ge=0, le=7.5)
+    w: float = Field(gt=0, le=13.333)
+    h: float = Field(gt=0, le=7.5)
+
+    @model_validator(mode="after")
+    def _inside_slide(self) -> "VisualPlacement":
+        if self.x + self.w > 13.333 + 0.01 or self.y + self.h > 7.5 + 0.01:
+            raise ValueError("视觉素材坐标超出幻灯片画布")
+        return self
+
+
+class VisualRequest(BaseModel):
+    """One concrete, executable visual-generation request."""
+
+    slide_id: str = Field(min_length=1)
+    asset_name: str = Field(min_length=1)
+    visual_type: Literal["ai_image", "image", "diagram", "chart"] = "ai_image"
+    prompt: str = Field(min_length=1)
+    purpose: str = ""
+    placement: VisualPlacement
+    aspect_ratio: str = "4:3"
+    visual_slot: str = "primary_visual"
+
+
+class VisualPlanArtifact(BaseModel):
+    """Canonical visual-plan boundary consumed by Media and Editor."""
+
+    requests: list[VisualRequest] = Field(min_length=1)
+
+
+class MutationEvidence(BaseModel):
+    """Proof that a requested mutation was really applied to the current run."""
+
+    kind: Literal["slide_content", "layout", "image"]
+    slide_id: str
+    tool_name: str
+    asset_id: str = ""
+    element_id: str = ""
+
+
+class SlideContentPatchItem(BaseModel):
+    """Validated page patch returned by the content agent."""
+
+    id: str = Field(min_length=1)
+    changed_fields: list[Literal["title", "purpose", "body", "blocks", "speaker_notes"]] = Field(min_length=1)
+    title: str | None = None
+    purpose: str | None = None
+    body: list[str] | None = None
+    blocks: list[dict[str, Any]] | None = None
+    speaker_notes: str | None = None
+
+    model_config = {"extra": "allow"}
+
+    @model_validator(mode="after")
+    def _changed_fields_match_payload(self) -> "SlideContentPatchItem":
+        declared = set(self.changed_fields)
+        provided = self.model_fields_set & {"title", "purpose", "body", "blocks", "speaker_notes"}
+        if declared != provided:
+            raise ValueError("changed_fields 必须与实际提供的语义字段完全一致")
+        return self
+
+
+class SlideContentPatch(BaseModel):
+    slides: list[SlideContentPatchItem] = Field(min_length=1)
+
+
 class ToolResult(BaseModel):
     """一次工具调用的执行结果。"""
 
@@ -55,7 +162,20 @@ class ToolResult(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     artifact_id: str | None = None
     error: str | None = None
+    error_code: str | None = None
+    retryable: bool = False
     events: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PPTAgentError(RuntimeError):
+    """Stable runtime failure carried from Agent/Tool through the task service."""
+
+    def __init__(self, code: str, message: str, *, retryable: bool = True, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.user_message = message
+        self.retryable = retryable
+        self.details = details or {}
 
 
 class AgentSpec(BaseModel):
@@ -75,6 +195,23 @@ class PipelinePlan(BaseModel):
 
     def keys(self) -> list[str]:
         return [agent.key for agent in self.agents]
+
+
+class OrchestratorPlanDecision(BaseModel):
+    """LLM-selected initial graph plan; invalid/unknown entries are filtered by Runtime."""
+
+    agents: list[str] = Field(default_factory=list)
+    skill_capabilities: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
+class OrchestratorActionDecision(BaseModel):
+    """Re-planning decision made after observing an Agent/tool/artifact result."""
+
+    action: Literal["delegate", "finish"] = "delegate"
+    next_agent: str | None = None
+    discover_capabilities: list[str] = Field(default_factory=list)
+    summary: str = ""
 
 
 # ---------- 事件负载 ----------

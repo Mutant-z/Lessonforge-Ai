@@ -29,5 +29,7 @@ async def auth_headers(client):
     username = f"teacher_{os.urandom(4).hex()}"
     await client.post("/api/v1/auth/register", json={"username": username, "password": "strong-password"})
     response = await client.post("/api/v1/auth/login", data={"username": username, "password": "strong-password"})
+    if response.status_code != 200:
+        raise RuntimeError(f"Login failed: {response.status_code} {response.text}")
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 

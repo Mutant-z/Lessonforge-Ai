@@ -14,6 +14,20 @@ class VisualPlanAgent(Agent):
     produced_artifacts = ["visual_plan"]
     allowed_tools = ["get_template_design"]
 
+    def build_system_prompt(self, tc: ToolContext) -> str:
+        targets = list(getattr(tc.runtime, "selected_slide_ids", []) or [])
+        scope = "、".join(targets) if targets else "教师指令涉及的页面"
+        return super().build_system_prompt(tc) + (
+            "\n你必须真实分析当前页面已有标题、正文、视觉面板、图注、留白、模板配色和视觉重心，"
+            "为图片生成写出具体可执行的 prompt 与 placement，不能返回整页 slides 内容代替视觉请求。"
+            f"\n本轮目标页：{scope}。只允许为这些页面创建请求。"
+            "\ncompleted.output 必须严格为 {requests:[{slide_id,asset_name,visual_type:'ai_image',"
+            "prompt,purpose,placement:{x,y,w,h},aspect_ratio:'4:3'}]}。坐标单位英寸，画布 13.333×7.5；"
+            "普通内容页图片槽位只能放在右侧：x 不得小于 7.0、y 不得小于 1.7，"
+            "并与标题、正文、visual_caption 保持至少 0.3 英寸间距；图片必须避开文字区域。"
+            "图片本身只表达视觉关系，不要嵌入任何中文、英文、字母、数字、公式、标签、Logo 或水印。"
+        )
+
     async def decide(self, tc: ToolContext) -> AgentDecision:
         ctx = tc.ctx
         if not ctx.has_tool_result("get_template_design"):

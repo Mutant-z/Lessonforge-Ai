@@ -1,27 +1,58 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
 import { Check, MagicStick, Switch, VideoPause, VideoPlay } from '@element-plus/icons-vue';
 import { pptTemplatesApi } from '../../../api/pptTemplates';
+import { pipelineApi } from '../../../api/pipeline';
 import { useProjectStore } from '../../../stores/project';
 import { usePipelineStore } from '../../../stores/pipeline';
-import type { PPTTemplate } from '../../../types';
+import { useModelConfigStore } from '../../../stores/modelConfigs';
+import type { PPTContent, PPTTemplate } from '../../../types';
 import { PIPELINE_STATUS_LABELS } from '../../../types/agentPipeline';
 import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
 import PPTPreviewWorkbench from './PPTPreviewWorkbench.vue';
+import { normalizeSlideIndex, updateSlideSelection } from '../../../utils/slideNavigation';
+import { imageGenerationModels, uniqueImageModelId } from '../../../utils/imageModelSelection';
 
 const props = defineProps<{
   courseId: string;
   taskType: string;
 }>();
+const emit = defineEmits<{ (event: 'open-version-drawer'): void }>();
 
 const projectStore = useProjectStore();
 const pipelineStore = usePipelineStore();
+const modelConfigStore = useModelConfigStore();
 
 const task = computed(() => projectStore.currentTask);
-const status = computed(() => pipelineStore.status || projectStore.pipelineStatus || task.value?.status || '');
+const pipelineMatchesActiveRun = computed(() => {
+  const activeRunId = task.value?.active_run_id;
+  const detailRunId = pipelineStore.run?.generation_run_id;
+  return !activeRunId || activeRunId === detailRunId;
+});
+const status = computed(() => {
+  if (!pipelineMatchesActiveRun.value) return projectStore.pipelineStatus || task.value?.status || 'queued';
+  return pipelineStore.status || projectStore.pipelineStatus || task.value?.status || '';
+});
 const paused = computed(() => status.value === 'paused');
-const isRunning = computed(() => ['queued', 'running'].includes(status.value));
+const pausing = computed(() => status.value === 'pausing');
+const isRunning = computed(() => ['queued', 'running', 'pausing'].includes(status.value));
+const imageModelCandidates = computed(() => imageGenerationModels(modelConfigStore.configs));
+const bindingImageModel = ref(false);
+
+async function ensureImageModelBinding() {
+  if (!task.value || task.value.image_model_config_id || bindingImageModel.value) return;
+  const modelId = uniqueImageModelId(task.value.image_model_config_id, modelConfigStore.configs);
+  if (!modelId) return;
+  bindingImageModel.value = true;
+  try {
+    await projectStore.setTaskImageModel(props.courseId, props.taskType, modelId);
+    await projectStore.refreshCurrentTask();
+  } finally {
+    bindingImageModel.value = false;
+  }
+}
 
 const templates = ref<PPTTemplate[]>([]);
 const showTemplateDrawer = ref(false);
@@ -29,6 +60,9 @@ const applyingTemplate = ref(false);
 
 const activeSlideIndex = ref(0);
 const targetSlideContext = ref<number | null>(null);
+const selectedSlideIndexes = ref<Set<number>>(new Set());
+const restoringPreview = ref(true);
+const selectedSlideIds = computed(() => [...selectedSlideIndexes.value].map(index => String(previewContent.value?.slides?.[index]?.id || `S${String(index + 1).padStart(2, '0')}`)));
 
 // Resizable splitter proportion
 const leftPercent = ref(38);
@@ -41,25 +75,73 @@ const mobilePane = ref<'agent' | 'preview'>('agent');
 const statusType = computed(() => {
   if (status.value === 'running') return 'primary';
   if (status.value === 'completed') return 'success';
-  if (status.value === 'paused') return 'warning';
+  if (['pausing', 'paused'].includes(status.value)) return 'warning';
   if (status.value === 'failed') return 'danger';
   return 'info';
 });
 
 const pptContent = computed(() => {
-  const content = task.value?.current_artifact?.content_json;
+  const official = projectStore.officialArtifact?.artifact_type === 'ppt'
+    ? projectStore.officialArtifact
+    : task.value?.current_artifact;
+  const content = official?.content_json;
   return content && content.slides ? content : null;
 });
 
-const currentTemplateId = computed(() => pptContent.value?.theme || 'default');
+const viewedContent = computed(() => {
+  const content = projectStore.viewedArtifact?.artifact_type === 'ppt'
+    ? projectStore.viewedArtifact.content_json
+    : null;
+  return content?.slides ? content as PPTContent : null;
+});
+
+const officialTemplateId = computed(() => pptContent.value?.theme || 'default');
+
+const previewContent = computed(() => {
+  if (viewedContent.value) return viewedContent.value;
+  const draft = pipelineStore.draftArtifact;
+  const draftMatches = Boolean(
+    draft?.slides?.length
+    && pipelineStore.draftRunId
+    && pipelineStore.draftRunId === pipelineStore.run?.generation_run_id
+    && pipelineStore.draftCourseId === task.value?.course_id
+    && pipelineStore.draftTaskId === task.value?.id
+    && !['completed', 'failed', 'cancelled'].includes(status.value),
+  );
+  if (!draft || !draftMatches) return pptContent.value;
+  const baseSlides = [...((pptContent.value?.slides || []) as any[])];
+  for (const [index, slide] of draft.slides.entries()) {
+    if (slide) baseSlides[index] = slide;
+  }
+  return { ...(pptContent.value || {}), ...draft, slides: baseSlides, theme: pptContent.value?.theme || officialTemplateId.value } as PPTContent;
+});
+const currentTemplateId = computed(() => previewContent.value?.theme || officialTemplateId.value);
+const draftSlideIndex = computed(() => {
+  const path = pipelineStore.draftArtifact?.last_patch?.[0]?.path;
+  const match = typeof path === 'string' ? path.match(/^\/slides\/(\d+)$/) : null;
+  return match ? Number(match[1]) : undefined;
+});
 const template = computed(() => {
   return templates.value.find(item => item.id === currentTemplateId.value) || null;
 });
+const previewLoading = computed(() => restoringPreview.value || (!previewContent.value && (
+  pipelineStore.loading || ['queued', 'running', 'pausing'].includes(status.value)
+)));
+const visiblePreviewContent = computed(() => restoringPreview.value ? null : previewContent.value);
 
+let detailLoading = false;
 async function loadDetail() {
-  await pipelineStore.load(props.courseId, props.taskType);
-  pipelineStore.restoreThoughtsFromHistory();
-  pipelineStore.syncThoughts();
+  if (detailLoading) return null;
+  detailLoading = true;
+  try {
+    const detail = await pipelineStore.load(props.courseId, props.taskType);
+    if (!detail) return null;
+    pipelineStore.restoreThoughtsFromHistory();
+    pipelineStore.syncThoughts();
+    return detail;
+  } finally {
+    detailLoading = false;
+  }
 }
 
 async function loadTemplates() {
@@ -71,15 +153,26 @@ async function loadTemplates() {
   }
 }
 
-function send(content: string) {
-  void projectStore.sendMessage(props.courseId, props.taskType, content);
+async function send(content: string) {
+  const runId = pipelineStore.run?.generation_run_id;
+  if (isRunning.value && runId) {
+    await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value);
+    await loadDetail();
+  }
+  else {
+    pipelineStore.beginRun();
+    await projectStore.createPPTRun(props.courseId, content, selectedSlideIds.value);
+    await loadDetail();
+  }
   targetSlideContext.value = null;
-  void loadDetail();
+  selectedSlideIndexes.value = new Set();
 }
 
 async function pause() {
+  if (pausing.value || pipelineStore.pauseLoading) return;
   await pipelineStore.pause(props.courseId, props.taskType);
   await loadDetail();
+  startPolling();
 }
 
 async function resume() {
@@ -87,12 +180,36 @@ async function resume() {
   await loadDetail();
 }
 
+async function handleHumanResponse(requestId: string, choice: string) {
+  const runId = pipelineStore.run?.generation_run_id;
+  if (!runId || !requestId) return;
+  await pipelineApi.humanResponse(runId, requestId, choice);
+  await loadDetail();
+}
+
 function setModel(modelId: string) {
   void projectStore.setTaskModel(props.courseId, props.taskType, modelId);
 }
 
-function handleSelectSlide(index: number) {
-  activeSlideIndex.value = index;
+async function setImageModel(modelId: string) {
+  await projectStore.setTaskImageModel(props.courseId, props.taskType, modelId);
+  await projectStore.refreshCurrentTask();
+}
+
+function requireImageModel() {
+  ElMessage.warning(
+    imageModelCandidates.value.length > 1
+      ? '请先在输入框下方选择一个图片模型，再发送图片生成指令。'
+      : '请先在模型设置中配置具备 image_generation 能力的图片模型。',
+  );
+}
+
+function handleSelectSlide(index: number, additive = false) {
+  const safeIndex = normalizeSlideIndex(index, previewContent.value?.slides?.length || 0);
+  activeSlideIndex.value = safeIndex;
+  const next = updateSlideSelection(selectedSlideIndexes.value, safeIndex, additive);
+  selectedSlideIndexes.value = next;
+  targetSlideContext.value = next.size === 1 ? [...next][0] : null;
   mobilePane.value = 'preview';
 }
 
@@ -106,10 +223,9 @@ async function handleApplyTemplate(templateId: string) {
   if (!artifact || applyingTemplate.value) return;
   applyingTemplate.value = true;
   try {
-    const result = await pptTemplatesApi.applyTemplate(artifact.id, templateId, artifact.version);
-    if (task.value) task.value.current_artifact = result.artifact;
+    await pipelineApi.switchTemplate(artifact.id, templateId, selectedSlideIds.value);
     showTemplateDrawer.value = false;
-    await projectStore.refreshTasks();
+    await loadDetail();
   } catch {
     // handled in API
   } finally {
@@ -159,8 +275,8 @@ function startPolling() {
   stopPolling();
   pollTimer = window.setInterval(() => {
     const s = pipelineStore.run?.status;
-    if (s && ['queued', 'running', 'paused'].includes(s)) void loadDetail();
-    else if (status.value === 'running') void loadDetail();
+    if (s && ['queued', 'running', 'pausing', 'paused'].includes(s)) void loadDetail();
+    else if (['running', 'pausing'].includes(status.value)) void loadDetail();
   }, 2000);
 }
 
@@ -170,17 +286,46 @@ function stopPolling() {
 }
 
 onMounted(async () => {
-  await loadTemplates();
-  await loadDetail();
+  try {
+    projectStore.setHydrationStatus('loading_pipeline_snapshot');
+    const [, detail] = await Promise.all([
+      loadTemplates(), loadDetail(), modelConfigStore.load().catch(() => []),
+    ]);
+    await ensureImageModelBinding();
+    if (!detail && task.value?.active_run_id) {
+      await projectStore.refreshCurrentTask();
+      await loadDetail();
+    }
+    projectStore.setHydrationStatus('applying_current_run_events');
+    pipelineStore.syncThoughts();
+    // A backend restart can briefly restore the run before the task endpoint has
+    // returned its formal artifact. Re-fetch once instead of rendering a false
+    // "not generated" state.
+    if (!pptContent.value) await projectStore.refreshCurrentTask();
+  } finally {
+    restoringPreview.value = false;
+    projectStore.setHydrationStatus('ready');
+  }
   startPolling();
 });
 
 onUnmounted(stopPolling);
 
 watch(() => status.value, newStatus => {
-  if (['queued', 'running', 'paused'].includes(newStatus)) startPolling();
+  if (['queued', 'running', 'pausing', 'paused'].includes(newStatus)) startPolling();
   else stopPolling();
 });
+
+watch(() => task.value?.current_artifact?.id, (artifactId, previousId) => {
+  if (artifactId && previousId && artifactId !== previousId && status.value === 'completed') {
+    pipelineStore.clearDraft();
+  }
+});
+
+watch(
+  () => [task.value?.id, task.value?.image_model_config_id, imageModelCandidates.value.length] as const,
+  () => { void ensureImageModelBinding(); },
+);
 
 // SSE 实时思考增量 → 单调累加到 pipeline store（打字机渲染）
 watch(
@@ -224,9 +369,10 @@ watch(
           </el-tag>
         </div>
         <div class="pane-controls">
-          <el-button v-if="!paused && status === 'running'" size="small" @click="pause">
+          <el-button v-if="status === 'running'" size="small" :loading="pipelineStore.pauseLoading" @click="pause">
             <el-icon><VideoPause /></el-icon>&nbsp;暂停
           </el-button>
+          <el-button v-else-if="pausing" size="small" loading disabled>暂停中</el-button>
           <el-button v-else-if="paused" size="small" type="primary" @click="resume">
             <el-icon><VideoPlay /></el-icon>&nbsp;继续
           </el-button>
@@ -239,17 +385,25 @@ watch(
         :tool-calls="pipelineStore.toolCalls"
         :is-running="isRunning"
         :agent-thoughts="pipelineStore.agentThoughts"
+        :agent-status-texts="pipelineStore.agentStatusTexts"
         @select-slide="handleSelectSlide"
+        @human-response="handleHumanResponse"
       />
 
       <AgentComposer
         :target-slide="targetSlideContext"
+        :target-slides="[...selectedSlideIndexes]"
         :is-running="isRunning"
+        :pause-loading="pipelineStore.pauseLoading || pausing"
         :model-config-id="task?.model_config_id"
+        :image-model-config-id="task?.image_model_config_id"
+        :image-model-available-count="imageModelCandidates.length"
         @send="send"
         @pause="pause"
         @clear-target-slide="targetSlideContext = null"
         @change-model="setModel"
+        @change-image-model="setImageModel"
+        @image-model-required="requireImageModel"
       />
     </aside>
 
@@ -272,14 +426,17 @@ watch(
       :style="{ width: `${100 - leftPercent}%` }"
     >
       <PPTPreviewWorkbench
-        :ppt-content="pptContent"
+        :ppt-content="visiblePreviewContent"
         :template="template"
         :is-running="isRunning"
         :active-slide-index="activeSlideIndex"
-        @select-slide="activeSlideIndex = $event"
+        :draft-slide-index="draftSlideIndex"
+        :selected-slides="selectedSlideIndexes"
+        :loading="previewLoading"
+        @select-slide="handleSelectSlide"
         @modify-slide="handleModifySlide"
         @open-template-drawer="showTemplateDrawer = true"
-        @open-version-drawer="projectStore.refreshCurrentTask()"
+        @open-version-drawer="emit('open-version-drawer')"
         @sync-context="projectStore.runTask(courseId, taskType, 'sync_context')"
       />
     </main>

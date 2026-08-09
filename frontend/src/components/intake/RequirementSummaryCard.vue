@@ -204,13 +204,13 @@ function promptForField(label: string) {
 
 <style scoped>
 .requirement-card {
-  background: var(--surface-primary, #ffffff);
+  background: #ffffff;
   border: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
-  transition: all 300ms var(--ease-out-smooth, ease);
+  transition: all 300ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .requirement-card.flash-update {
@@ -218,7 +218,7 @@ function promptForField(label: string) {
 }
 
 @keyframes cardFlash {
-  0% { box-shadow: inset 0 0 0 2px var(--primary-500, #6366f1); }
+  0% { box-shadow: inset 0 0 0 2px #6366f1; }
   100% { box-shadow: inset 0 0 0 0 transparent; }
 }
 
@@ -230,6 +230,7 @@ function promptForField(label: string) {
   padding: 16px 20px;
   border-bottom: 1px solid #f1f5f9;
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  flex-shrink: 0;
 }
 
 .header-main {
@@ -244,27 +245,28 @@ function promptForField(label: string) {
 }
 
 .revision-tag {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 800;
-  color: var(--primary-700, #4338ca);
-  background: var(--primary-50, #eef2ff);
-  border: 1px solid var(--primary-200, #c7d2fe);
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
   padding: 1px 8px;
-  border-radius: var(--radius-pill, 999px);
+  border-radius: 999px;
 }
 
 .card-title {
   margin: 0;
-  font-size: 15px;
+  font-size: 15.5px;
   font-weight: 800;
-  color: var(--text-primary, #0f172a);
+  color: #0f172a;
   letter-spacing: -0.01em;
 }
 
 .header-sub-note {
   font-size: 11.5px;
-  color: var(--text-muted, #64748b);
+  color: #64748b;
   margin-top: 2px;
+  font-weight: 500;
 }
 
 .completion-pill {
@@ -275,9 +277,9 @@ function promptForField(label: string) {
 }
 
 .completion-pill span {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
-  color: var(--primary-600, #4f46e5);
+  color: #4f46e5;
 }
 
 .mini-progress-bar {
@@ -292,7 +294,7 @@ function promptForField(label: string) {
   height: 100%;
   background: linear-gradient(90deg, #6366f1 0%, #4338ca 100%);
   border-radius: 999px;
-  transition: width 400ms var(--ease-out-smooth, ease);
+  transition: width 400ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .field-groups-scroll {
@@ -302,7 +304,7 @@ function promptForField(label: string) {
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
 }
 
 .group-block {
@@ -317,14 +319,14 @@ function promptForField(label: string) {
 }
 
 .group-name {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 800;
-  color: #475569;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: #334155;
+  letter-spacing: 0.02em;
   background: #f1f5f9;
-  padding: 3px 10px;
-  border-radius: var(--radius-pill, 999px);
+  border: 1px solid #e2e8f0;
+  padding: 3px 12px;
+  border-radius: 999px;
 }
 
 .group-fields-grid {
@@ -335,42 +337,42 @@ function promptForField(label: string) {
 
 .field-cell {
   background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 12px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 14px;
   padding: 12px 16px;
-  transition: all 200ms var(--ease-out-smooth, ease);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+  transition: all 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.02);
 }
 
 .field-cell:hover {
   border-color: #cbd5e1;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.05);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
 }
 
 .field-cell.confirmed {
-  border-left: 3.5px solid var(--primary-600, #4f46e5);
+  border-left: 4px solid #4f46e5;
   background: #ffffff;
 }
 
 .field-cell.assumption {
-  border-left: 3.5px solid #d97706;
+  border-left: 4px solid #f59e0b;
   background: #fffdf5;
+  border-color: #fde68a;
 }
 
-/* Redesigned Missing Field: Soft & Non-stressful dashed style */
 .field-cell.missing {
-  border: 1px dashed #cbd5e1;
-  border-left: 3.5px solid #94a3b8;
+  border: 1.5px dashed #cbd5e1;
+  border-left: 4px solid #94a3b8;
   background: #f8fafc;
 }
 
 .field-cell.missing:hover {
-  border-color: var(--primary-500, #6366f1);
+  border-color: #6366f1;
   background: #f1f5f9;
 }
 
 .field-cell.optional {
-  border-left: 3.5px solid #cbd5e1;
+  border-left: 4px solid #cbd5e1;
 }
 
 .field-head {
@@ -393,7 +395,7 @@ function promptForField(label: string) {
 }
 
 .req-star {
-  color: var(--primary-600, #4f46e5);
+  color: #4f46e5;
   font-size: 13px;
   font-weight: 900;
 }
@@ -406,39 +408,43 @@ function promptForField(label: string) {
 
 .status-chip {
   font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: var(--radius-pill, 999px);
+  font-weight: 800;
+  padding: 2px 9px;
+  border-radius: 999px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
 .status-chip.confirmed {
-  background: var(--primary-50, #eef2ff);
-  color: var(--primary-700, #4338ca);
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
 }
 
 .status-chip.assumption {
   background: #fffbeb;
   color: #b45309;
+  border: 1px solid #fde68a;
 }
 
 .status-chip.missing {
-  background: #e2e8f0;
-  color: #475569;
+  background: #fff7ed;
+  color: #c2410c;
+  border: 1px solid #ffedd5;
   cursor: pointer;
-  transition: all var(--motion-fast, 150ms);
+  transition: all 150ms ease;
 }
 
 .status-chip.missing:hover {
-  background: var(--primary-50, #eef2ff);
-  color: var(--primary-600, #4f46e5);
+  background: #ffedd5;
+  color: #9a3412;
 }
 
 .status-chip.optional {
   background: #f1f5f9;
   color: #64748b;
+  border: 1px solid #e2e8f0;
 }
 
 .edit-btn {
@@ -448,14 +454,14 @@ function promptForField(label: string) {
   cursor: pointer;
   padding: 4px;
   border-radius: 6px;
-  transition: all var(--motion-fast, 150ms);
+  transition: all 150ms ease;
   display: grid;
   place-items: center;
 }
 
 .edit-btn:hover {
-  color: var(--primary-600, #4f46e5);
-  background: var(--primary-50, #eef2ff);
+  color: #4f46e5;
+  background: #eef2ff;
 }
 
 .field-value-body {

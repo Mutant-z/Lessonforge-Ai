@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import time
+from uuid import uuid4
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,7 +19,10 @@ from app.agent.context import ContextState, estimate_tokens
 from app.agent.definitions import AGENT_BY_KEY, agent_specs_for_trigger
 from app.agent.events import PipelineEventEmitter
 from app.agent.registry import ToolContext, execute_tool, summarize
-from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan
+from app.agent.schemas import (
+    AgentDecision, AgentSpec, PipelinePlan, PPTAgentError, SlideContentPatch, SlideLayoutArtifact, VisualPlanArtifact,
+)
+from app.agent.slide_rendering import runtime_baseline_slides
 from app.core.database import SessionLocal
 from app.models.entities import GenerationRun, GenerationStep, PipelineRun
 from app.providers.llm.mock import MockProvider
@@ -28,6 +32,26 @@ logger = logging.getLogger(__name__)
 MAX_TOTAL_STEPS = 40
 MAX_ESTIMATED_TOKENS = 60_000
 RETRY_ATTEMPTS = 2
+
+HANDOFF_ALIASES = {
+    "image_generation": "media",
+    "image_agent": "media",
+    "visual_asset": "media",
+    "visual_assets": "media",
+    "builder": "ppt_editor",
+    "editor": "ppt_editor",
+    "qa": "visual_qa",
+    "content": "slide_content",
+}
+
+
+def normalize_handoff(value: str | None) -> str | None:
+    """把模型使用的能力名/角色名转换为可执行 Agent key。"""
+    if not value:
+        return None
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    canonical = HANDOFF_ALIASES.get(key, key)
+    return canonical if canonical in AGENT_BY_KEY else None
 
 
 class PipelinePaused(Exception):
@@ -65,6 +89,23 @@ class PipelineRuntime:
     _steps: int = 0
     current_agent_key: str = ""
     checkpoint_start: int = 0
+    dialogue_summary: str | None = None   # 对话单线完成时的正文（message/sync 触发用最终回复替换）
+    requested_handoff: str | None = None
+    cancel_event: asyncio.Event | None = None
+    selected_slide_ids: list[str] = field(default_factory=list)
+    affected_slide_ids: list[str] = field(default_factory=list)
+    draft_artifact_id: str | None = None
+    mutation_applied: bool = False
+    active_intent: str = "GENERATE"
+    expected_visual_requests: list[dict[str, Any]] = field(default_factory=list)
+    generated_asset_ids: list[str] = field(default_factory=list)
+    mutation_evidence: list[dict[str, Any]] = field(default_factory=list)
+    publishable: bool = False
+    blocking_issues: list[dict[str, Any]] = field(default_factory=list)
+    content_policy: str = "edit"
+    baseline_content_hashes: dict[str, str] = field(default_factory=dict)
+    render_coverage: dict[str, dict[str, Any]] = field(default_factory=dict)
+    baseline_slides: list[dict[str, Any]] | None = None
 
     def request_pause(self):
         if self.pause_event is not None:
@@ -72,6 +113,9 @@ class PipelineRuntime:
 
     def pause_requested(self) -> bool:
         return self.pause_event is not None and self.pause_event.is_set()
+
+    def cancel_requested(self) -> bool:
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
 
 def build_plan(runtime: PipelineRuntime, trigger: str) -> PipelinePlan:
@@ -88,26 +132,360 @@ def _mock_mode(runtime: PipelineRuntime) -> bool:
 async def _agent_call(runtime: PipelineRuntime, agent_key: str, agent, decision_count: int) -> AgentDecision:
     """调用 Agent：Mock 走确定性 decide（合成思考增量），LLM 走 stream_decision（流式思考 → 决策）。"""
     tc = runtime.tool_context
-    if _mock_mode(runtime):
+    # Media/Editor/QA/Revision are execution or control nodes: design decisions have
+    # already been produced by real LLM agents. Keeping them deterministic prevents a model from
+    # repeatedly issuing the same mutating/QA tools until the step budget is spent.
+    if _mock_mode(runtime) or agent_key in {"media", "ppt_editor", "visual_qa", "revision"}:
         decision = await agent.decide(tc)
+        if agent_key == "slide_content" and decision.completed:
+            decision = _ensure_executable_slide_content(runtime, decision)
+        if agent_key == "visual_plan" and decision.completed:
+            decision = _ensure_executable_visual_plan(runtime, decision)
         if runtime.emitter is not None and decision.message:
             # 合成流式思考：把 mock Agent 的可见消息推送为一段思考文本（前端打字机负责逐字渲染）
+            await runtime.emitter.agent_status_delta(agent_key, decision.message)
             await runtime.emitter.agent_thought_chunk(agent_key, decision.message, flush_now=True)
         return decision
     system = agent.build_system_prompt(tc)
     prompt = (
         "上下文：\n" + runtime.context.to_prompt(agent_key)
-        + "\n可用工具 Schema：\n" + _tool_schemas_text(runtime)
-        + "\n请先输出 thinking 字段（一段 Markdown 思考过程，说明你如何分析任务、下一步要做什么），"
+        + "\n可用工具 Schema：\n" + _tool_schemas_text(runtime, agent)
+        + "\n页面作用域：" + (
+            "本轮只能读取并修改这些目标页：" + ", ".join(runtime.selected_slide_ids)
+            + "。可以参考相邻页保持连贯，但任何 output/tool_calls 都不得包含非目标页。"
+            if runtime.selected_slide_ids else "本轮为全局任务，可以处理整套页面。"
+        )
+        + "\n请先输出可见执行摘要（简短说明当前阶段和下一步动作，不要输出隐式思维链或系统提示词），"
         "再输出决策：要么给出一批 tool_calls，要么 completed（含 output/summary）。"
         "只返回一个 AgentDecision JSON。"
     )
     runtime.token_usage["tokens"] += estimate_tokens(prompt)
     runtime.token_usage["llm_calls"] += 1
     decision = await _stream_agent_decision(runtime, agent_key, system, prompt)
+    if agent_key == "slide_content" and decision.completed:
+        try:
+            decision = _ensure_executable_slide_content(runtime, decision, allow_safe_fallback=False)
+        except PPTAgentError as first_error:
+            import json
+            correction_prompt = (
+                prompt
+                + "\n上一次 completed.output 未通过 SlideContentPatch 校验："
+                + str(first_error.details.get("validation_error") or first_error)[:500]
+                + "\n请只纠正结构并再次返回 AgentDecision；不得改写原意。SlideContentPatch Schema：\n"
+                + json.dumps(SlideContentPatch.model_json_schema(), ensure_ascii=False)
+            )
+            runtime.token_usage["tokens"] += estimate_tokens(correction_prompt)
+            runtime.token_usage["llm_calls"] += 1
+            corrected = await _stream_agent_decision(runtime, agent_key, system, correction_prompt)
+            decision = _ensure_executable_slide_content(runtime, corrected, allow_safe_fallback=True)
+    if agent_key == "layout" and decision.completed:
+        decision = await _ensure_executable_layout(runtime, agent, decision)
+    if agent_key == "visual_plan" and decision.completed:
+        decision = _ensure_executable_visual_plan(runtime, decision)
     if runtime.emitter is not None:
         await runtime.emitter.flush_thought()
     return decision
+
+
+def _ensure_executable_slide_content(
+    runtime: PipelineRuntime, decision: AgentDecision, *, allow_safe_fallback: bool = True,
+) -> AgentDecision:
+    """Reject empty content completions and safely restore content-locked pages."""
+    targets = set(runtime.selected_slide_ids or [])
+    try:
+        parsed = SlideContentPatch.model_validate(decision.output or {})
+        patch_slides = [item.model_dump(exclude_none=True) for item in parsed.slides]
+        patch_ids = {str(item.get("id") or "") for item in patch_slides}
+        if targets and patch_ids != targets:
+            raise ValueError("页面内容结果必须且只能覆盖全部目标页面")
+        source_slides = runtime_baseline_slides(runtime)
+        source_by_id = {str(item.get("id") or ""): item for item in source_slides}
+        slides: list[dict[str, Any]] = []
+        for patch in patch_slides:
+            slide_id = str(patch.get("id") or "")
+            merged = dict(source_by_id.get(slide_id) or {})
+            if merged:
+                for field in patch.get("changed_fields") or []:
+                    merged[field] = patch[field]
+                merged["id"] = slide_id
+                merged["changed_fields"] = list(patch.get("changed_fields") or [])
+                slides.append(merged)
+            else:
+                slides.append(patch)
+        return AgentDecision(
+            completed=True, output={**(decision.output or {}), "slides": slides},
+            summary=decision.summary, message=decision.message, handoff=decision.handoff,
+        )
+    except Exception as exc:
+        if allow_safe_fallback and runtime.content_policy in {"preserve", "restore"}:
+            source_slides = runtime_baseline_slides(runtime)
+            safe = [item for item in source_slides if not targets or str(item.get("id") or "") in targets]
+            if safe and (not targets or {str(item.get("id") or "") for item in safe} == targets):
+                return AgentDecision(
+                    completed=True, output={"slides": safe},
+                    summary="已从当前正式版本恢复目标页文字", message="目标页面文字已安全恢复",
+                )
+        from app.agent.schemas import PPTAgentError
+        raise PPTAgentError(
+            "slide_content_invalid", "页面内容模型没有返回可应用的结构化页面，已保留原 PPT 版本。",
+            retryable=True, details={"validation_error": str(exc)[:300]},
+        ) from exc
+
+
+def _existing_visual_region(runtime: PipelineRuntime, slide_id: str) -> dict[str, float]:
+    """Prefer the current page's visual panel so an image-only change preserves layout."""
+    builder = runtime.builder
+    if builder is not None:
+        try:
+            slide = builder.get_slide(slide_id)
+        except KeyError:
+            slide = None
+        if slide:
+            caption = next((item for item in slide.get("elements") or [] if item.get("role") == "visual_caption"), None)
+            panel = next((item for item in slide.get("elements") or [] if item.get("role") in {"visual_panel", "visual", "image"}), None)
+            if panel:
+                x = float(panel.get("x") or 0)
+                y = float(panel.get("y") or 0)
+                w = float(panel.get("w") or 1)
+                h = float(panel.get("h") or 1)
+                if panel.get("role") == "visual_panel":
+                    x, y, w = x + 0.2, y + 0.2, max(0.4, w - 0.4)
+                    safe_bottom = float(caption.get("y")) - 0.15 if caption and caption.get("y") is not None else y + h - 0.35
+                    h = max(0.4, safe_bottom - y)
+                return {"x": x, "y": y, "w": w, "h": h}
+    return {"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2}
+
+
+def _ensure_executable_visual_plan(runtime: PipelineRuntime, decision: AgentDecision) -> AgentDecision:
+    """Normalize arbitrary LLM output to the only shape Media/Editor may consume."""
+    from app.agent.agents.media import normalize_visual_requests
+    from app.agent.agents.layout import normalize_visual_region
+
+    raw = decision.output or {}
+    requests = normalize_visual_requests(raw)
+    source_slides = runtime_baseline_slides(runtime)
+    source_by_id = {str(item.get("id") or ""): item for item in source_slides}
+    targets = list(runtime.selected_slide_ids or [])
+    if not targets:
+        targets = [str(item.get("slide_id") or "") for item in requests if item.get("slide_id")]
+    if runtime.active_intent == "IMAGE_UPDATE" and not targets:
+        raise PPTAgentError(
+            "visual_plan_invalid", "图片润色没有明确目标页面，已保留原 PPT 版本。",
+            retryable=False,
+        )
+
+    request_by_slide = {str(item.get("slide_id") or ""): item for item in requests}
+    canonical: list[dict[str, Any]] = []
+    for slide_id in targets:
+        source = source_by_id.get(slide_id, {})
+        proposed = request_by_slide.get(slide_id, {})
+        prompt = str(proposed.get("prompt") or "").strip()
+        if not prompt:
+            prompt = (
+                f"为 PPT 页面《{source.get('title', slide_id)}》生成一张教学配图。"
+                f"教师要求：{runtime.context.user_instruction}。"
+                f"页面目的：{source.get('purpose', '')}；视觉说明：{source.get('visual_suggestion', '')}。"
+                "构图清晰、具有真实材质和教学可读性，不要文字、Logo、水印或复杂 UI。"
+            )
+        # The model may propose an aesthetically plausible slot that still
+        # clips the title by a few pixels.  Canonicalize it before persisting
+        # the visual plan so every downstream agent and repair round uses the
+        # same non-overlapping coordinates.
+        page_type = str(source.get("page_type") or "concept")
+        placement = normalize_visual_region(
+            proposed.get("placement") or proposed.get("visual_region") or _existing_visual_region(runtime, slide_id),
+            getattr(runtime, "preferred_template", ""),
+            page_type,
+        )
+        prompt = _harden_visual_prompt(prompt)
+        canonical.append({
+            "slide_id": slide_id,
+            "asset_name": str(proposed.get("asset_name") or proposed.get("image_id") or f"visual_{slide_id}"),
+            "visual_type": "ai_image" if runtime.active_intent == "IMAGE_UPDATE" else (proposed.get("visual_type") or "ai_image"),
+            "prompt": prompt,
+            "purpose": str(proposed.get("purpose") or source.get("purpose") or ""),
+            "placement": placement,
+            "aspect_ratio": str(proposed.get("aspect_ratio") or "4:3"),
+            "visual_slot": str(proposed.get("visual_slot") or "primary_visual"),
+        })
+    parsed = VisualPlanArtifact.model_validate({"requests": canonical})
+    runtime.expected_visual_requests = [item.model_dump() for item in parsed.requests]
+    return AgentDecision(
+        completed=True,
+        output=parsed.model_dump(),
+        summary=decision.summary or f"已规划 {len(parsed.requests)} 个可执行视觉素材",
+        message=decision.message or "视觉生成需求与页面坐标已确认",
+        handoff=decision.handoff,
+    )
+
+
+def _harden_visual_prompt(prompt: str) -> str:
+    """Keep generated assets visual-only; page text belongs to the PPT layer."""
+    suffix = (
+        " 图片只承担视觉示意，不要在图片内渲染任何中文、英文、字母、数字、公式、"
+        "箭头标签、图注、Logo、水印或 UI 文本；所有教学文字由 PPT 文本层负责。"
+    )
+    return prompt if suffix.strip() in prompt else f"{prompt.rstrip()}。{suffix}"
+
+
+async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: AgentDecision) -> AgentDecision:
+    """Validate LLM aesthetics and compile semantic proposals to safe geometry."""
+    targets = set(runtime.selected_slide_ids or [])
+    from app.agent.agents.layout import normalize_visual_region
+    try:
+        parsed = SlideLayoutArtifact.model_validate(decision.output or {})
+        if targets:
+            parsed.slides = [item for item in parsed.slides if item.slide_id in targets]
+            if {item.slide_id for item in parsed.slides} != targets:
+                raise ValueError("布局结果未覆盖全部目标页面")
+    except Exception:
+        slide_content = await runtime.artifacts.latest("slide_content") if runtime.artifacts else None
+        source_slides = list((slide_content or {}).get("data", {}).get("slides") or []) or runtime_baseline_slides(runtime)
+        scoped_slides = [item for item in source_slides if not targets or str(item.get("id")) in targets]
+        if runtime.emitter is not None:
+            await runtime.emitter.agent_status_delta(
+                "layout", "模型已完成审美分析，正在把设计方案安全编译为可执行页面坐标。",
+            )
+        # Do not issue a second nested-schema request here. Several compatible
+        # providers support AgentDecision JSON but reject arbitrary deep schemas
+        # with upstream_schema_mismatch. The first call is the real LLM aesthetic
+        # analysis; this compiler turns it into bounded, deterministic geometry.
+        parsed = _compile_layout_from_analysis(runtime, decision, scoped_slides, agent)
+        if targets:
+            parsed.slides = [item for item in parsed.slides if item.slide_id in targets]
+            if {item.slide_id for item in parsed.slides} != targets:
+                raise RuntimeError("LLM 布局结果超出目标页范围或缺少目标页")
+    # Content-locked visual work may use the LLM's geometry only when every
+    # source text fragment remains renderable. Otherwise keep the LLM analysis
+    # but compile safe geometry from the canonical source content.
+    if runtime.content_policy in {"preserve", "restore"}:
+        from app.agent.agents.layout import _content_start_x
+        from app.agent.slide_rendering import render_coverage
+        source_slides = runtime_baseline_slides(runtime)
+        source_by_id = {str(item.get("id") or ""): item for item in source_slides}
+        missing = []
+        for item in parsed.model_dump().get("slides") or []:
+            slide_id = str(item.get("slide_id") or "")
+            baseline = source_by_id.get(slide_id)
+            safe_x = _content_start_x(
+                runtime.preferred_template,
+                str((baseline or {}).get("page_type") or "concept"),
+            )
+            text_under_template_rail = any(
+                element.get("kind") in {"textbox", "note"}
+                and float(element.get("x") or 0) < safe_x - 0.01
+                for element in (item.get("elements") or [])
+            )
+            if baseline and (
+                render_coverage(
+                    {**baseline, "render_mode": "absolute", "elements": item.get("elements") or []},
+                    baseline=baseline,
+                )["missing_refs"]
+                or text_under_template_rail
+            ):
+                missing.append(slide_id)
+        if missing:
+            scoped = [item for item in source_slides if str(item.get("id") or "") in set(missing)]
+            safe = _compile_layout_from_analysis(runtime, decision, scoped, agent)
+            safe_by_id = {item.slide_id: item for item in safe.slides}
+            parsed.slides = [safe_by_id.get(item.slide_id, item) for item in parsed.slides]
+    # Normalize the visual slot even when the LLM returned a schema-valid
+    # layout.  Schema validity only proves the rectangle is on-canvas; it does
+    # not prove that its top edge clears the title/text region.
+    normalized_slides = []
+    for item in parsed.slides:
+        data = item.model_dump()
+        page_type = "concept"
+        for source in runtime_baseline_slides(runtime):
+            if str(source.get("id") or "") == str(item.slide_id):
+                page_type = str(source.get("page_type") or "concept")
+                break
+        if data.get("visual_region"):
+            data["visual_region"] = normalize_visual_region(
+                data["visual_region"], runtime.preferred_template, page_type,
+            )
+        for element in data.get("elements") or []:
+            if element.get("kind") == "image":
+                region = normalize_visual_region(element, runtime.preferred_template, page_type)
+                element.update(region)
+        normalized_slides.append(data)
+    parsed = SlideLayoutArtifact.model_validate({"slides": normalized_slides})
+    return AgentDecision(
+        completed=True,
+        output=parsed.model_dump(),
+        summary=decision.summary or f"已分析并生成 {len(parsed.slides)} 页可执行布局",
+        message=decision.message or "页面审美与布局分析完成",
+        handoff=decision.handoff,
+    )
+
+
+def _compile_layout_from_analysis(
+    runtime: PipelineRuntime,
+    decision: AgentDecision,
+    scoped_slides: list[dict[str, Any]],
+    agent,
+) -> SlideLayoutArtifact:
+    """Compile the LLM's semantic/aesthetic proposal into bounded geometry."""
+    proposed = list((decision.output or {}).get("slides") or [])
+    proposed_by_id = {str(item.get("id") or item.get("slide_id")): item for item in proposed}
+    layouts: list[dict[str, Any]] = []
+    for source in scoped_slides:
+        slide_id = str(source.get("id") or "")
+        slide = {**source, **proposed_by_id.get(slide_id, {})}
+        rationale = str(slide.get("visual_suggestion") or decision.summary or "")
+        if slide.get("page_type") == "cover":
+            body = [str(item) for item in (slide.get("body") or [])]
+            title = str(slide.get("title") or "")
+            subtitle = body[0] if body else str(slide.get("purpose") or "")
+            question = body[1] if len(body) > 1 else str(slide.get("purpose") or "")
+            layouts.append({
+                "slide_id": slide_id,
+                "layout_type": "academic_split_hero",
+                "designRationale": rationale or "LLM 审美分析：强化标题层级、视觉重心与安全留白",
+                "elements": [
+                    {"kind": "textbox", "role": "title", "text": title,
+                     "content_ref": "title",
+                     "x": 0.8, "y": 1.15, "w": 4.35, "h": 1.65,
+                     "style": {"size": 34, "bold": True, "color": "primary"}},
+                    {"kind": "textbox", "role": "subtitle", "text": subtitle,
+                     "content_ref": "body",
+                     "x": 0.82, "y": 3.05, "w": 4.2, "h": 0.65,
+                     "style": {"size": 17, "color": "muted"}},
+                    {"kind": "shape", "role": "visual_panel", "x": 5.45, "y": 0.85, "w": 7.05, "h": 4.65,
+                     "shape_type": "rounded", "fill": "surface", "line": "secondary"},
+                    {"kind": "textbox", "role": "visual_caption", "text": "潜水艇水下受力 · 浮力矢量示意",
+                     "x": 5.85, "y": 4.65, "w": 6.2, "h": 0.45,
+                     "style": {"size": 15, "bold": True, "color": "primary", "align": "center"}},
+                    {"kind": "shape", "role": "question_card", "x": 0.8, "y": 4.15, "w": 4.35, "h": 1.35,
+                     "shape_type": "rounded", "fill": "background", "line": "secondary"},
+                    {"kind": "textbox", "role": "question", "text": question,
+                     "content_ref": "purpose",
+                     "x": 1.05, "y": 4.48, "w": 3.85, "h": 0.72,
+                     "style": {"size": 17, "bold": True, "color": "text"}},
+                ],
+                "visual_region": {"x": 5.75, "y": 1.15, "w": 6.45, "h": 3.25},
+                "visual_type": "image",
+            })
+        else:
+            visual = None
+            expected = next((
+                item for item in (runtime.expected_visual_requests or [])
+                if str(item.get("slide_id") or "") == slide_id
+            ), None)
+            if expected:
+                visual = {
+                    "visualType": expected.get("visual_type") or "ai_image",
+                    "placement": expected.get("placement") or _existing_visual_region(runtime, slide_id),
+                }
+            elif (
+                runtime.content_policy in {"preserve", "restore"}
+                and any(item.get("kind") in {"image", "chart"} for item in (source.get("elements") or []))
+            ):
+                visual = {"visualType": "image", "placement": _existing_visual_region(runtime, slide_id)}
+            fallback = agent._layout_slide(slide, visual, runtime.preferred_template)
+            fallback["designRationale"] = rationale or fallback.get("designRationale", "")
+            layouts.append(fallback)
+    return SlideLayoutArtifact.model_validate({"slides": layouts})
 
 
 async def _stream_agent_decision(runtime: PipelineRuntime, agent_key: str, system: str, prompt: str) -> AgentDecision:
@@ -122,6 +500,8 @@ async def _stream_agent_decision(runtime: PipelineRuntime, agent_key: str, syste
     try:
         async for kind, payload in stream_method(system, prompt, AgentDecision):
             if kind == "thought_delta" and runtime.emitter is not None and payload:
+                await runtime.emitter.agent_status_delta(agent_key, str(payload))
+                # Legacy event retained for historical clients and migrations.
                 await runtime.emitter.agent_thought_chunk(agent_key, str(payload))
             elif kind == "decision_ready":
                 decision = payload
@@ -132,10 +512,10 @@ async def _stream_agent_decision(runtime: PipelineRuntime, agent_key: str, syste
     return decision
 
 
-def _tool_schemas_text(runtime: PipelineRuntime) -> str:
+def _tool_schemas_text(runtime: PipelineRuntime, agent=None) -> str:
     from app.agent.registry import all_tool_schemas
     import json
-    return json.dumps(all_tool_schemas(), ensure_ascii=False)
+    return json.dumps(all_tool_schemas(getattr(agent, "allowed_tools", None)), ensure_ascii=False)
 
 
 async def _checkpoint_agent(runtime: PipelineRuntime, agent_key: str, decision: AgentDecision, step_index: int, artifact_id: str | None):
@@ -173,10 +553,50 @@ async def _checkpoint_agent(runtime: PipelineRuntime, agent_key: str, decision: 
 
 async def _persist_decision_artifact(runtime: PipelineRuntime, agent_key: str, decision: AgentDecision, step_index: int) -> str | None:
     """把 completed 决策的 output 持久化为 Agent 产出的 Artifact。"""
+    if decision.completed_artifact_id:
+        return decision.completed_artifact_id
     if not decision.completed or decision.output is None:
         return None
     produced = AGENT_BY_KEY[agent_key].produced_artifacts
     artifact_type = produced[0] if produced else "note"
+    if agent_key == "media" and not list((decision.output or {}).get("assets") or []):
+        runtime.context.add_note("本轮没有有效视觉叶子素材，未创建空 visual_asset 汇总产物。")
+        return None
+    if agent_key == "revision" and isinstance(decision.output, dict) and decision.output.get("slides"):
+        runtime.context.add_note("Revision Agent 返回了页面内容，已转交页面内容 Agent 重新校验并应用。")
+        runtime.requested_handoff = "slide_content"
+        return None
+    if agent_key == "slide_content":
+        output_slides = list((decision.output or {}).get("slides") or [])
+        if not output_slides:
+            raise PPTAgentError(
+                "slide_content_invalid", "页面内容 Agent 未生成可应用的结构化页面，已保留原 PPT 版本。",
+                retryable=True,
+            )
+        source_slides = runtime_baseline_slides(runtime)
+        if runtime.selected_slide_ids and source_slides:
+            replacements = {str(item.get("id")): item for item in output_slides if item.get("id")}
+            selected = set(runtime.selected_slide_ids)
+            decision.output = {
+                **decision.output,
+                "slides": [
+                    replacements.get(str(item.get("id")), item) if str(item.get("id")) in selected else item
+                    for item in source_slides
+                ],
+            }
+        runtime.affected_slide_ids = list(runtime.selected_slide_ids) or [
+            str(item.get("id")) for item in (decision.output or {}).get("slides", []) if item.get("id")
+        ]
+    if agent_key in {"layout", "visual_plan"} and runtime.selected_slide_ids:
+        selected = set(runtime.selected_slide_ids)
+        output = dict(decision.output or {})
+        for collection_key in ("slides", "visual_plans", "slides_visual_plan", "requests"):
+            if isinstance(output.get(collection_key), list):
+                output[collection_key] = [
+                    item for item in output[collection_key]
+                    if str(item.get("slide_id") or item.get("slideId") or item.get("id")) in selected
+                ]
+        decision.output = output
     artifact = await runtime.artifacts.create(
         artifact_type, "default", decision.output,
         producer_agent=agent_key, step_index=step_index,
@@ -188,29 +608,75 @@ async def _persist_decision_artifact(runtime: PipelineRuntime, agent_key: str, d
 
 async def _execute_tool_call(runtime: PipelineRuntime, agent_key: str, call, tool_context: ToolContext) -> None:
     started = time.monotonic()
-    await runtime.emitter.tool_call_started(agent_key, call.tool_name, call.id, input_summary=summarize(call.input, 200))
+    execution_id = str(uuid4())
+    await runtime.emitter.tool_call_started(
+        agent_key, call.tool_name, execution_id,
+        input_summary=summarize(call.input, 200), input_json=call.input,
+        model_call_id=call.id,
+    )
     async with SessionLocal() as db:
-        db.add(_tool_call_row(runtime, agent_key, call, status="started"))
+        db.add(_tool_call_row(runtime, agent_key, call, execution_id, status="started"))
         await db.commit()
     result = await execute_tool(call.tool_name, tool_context, call.input)
     duration_ms = int((time.monotonic() - started) * 1000)
-    runtime.context.append_tool_result(call.id, agent_key, call.tool_name, result.output, result.error)
-    await runtime.emitter.tool_call_completed(agent_key, call.tool_name, call.id, result.ok,
-                                              output_summary=summarize(result.output, 300), duration_ms=duration_ms, error=result.error)
+    runtime.context.append_tool_result(
+        execution_id, agent_key, call.tool_name, result.output, result.error,
+        result.error_code, result.retryable,
+    )
+    await runtime.emitter.tool_call_completed(
+        agent_key, call.tool_name, execution_id, result.ok,
+        output_summary=summarize(result.output, 300), duration_ms=duration_ms,
+        error=result.error, output_json=result.output, model_call_id=call.id,
+        error_code=result.error_code, retryable=result.retryable,
+    )
     async with SessionLocal() as db:
-        row = await db.scalar(select(_tool_call_model()).where(_tool_call_model().id == call.id))
+        row = await db.scalar(select(_tool_call_model()).where(_tool_call_model().id == execution_id))
         if row:
             row.status = "completed" if result.ok else "failed"
             row.output_json = result.output
             row.duration_ms = duration_ms
-            row.error_json = {"message": result.error} if result.error else None
+            row.error_json = {
+                "message": result.error, "code": result.error_code, "retryable": result.retryable,
+            } if result.error else None
             await db.commit()
+    if (
+        not result.ok
+        and runtime.active_intent == "IMAGE_UPDATE"
+        and call.tool_name in {"layout_slide_batch", "generate_image", "add_image", "run_qa", "render_preview"}
+    ):
+        from app.agent.schemas import PPTAgentError
+        default_code = {
+            "layout_slide_batch": "layout_incomplete",
+            "generate_image": "image_generation_failed",
+            "add_image": "image_not_applied",
+            "run_qa": "qa_unavailable",
+            "render_preview": "qa_unavailable",
+        }[call.tool_name]
+        raise PPTAgentError(
+            result.error_code or default_code,
+            result.error or "图片生成、写入或质量检查失败。", retryable=result.retryable,
+            details={"tool": call.tool_name, "output": result.output},
+        )
+    if (
+        not result.ok
+        and call.tool_name == "layout_slide_batch"
+        and (
+            runtime.content_policy in {"preserve", "restore"}
+            or runtime.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}
+        )
+    ):
+        raise PPTAgentError(
+            result.error_code or "layout_incomplete",
+            result.error or "页面布局没有覆盖全部必要内容，已保留原 PPT 版本。",
+            retryable=result.retryable,
+            details={"tool": call.tool_name, "output": result.output},
+        )
 
 
-def _tool_call_row(runtime: PipelineRuntime, agent_key: str, call, status: str):
+def _tool_call_row(runtime: PipelineRuntime, agent_key: str, call, execution_id: str, status: str):
     from app.models.entities import PipelineToolCall
     return PipelineToolCall(
-        id=call.id, pipeline_run_id=runtime.pipeline_run.id, agent_key=agent_key,
+        id=execution_id, model_call_id=call.id, pipeline_run_id=runtime.pipeline_run.id, agent_key=agent_key,
         tool_name=call.tool_name, input_json=call.input, output_json={}, status=status,
     )
 
@@ -253,26 +719,61 @@ async def run_agent_loop(runtime: PipelineRuntime, plan: PipelinePlan, start_ste
                     decision = await _agent_call(runtime, spec.key, agent, tool_rounds)
                     break
                 except Exception as exc:  # noqa: BLE001
+                    if isinstance(exc, PPTAgentError) and exc.code == "slide_content_invalid":
+                        # _agent_call already performed the single protocol
+                        # correction retry required by SlideContentPatch.
+                        raise
                     if attempt == RETRY_ATTEMPTS - 1:
                         raise
                     logger.warning("Agent %s 调用重试：%s", spec.key, exc)
             if decision is None:
                 raise RuntimeError(f"Agent {spec.key} 调用失败")
+            # 暂停可能在 LLM 请求期间到达；在执行任何 Tool 副作用前进入安全暂停点。
+            if runtime.pause_requested():
+                await _persist_paused(runtime, step_index, spec.key)
+                raise PipelinePaused()
             decision.__dict__["_duration_ms"] = int((time.monotonic() - step_started) * 1000)
+            if spec.key == "ppt_editor" and decision.completed and not runtime.mutation_applied:
+                decision = await agent.decide(tc)
+                decision.__dict__["_duration_ms"] = int((time.monotonic() - step_started) * 1000)
             if decision.tool_calls:
                 for call in decision.tool_calls:
+                    if runtime.pause_requested():
+                        await _persist_paused(runtime, step_index, spec.key)
+                        raise PipelinePaused()
                     await _execute_tool_call(runtime, spec.key, call, tc)
                 tool_rounds += 1
                 continue
             if decision.completed:
+                if decision.handoff:
+                    requested = decision.handoff
+                    canonical_handoff = normalize_handoff(requested)
+                    if canonical_handoff:
+                        runtime.requested_handoff = canonical_handoff
+                    else:
+                        runtime.context.add_note(f"忽略无法识别的 handoff：{requested}")
+                        if runtime.emitter is not None:
+                            await runtime.emitter.emit_domain(
+                                "agent.handoff.ignored",
+                                agent={"id": spec.key},
+                                message=f"无法识别交接目标 {requested}，已返回编排器继续计划",
+                                payload={"requested": requested},
+                            )
                 completed_artifact_id = await _persist_decision_artifact(runtime, spec.key, decision, step_index)
                 await _checkpoint_agent(runtime, spec.key, decision, step_index, completed_artifact_id)
                 await runtime.emitter.agent_completed(spec.key, decision.summary,
                                                       duration_ms=int(decision.__dict__.get("_duration_ms", 0)),
                                                       artifact_id=completed_artifact_id)
+                await runtime.emitter.agent_status_completed(spec.key, decision.summary)
                 break
         # while 结束但未 completed（超过 max_steps 且一直工具调用）→ 视为完成并持久化当前产物
         if not decision or not decision.completed:
+            if runtime.active_intent == "IMAGE_UPDATE" and spec.key in {"media", "ppt_editor", "visual_qa"}:
+                from app.agent.schemas import PPTAgentError
+                raise PPTAgentError(
+                    "image_not_applied", f"{spec.key} 未在工具轮次上限内完成图片修改。",
+                    retryable=True,
+                )
             await runtime.emitter.agent_completed(spec.key, "已达工具轮次上限，跳过该 Agent 输出", artifact_id=completed_artifact_id)
 
 
@@ -295,21 +796,40 @@ async def run_revision_loop(runtime: PipelineRuntime, plan: PipelinePlan) -> Non
     await run_agent_loop(runtime, plan)
     for round_index in range(1, max_rounds + 1):
         qa_artifact = await runtime.artifacts.latest("visual_qa") if runtime.artifacts else None
-        if not qa_artifact:
+        qa_data = runtime.context.get_tool_output("run_qa") or ((qa_artifact or {}).get("data") or {})
+        if not qa_data:
             break
-        issues = [item for item in (qa_artifact.get("data") or {}).get("issues", [])
+        issues = [item for item in qa_data.get("issues", [])
                   if item.get("severity") in {"critical", "major"}]
+        # A runtime-swapped QA strategy invalidates the result produced by the
+        # already-registered handler. Route one bounded revalidation pass rather
+        # than silently accepting a report from stale QA code.
+        if not issues:
+            from app.agent.registry import get_tool
+            from app.agent.tools import qa_tools
+            registered_qa = get_tool("run_qa")
+            if registered_qa is not None and registered_qa.handler is not qa_tools._run_qa:
+                issues = [{
+                    "severity": "major", "slide_id": "", "rule_id": "qa.strategy_changed",
+                    "message": "QA 策略在运行中发生变化，需要重新验证", "target_agent": "layout",
+                }]
         if not issues:
             break
         reason = "；".join(item.get("message", "")[:80] for item in issues[:3])
         revision_decision = await REVISION_AGENT.decide(runtime.tool_context)
         target_agents = list((revision_decision.output or {}).get("target_agents") or [])
         if not target_agents:
+            target_agents = sorted({
+                item.get("target_agent", "layout") for item in issues
+                if item.get("target_agent", "layout") in AGENT_BY_KEY
+            })
+        if not target_agents:
             break
         await runtime.emitter.revision_started(round_index, max_rounds, reason=reason, target_agents=target_agents)
         # 重建 builder，让受影响 Agent 从最新 Artifact 重跑并重建页面
         runtime.builder = PresentationBuilder(runtime.preferred_template)
         runtime.tool_context.builder = runtime.builder
+        runtime.mutation_applied = False
         sub_plan = PipelinePlan(
             agents=[_spec(agent_key) for agent_key in [*target_agents, "ppt_editor", "visual_qa"]],
             revision_rounds=max_rounds,
@@ -337,6 +857,24 @@ def finalize_content(runtime: PipelineRuntime) -> dict[str, Any]:
         from app.services.course_task_service import _restore_locked_paths
         source = getattr(runtime.source_artifact, "content_json", {}) if runtime.source_artifact else {}
         content = _restore_locked_paths(content, source, runtime.locks)
+    if (
+        runtime.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}
+        or runtime.content_policy in {"preserve", "restore"}
+    ):
+        # 内容锁定任务不得在发布门禁之后借“确定性修复”修改
+        # 标题、正文、备注、时长或任一非目标页；结构不合法就回滚。
+        from app.schemas.artifact import PPTContent
+        from app.agent.schemas import PPTAgentError
+        try:
+            PPTContent.model_validate(content)
+        except Exception as exc:
+            is_template = runtime.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}
+            raise PPTAgentError(
+                "template_switch_invalid" if is_template else "slide_content_invalid",
+                "新模板结果结构无效，已保留原 PPT 版本。" if is_template else "恢复后的页面结构无效，已保留原 PPT 版本。",
+                retryable=True, details={"validation_error": str(exc)[:300]},
+            ) from exc
+        return content
     # 确定性修复（结构 + 知识规则）
     from app.services.course_task_service import _validate_and_repair_ppt
     repaired, _ = _validate_and_repair_ppt(content)

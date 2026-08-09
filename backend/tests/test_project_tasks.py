@@ -1,6 +1,18 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+
+from app.api.v1.projects import _generation_event_payload
+
+
+def test_generation_event_envelope_uses_durable_database_sequence():
+    payload = _generation_event_payload(SimpleNamespace(
+        id=42,
+        data_json={"event_id": 1, "sequence": 2, "message": "页面更新"},
+    ))
+    assert payload["event_id"] == 42
+    assert payload["sequence"] == 42
 
 
 async def wait_for_project(client, headers, course_id, predicate, attempts=200):
@@ -16,7 +28,7 @@ async def wait_for_project(client, headers, course_id, predicate, attempts=200):
 
 
 @pytest.mark.asyncio
-async def test_intent_confirmation_creates_and_runs_six_independent_tasks(client, auth_headers):
+async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_task(client, auth_headers):
     await client.post(
         "/api/v1/settings/models",
         headers=auth_headers,
@@ -52,21 +64,37 @@ async def test_intent_confirmation_creates_and_runs_six_independent_tasks(client
     )
     assert confirmed.status_code == 202, confirmed.text
     assert confirmed.json()["project_status"] == "planning"
-    assert len(confirmed.json()["tasks"]) == 6
+    assert len(confirmed.json()["tasks"]) == 7
     course_id = confirmed.json()["course_id"]
 
     project = await wait_for_project(
         client,
         auth_headers,
         course_id,
-        lambda item: all(task["status"] == "review" for task in item["tasks"]),
+        lambda item: all(
+            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+            for task in item["tasks"]
+        ),
     )
     assert project["planning"]["status"] == "ready", project
     assert [task["task_type"] for task in project["tasks"]] == [
-        "lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim",
+        "lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "video_generation", "verbatim",
     ]
-    assert all(task["current_artifact"] for task in project["tasks"])
+    assert all(task["current_artifact"] for task in project["tasks"] if task["task_type"] != "video_generation")
+    video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
+    assert video_task["status"] == "ready_to_generate"
+    assert video_task["current_artifact"] is None
     assert project["quality"]["score"] is not None
+    assert project["event_cursor"] > 0
+    assert project["snapshot_at"]
+
+    task_response = await client.get(f"/api/v1/courses/{course_id}/tasks/ppt", headers=auth_headers)
+    assert task_response.status_code == 200
+    assert task_response.json()["event_cursor"] >= project["event_cursor"]
+    assert task_response.json()["snapshot_at"]
+    assert task_response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert task_response.headers["pragma"] == "no-cache"
+    assert task_response.headers["expires"] == "0"
 
     repeated = await client.post(
         f"/api/v1/course-intakes/{session['id']}/confirm",
@@ -74,7 +102,7 @@ async def test_intent_confirmation_creates_and_runs_six_independent_tasks(client
         json={"expected_revision": ready["current_revision"], "idempotency_key": f"project-{session['id']}"},
     )
     assert repeated.status_code == 202
-    assert len(repeated.json()["tasks"]) == 6
+    assert len(repeated.json()["tasks"]) == 7
 
 
 @pytest.mark.asyncio
@@ -102,9 +130,15 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         client,
         auth_headers,
         course["id"],
-        lambda item: all(task["status"] == "review" for task in item["tasks"]),
+        lambda item: all(
+            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+            for task in item["tasks"]
+        ),
     )
-    assert all(task["status"] == "review" for task in project["tasks"]), project
+    assert all(
+        task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+        for task in project["tasks"]
+    ), project
     sent = await client.post(
         f"/api/v1/courses/{course['id']}/tasks/ppt/messages",
         headers=auth_headers,
@@ -122,7 +156,10 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         client,
         auth_headers,
         course["id"],
-        lambda item: next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 2,
+        lambda item: (
+            next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 2
+            and next(task for task in item["tasks"] if task["task_type"] == "ppt")["status"] == "review"
+        ),
     )
     statuses = {task["task_type"]: task["status"] for task in project["tasks"]}
     assert statuses["ppt"] == "review"
@@ -186,9 +223,10 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         client,
         auth_headers,
         course["id"],
-        lambda item: next(
-            task for task in item["tasks"] if task["task_type"] == "ppt"
-        )["current_artifact"]["version"] == 3,
+        lambda item: (
+            next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 3
+            and next(task for task in item["tasks"] if task["task_type"] == "ppt")["status"] == "review"
+        ),
     )
     assert next(task for task in project["tasks"] if task["task_type"] == "ppt")["status"] == "review"
     async with SessionLocal() as db:
@@ -233,6 +271,9 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         client,
         auth_headers,
         course["id"],
-        lambda item: next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 4,
+        lambda item: (
+            next(task for task in item["tasks"] if task["task_type"] == "ppt")["current_artifact"]["version"] == 4
+            and next(task for task in item["tasks"] if task["task_type"] == "ppt")["status"] == "review"
+        ),
     )
     assert next(task for task in recovered_project["tasks"] if task["task_type"] == "ppt")["status"] == "review"

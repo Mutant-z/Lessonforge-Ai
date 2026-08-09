@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,11 +37,11 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
     files = []
 
     def add(path: Path, artifact_type: str, version: int = 1, **metadata):
-        files.append({"type": artifact_type, "version": version, "file": path.name, "sha256": sha256(path), "size": path.stat().st_size, **metadata})
+        files.append({"type": artifact_type, "version": version, "file": str(path.relative_to(folder)), "sha256": sha256(path), "size": path.stat().st_size, **metadata})
 
     mappings = [
         ("lesson_plan", "01_教学设计.docx", "教学设计"),
-        ("verbatim", "07_教师逐字稿.docx", "教师逐字稿"),
+        ("verbatim", "08_教师逐字稿.docx", "教师逐字稿"),
     ]
     for kind, filename, label in mappings:
         if kind in artifacts:
@@ -79,6 +80,13 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         pipeline_file = Path(get_settings().storage_root) / "generated" / course_id / "ppt" / f"{artifacts['ppt']['version']}.pptx"
         if pipeline_file.is_file():
             path = pipeline_file
+        elif any(slide.get("elements") for slide in (ppt_content.get("slides") or [])):
+            # Historical agentic revisions (including V34) may predate the
+            # versioned PPTX sidecar.  Rebuild them through the same canonical
+            # semantic/hybrid/absolute renderer so generated images are not
+            # dropped by the legacy deck slot filler.
+            from app.renderers.presentation_builder import PresentationBuilder
+            path = PresentationBuilder(template["id"]).from_ppt_content(ppt_content).render(folder / "02_课件.pptx")
         elif template.get("composition") == "deck":
             deck_path = (CATALOG_DIR / str(template["file"])).resolve()
             # 用 AI 生成的 artifact slides 内容填模板（不足角色 make_deck 兜底），
@@ -104,18 +112,44 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         student = render_exercise_docx("课后练习（学生版）", artifacts["exercise"]["content_json"], folder / "04_课后练习_学生版.docx", False, asset_paths)
         teacher = render_exercise_docx("课后练习（教师版）", artifacts["exercise"]["content_json"], folder / "05_课后练习_教师版.docx", True, asset_paths)
         add(student, "exercise_student", artifacts["exercise"]["version"]); add(teacher, "exercise_teacher", artifacts["exercise"]["version"])
-    (folder / "08_质量报告.md").write_text(artifacts.get("quality_report", {}).get("content_markdown", "# 质量报告\n\n已通过系统结构化检查。"), encoding="utf-8")
-    add(folder / "08_质量报告.md", "quality_report")
-    (folder / "09_引用来源.md").write_text(artifacts.get("citation_report", {}).get("content_markdown", "# 引用来源\n\n详见课程蓝图中的 source_refs。"), encoding="utf-8")
-    add(folder / "09_引用来源.md", "citation_report")
+    video = artifacts.get("video_generation")
+    if video and video.get("status") == "approved":
+        asset_paths = video.get("asset_paths") or {}
+        outputs = video["content_json"].get("outputs") or {}
+        video_folder = folder / "07_视频生成"
+        scene_folder = video_folder / "分镜媒体"
+        scene_folder.mkdir(parents=True, exist_ok=True)
+
+        def copy_asset(asset_id: str | None, target: Path, artifact_type: str):
+            if not asset_id or asset_id not in asset_paths:
+                return
+            source = Path(asset_paths[asset_id])
+            if not source.is_file():
+                return
+            shutil.copy2(source, target)
+            add(target, artifact_type, video["version"])
+
+        copy_asset(outputs.get("final_asset_id"), video_folder / "微课视频.mp4", "video_final")
+        copy_asset(outputs.get("preview_asset_id"), video_folder / "视频预览.mp4", "video_preview")
+        copy_asset(outputs.get("subtitle_asset_id"), video_folder / "字幕.vtt", "video_subtitle")
+        for scene in video["content_json"].get("scenes", []):
+            copy_asset(scene.get("video_asset_id"), scene_folder / f"{scene.get('script_scene_id') or scene['id']}.mp4", "video_clip")
+        config_path = video_folder / "视频生成配置.json"
+        config_path.write_text(json.dumps(video["content_json"], ensure_ascii=False, indent=2), encoding="utf-8")
+        add(config_path, "video_generation_config", video["version"])
+    (folder / "09_质量报告.md").write_text(artifacts.get("quality_report", {}).get("content_markdown", "# 质量报告\n\n已通过系统结构化检查。"), encoding="utf-8")
+    add(folder / "09_质量报告.md", "quality_report")
+    (folder / "10_引用来源.md").write_text(artifacts.get("citation_report", {}).get("content_markdown", "# 引用来源\n\n详见课程蓝图中的 source_refs。"), encoding="utf-8")
+    add(folder / "10_引用来源.md", "citation_report")
     (folder / "course_blueprint.json").write_text(json.dumps(blueprint, ensure_ascii=False, indent=2), encoding="utf-8")
     add(folder / "course_blueprint.json", "blueprint", blueprint_version)
     manifest = {"course_id": course_id, "course_title": title, "blueprint_version": blueprint_version, "artifacts": files, "exported_at": datetime.now(timezone.utc).isoformat()}
     (folder / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     zip_path = output_dir / f"{safe_package_name(title)}_微课资源包.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in folder.iterdir():
-            archive.write(path, f"{folder.name}/{path.name}")
+        for path in folder.rglob("*"):
+            if path.is_file():
+                archive.write(path, f"{folder.name}/{path.relative_to(folder)}")
     with zipfile.ZipFile(zip_path) as archive:
         bad = archive.testzip()
         if bad:

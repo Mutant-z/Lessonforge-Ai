@@ -7,7 +7,7 @@ export interface ModelConfigItem {
   timeout_seconds: number;
   context_window_tokens: number;
   supports_multimodal: boolean;
-  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>;
+  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'speech_generation' | 'media_composition'>;
   api_mode: string;
   adapter_config: Record<string, unknown>;
   api_key_configured: boolean;
@@ -26,7 +26,7 @@ export interface ModelConfigPayload {
   timeout_seconds: number;
   context_window_tokens: number;
   supports_multimodal: boolean;
-  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation'>;
+  capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'speech_generation' | 'media_composition'>;
   api_mode: string;
   adapter_config: Record<string, unknown>;
   is_active?: boolean;
@@ -39,6 +39,9 @@ export interface TestConnectionPayload {
   model_name?: string;
   api_key?: string;
   timeout_seconds?: number;
+  test_capability?: 'text_generation' | 'image_generation' | 'video_generation' | 'speech_generation';
+  api_mode?: string;
+  adapter_config?: Record<string, unknown>;
 }
 
 export interface UserPreferencesPayload {

@@ -26,6 +26,7 @@ async def create_export(course_id: str, user: User = Depends(current_user), db: 
         artifacts.setdefault(row.artifact_type, {
             "id": row.id, "version": row.version, "content_json": row.content_json,
             "content_markdown": row.content_markdown, "source_versions_json": row.source_versions_json,
+            "status": row.status,
         })
     required = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"}
     if missing := required - artifacts.keys():
@@ -48,6 +49,28 @@ async def create_export(course_id: str, user: User = Depends(current_user), db: 
         asset.id: str((get_settings().storage_root / (asset.preview_relative_path or asset.relative_path)).resolve())
         for asset in exercise_assets
     }
+    video = artifacts.get("video_generation")
+    if video and video.get("status") == "approved":
+        video_asset_ids = {
+            asset_id
+            for scene in video["content_json"].get("scenes", [])
+            for asset_id in (scene.get("video_asset_id"), scene.get("audio_asset_id"), scene.get("thumbnail_asset_id"))
+            if asset_id
+        } | {
+            asset_id
+            for asset_id in (video["content_json"].get("outputs") or {}).values()
+            if isinstance(asset_id, str) and asset_id
+        }
+        video_assets = list(await db.scalars(select(ArtifactAsset).where(
+            ArtifactAsset.id.in_(video_asset_ids),
+            ArtifactAsset.course_id == course_id,
+            ArtifactAsset.owner_id == user.id,
+            ArtifactAsset.status == "approved",
+        ))) if video_asset_ids else []
+        video["asset_paths"] = {
+            asset.id: str((get_settings().storage_root / asset.relative_path).resolve())
+            for asset in video_assets
+        }
     output_dir = get_settings().storage_root / "generated" / course.id
     zip_path, manifest = build_course_package(course.id, course.title, blueprint.content_json, blueprint.version, artifacts, output_dir)
     relative = str(zip_path.relative_to(get_settings().storage_root))

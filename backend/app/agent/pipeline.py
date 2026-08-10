@@ -22,7 +22,7 @@ from app.agent.registry import ToolContext, execute_tool, summarize
 from app.agent.schemas import (
     AgentDecision, AgentSpec, PipelinePlan, PPTAgentError, SlideContentPatch, SlideLayoutArtifact, VisualPlanArtifact,
 )
-from app.agent.slide_rendering import runtime_baseline_slides
+from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs
 from app.core.database import SessionLocal
 from app.models.entities import GenerationRun, GenerationStep, PipelineRun
 from app.providers.llm.mock import MockProvider
@@ -212,6 +212,18 @@ def _ensure_executable_slide_content(
                 slides.append(merged)
             else:
                 slides.append(patch)
+        # 首次生成且模板为真实 deck：把 LLM 输出对齐到 15 页角色结构
+        # （页序 / 缺页兜底 / 每页 page_type），保证下游布局与渲染按模板版式工作。
+        if not targets:
+            from app.services.ppt_template_service import resolve_ppt_template
+            if resolve_ppt_template(runtime.preferred_template).get("composition") == "deck":
+                slides = _align_initial_deck(runtime, slides)
+        # 编辑类内容先在语义层确定性收敛密度（逐条 ≤25 字、去装饰前缀、合计 ≤120 字），
+        # 避免模型反复产出边缘超标条目（如 27>25）让 QA 门禁在修复轮内无法收敛而失败。
+        if runtime.content_policy == "edit":
+            from app.agent.slide_rendering import sanitize_slide_density
+            for slide in slides:
+                sanitize_slide_density(slide)
         return AgentDecision(
             completed=True, output={**(decision.output or {}), "slides": slides},
             summary=decision.summary, message=decision.message, handoff=decision.handoff,
@@ -230,6 +242,71 @@ def _ensure_executable_slide_content(
             "slide_content_invalid", "页面内容模型没有返回可应用的结构化页面，已保留原 PPT 版本。",
             retryable=True, details={"validation_error": str(exc)[:300]},
         ) from exc
+
+
+def _align_initial_deck(runtime: PipelineRuntime, slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 LLM 首次生成结果对齐到真实模板的 15 页角色结构。
+
+    模板页序即幻灯片页序（slides[i] ↔ 模板第 i+1 页）。优先按 id（S01..S15）
+    或 slide_number 匹配；位置回填只在模型返回页数足够（≥15）时启用（此时位置=页序
+    才是合理假设），不足 15 页的部分输出一律不按位置回填，缺页用 make_deck 对应
+    角色的确定性内容兜底，避免把部分页内容错配到其它角色。统一写入该角色的
+    page_type / purpose / layout / visual_suggestion，保证下游布局与渲染按模板版式工作。
+    """
+    from app.agents.generators import make_deck
+    from app.renderers.deck_renderer import (
+        PAGE_LAYOUT, PAGE_PURPOSE, PAGE_VISUAL, ROLE_PAGE_TYPE, deck_structure, role_order,
+    )
+    from app.schemas.blueprint import CourseBlueprintSchema
+
+    structure = deck_structure(runtime.preferred_template)
+    order = role_order()
+    by_id = {str(slide.get("id")): slide for slide in slides}
+    by_number: dict[int, dict[str, Any]] = {}
+    for slide in slides:
+        number = slide.get("slide_number")
+        if isinstance(number, int) and not isinstance(number, bool):
+            by_number.setdefault(number, slide)
+    # 位置回填只对「页数足够」的输出生效：恰好 15 页或超量（如 18 页）时按页序取前 15；
+    # 不足 15 页的部分输出（如模型只回 S05/S10/S15）禁止按位置回填，防止内容错配到封面等页。
+    order_fallback = len(slides) >= len(order)
+    fallback: list[dict[str, Any]] | None = None
+    aligned: list[dict[str, Any]] = []
+    for index, role in enumerate(order):
+        page_type = ROLE_PAGE_TYPE.get(role, "concept")
+        target_id = f"S{index + 1:02d}"
+        chosen = by_id.get(target_id) or by_number.get(index + 1)
+        if chosen is None and order_fallback:
+            chosen = slides[index]
+        if chosen is None:
+            if fallback is None:
+                bp = runtime.blueprint
+                bp_model = bp if isinstance(bp, CourseBlueprintSchema) else CourseBlueprintSchema.model_validate(bp)
+                fallback = make_deck(bp_model, runtime.preferred_template)
+            page = fallback[index]
+            title = str(page.get("title") or "")
+            item = {
+                "id": target_id, "page_type": page_type, "title": title,
+                "purpose": PAGE_PURPOSE.get(page_type, "讲解要点"),
+                "body": [str(value) for value in (page.get("body") or [])],
+                "blocks": [], "speaker_notes": f"围绕「{title}」讲解核心要点，用提问确认学生理解。",
+                "layout": PAGE_LAYOUT.get(page_type, "bullet"),
+                "visual_suggestion": PAGE_VISUAL.get(page_type, "要点列表"),
+            }
+        else:
+            title = str(chosen.get("title") or "")
+            item = {
+                "id": target_id, "page_type": page_type, "title": title,
+                "purpose": str(chosen.get("purpose") or PAGE_PURPOSE.get(page_type, "讲解要点")),
+                "body": [str(value) for value in (chosen.get("body") or [])],
+                "blocks": list(chosen.get("blocks") or []),
+                "speaker_notes": str(chosen.get("speaker_notes") or f"围绕「{title}」讲解核心要点，用提问确认学生理解。"),
+                "layout": str(chosen.get("layout") or PAGE_LAYOUT.get(page_type, "bullet")),
+                "visual_suggestion": str(chosen.get("visual_suggestion") or PAGE_VISUAL.get(page_type, "要点列表")),
+            }
+        item["changed_fields"] = ["title", "purpose", "body", "blocks", "speaker_notes"]
+        aligned.append(item)
+    return aligned
 
 
 def _existing_visual_region(runtime: PipelineRuntime, slide_id: str) -> dict[str, float]:
@@ -328,6 +405,50 @@ def _harden_visual_prompt(prompt: str) -> str:
     return prompt if suffix.strip() in prompt else f"{prompt.rstrip()}。{suffix}"
 
 
+def _expand_aggregate_body_into_items(layout_slide: dict[str, Any], canonical: dict[str, Any]) -> dict[str, Any]:
+    """把 LLM 布局里 ``content_ref=body`` 的聚合文本框拆成逐条、带留白的独立文本框。
+
+    单行聚合文本框的行距固定（前端 preview 为 line-height 1.25），无法体现
+    "文字间隔 / 太单调" 类诉求；逐条成框后间距由 y 坐标控制，PPTX 与前端
+    预览都能直接呈现变化。封面副标题结构不同，保持聚合不动；条目过多（正文
+    与结构化块叠加）时保持单框，避免逐条溢出画布底部。
+    """
+    if not canonical:
+        return layout_slide
+    if str(canonical.get("page_type") or "") == "cover":
+        return layout_slide
+    from app.agent.agents.layout import BODY_ITEM_GAP, MAX_BODY_ITEMS, _estimate_height
+
+    elements = list(layout_slide.get("elements") or [])
+    body_index = next((
+        index for index, element in enumerate(elements)
+        if str(element.get("content_ref") or "") == "body"
+    ), None)
+    if body_index is None:
+        return layout_slide
+    refs = semantic_body_refs(canonical)
+    if len(refs) < 2 or len(refs) > MAX_BODY_ITEMS:
+        return layout_slide
+    body_element = elements[body_index]
+    style = dict(body_element.get("style") or {})
+    font_size = float(style.get("size") or 18)
+    cursor_y = float(body_element.get("y") or 0)
+    expanded: list[dict[str, Any]] = []
+    for ref, text in refs:
+        item_h = max(0.5, _estimate_height([text], float(body_element.get("w") or 1), font_size))
+        item = {key: value for key, value in body_element.items()}
+        item["content_ref"] = ref
+        item["text"] = text
+        item["x"] = round(float(body_element.get("x") or 0), 3)
+        item["w"] = round(float(body_element.get("w") or 1), 3)
+        item["y"] = round(cursor_y, 3)
+        item["h"] = round(item_h, 3)
+        expanded.append(item)
+        cursor_y += item_h + BODY_ITEM_GAP
+    elements[body_index:body_index + 1] = expanded
+    return {**layout_slide, "elements": elements}
+
+
 async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: AgentDecision) -> AgentDecision:
     """Validate LLM aesthetics and compile semantic proposals to safe geometry."""
     targets = set(runtime.selected_slide_ids or [])
@@ -338,6 +459,9 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
             parsed.slides = [item for item in parsed.slides if item.slide_id in targets]
             if {item.slide_id for item in parsed.slides} != targets:
                 raise ValueError("布局结果未覆盖全部目标页面")
+        else:
+            deck_ids = {str(item.get("id") or "") for item in runtime_baseline_slides(runtime)}
+            parsed.slides = [item for item in parsed.slides if item.slide_id in deck_ids]
     except Exception:
         slide_content = await runtime.artifacts.latest("slide_content") if runtime.artifacts else None
         source_slides = list((slide_content or {}).get("data", {}).get("slides") or []) or runtime_baseline_slides(runtime)
@@ -355,40 +479,62 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
             parsed.slides = [item for item in parsed.slides if item.slide_id in targets]
             if {item.slide_id for item in parsed.slides} != targets:
                 raise RuntimeError("LLM 布局结果超出目标页范围或缺少目标页")
-    # Content-locked visual work may use the LLM's geometry only when every
-    # source text fragment remains renderable. Otherwise keep the LLM analysis
-    # but compile safe geometry from the canonical source content.
-    if runtime.content_policy in {"preserve", "restore"}:
-        from app.agent.agents.layout import _content_start_x
-        from app.agent.slide_rendering import render_coverage
-        source_slides = runtime_baseline_slides(runtime)
-        source_by_id = {str(item.get("id") or ""): item for item in source_slides}
-        missing = []
-        for item in parsed.model_dump().get("slides") or []:
-            slide_id = str(item.get("slide_id") or "")
-            baseline = source_by_id.get(slide_id)
-            safe_x = _content_start_x(
-                runtime.preferred_template,
-                str((baseline or {}).get("page_type") or "concept"),
-            )
-            text_under_template_rail = any(
-                element.get("kind") in {"textbox", "note"}
-                and float(element.get("x") or 0) < safe_x - 0.01
-                for element in (item.get("elements") or [])
-            )
-            if baseline and (
-                render_coverage(
-                    {**baseline, "render_mode": "absolute", "elements": item.get("elements") or []},
-                    baseline=baseline,
-                )["missing_refs"]
-                or text_under_template_rail
-            ):
-                missing.append(slide_id)
-        if missing:
-            scoped = [item for item in source_slides if str(item.get("id") or "") in set(missing)]
-            safe = _compile_layout_from_analysis(runtime, decision, scoped, agent)
-            safe_by_id = {item.slide_id: item for item in safe.slides}
-            parsed.slides = [safe_by_id.get(item.slide_id, item) for item in parsed.slides]
+    # LLM geometry is usable only when every canonical text fragment for this
+    # revision remains renderable. Preserve/restore compare against the locked
+    # source; edit compares against the newly produced slide_content Artifact.
+    # This prevents a schema-valid layout from silently copying the previous
+    # version's textbox text over freshly edited semantic fields.
+    from app.agent.agents.layout import _content_start_x
+    from app.agent.slide_rendering import bind_content_refs, render_coverage
+    canonical_slides = runtime_baseline_slides(runtime)
+    if runtime.content_policy == "edit" and runtime.artifacts is not None:
+        edited_content = await runtime.artifacts.latest("slide_content")
+        canonical_slides = list((edited_content or {}).get("data", {}).get("slides") or []) or canonical_slides
+    canonical_by_id = {str(item.get("id") or ""): item for item in canonical_slides}
+    # 未指定目标页（整本修订）时，布局必须覆盖全部页面：LLM 常常只返回前几页，
+    # 缺失页必须用确定性版式补齐，否则它们沿用旧元素、无法通过内容覆盖门禁。
+    expected_ids = set(targets) if targets else {str(item.get("id") or "") for item in canonical_slides}
+    incomplete: list[str] = []
+    covered: set[str] = set()
+    for item in parsed.model_dump().get("slides") or []:
+        slide_id = str(item.get("slide_id") or "")
+        baseline = canonical_by_id.get(slide_id)
+        raw_elements = list(item.get("elements") or [])
+        # LLM 常用自己的措辞或聚合框，直接按原始文本做覆盖检查会把精心设计的
+        # 版式误判为不完整而退回朴素竖排。先绑定权威文字再校验，保留 LLM 版式。
+        bound_elements, unresolved = (
+            bind_content_refs(baseline, raw_elements) if baseline else (raw_elements, [])
+        )
+        safe_x = _content_start_x(
+            runtime.preferred_template,
+            str((baseline or {}).get("page_type") or "concept"),
+        )
+        text_under_template_rail = any(
+            element.get("kind") in {"textbox", "note"}
+            and float(element.get("x") or 0) < safe_x - 0.01
+            for element in bound_elements
+        )
+        if baseline and (
+            unresolved
+            or render_coverage(
+                {**baseline, "render_mode": "absolute", "elements": bound_elements},
+                baseline=baseline,
+            )["missing_refs"]
+            or text_under_template_rail
+        ):
+            incomplete.append(slide_id)
+        else:
+            covered.add(slide_id)
+    incomplete.extend(sorted(expected_ids - covered))
+    if incomplete:
+        scoped = [item for item in canonical_slides if str(item.get("id") or "") in set(incomplete)]
+        safe = _compile_layout_from_analysis(runtime, decision, scoped, agent)
+        safe_by_id = {item.slide_id: item for item in safe.slides}
+        # 把确定性补齐的缺失页也并入结果：parsed 只含 LLM 返回的页，缺失页的
+        # 编译版式必须追加进来，否则整本修订缺页仍沿用旧元素、无法通过覆盖门禁。
+        merged: dict[str, Any] = {str(item.slide_id): item for item in parsed.slides}
+        merged.update(safe_by_id)
+        parsed.slides = [merged[slide_id] for slide_id in sorted(expected_ids)]
     # Normalize the visual slot even when the LLM returned a schema-valid
     # layout.  Schema validity only proves the rectangle is on-canvas; it does
     # not prove that its top edge clears the title/text region.
@@ -408,8 +554,60 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
             if element.get("kind") == "image":
                 region = normalize_visual_region(element, runtime.preferred_template, page_type)
                 element.update(region)
+        # 绑定权威文字：让通过校验的 LLM 版式使用规范内容，而不是模型自己编的措辞。
+        canonical = canonical_by_id.get(str(item.slide_id))
+        if canonical:
+            bound, unresolved = bind_content_refs(canonical, list(data.get("elements") or []))
+            if not unresolved:
+                data["elements"] = bound
         normalized_slides.append(data)
-    parsed = SlideLayoutArtifact.model_validate({"slides": normalized_slides})
+    # 源页已有需要保留的图片/图表时，LLM 布局即使通过校验也必须预留视觉槽。
+    # 否则 _layout_slide_batch 重建元素后会把保留图片放到旧坐标，与加宽的正文
+    # 重叠（visual.overlaps_content / geometry.overlap），QA 直接拦截发布。
+    # 缺槽页面用确定性版式补齐右侧视觉区并收窄正文栏。
+    baseline_by_id = {
+        str(item.get("id") or ""): item for item in runtime_baseline_slides(runtime)
+    }
+    preserve_mode = (
+        runtime.content_policy in {"preserve", "restore"}
+        or getattr(runtime, "active_intent", "") in {
+            "MODIFY", "LOCAL_REGENERATE", "LAYOUT_ONLY", "CONTENT_UPDATE",
+            "GLOBAL_OPTIMIZE", "STYLE_CHANGE", "TEMPLATE_SWITCH", "IMAGE_UPDATE",
+        }
+    )
+    reserved_slides = []
+    for data in normalized_slides:
+        slide_id = str(data.get("slide_id") or "")
+        baseline = baseline_by_id.get(slide_id)
+        if (
+            preserve_mode
+            and baseline
+            and any(el.get("kind") in {"image", "chart"} for el in (baseline.get("elements") or []))
+            and not data.get("visual_region")
+        ):
+            canonical = canonical_by_id.get(slide_id) or baseline
+            visual = {"visualType": "image", "placement": _existing_visual_region(runtime, slide_id)}
+            fallback = agent._layout_slide(canonical, visual, runtime.preferred_template)
+            if fallback.get("visual_region"):
+                data = fallback
+        # LLM 布局即使通过校验也常常把正文压成单个聚合文本框，无法体现文字间隔；
+        # 拆成逐条、带留白的独立文本框后再交给编辑层。
+        canonical = canonical_by_id.get(slide_id) or baseline
+        if canonical:
+            data = _expand_aggregate_body_into_items(data, canonical)
+        reserved_slides.append(data)
+    # 发布前最后一道确定性防线：把“挤成一团/大片空白”的正文列重排为均匀分布。
+    # LLM 输出只要 schema 合法即可通过内容覆盖检查，因此必须在校验后再规范化一次。
+    from app.agent.agents.layout import canonicalize_spatial_layout
+    reserved_slides = [
+        canonicalize_spatial_layout(
+            runtime.preferred_template,
+            canonical_by_id.get(str(item.get("slide_id") or "")) or {},
+            item,
+        )
+        for item in reserved_slides
+    ]
+    parsed = SlideLayoutArtifact.model_validate({"slides": reserved_slides})
     return AgentDecision(
         completed=True,
         output=parsed.model_dump(),
@@ -428,16 +626,40 @@ def _compile_layout_from_analysis(
     """Compile the LLM's semantic/aesthetic proposal into bounded geometry."""
     proposed = list((decision.output or {}).get("slides") or [])
     proposed_by_id = {str(item.get("id") or item.get("slide_id")): item for item in proposed}
+    # scoped_slides 来自 slide_content 补丁（无 elements）。源页是否已有需要保留的
+    # 图片/图表必须从 baseline（含元素层）读取，否则文字类修订不会预留视觉槽，
+    # 保留的图片会被放到旧坐标并与加宽的正文重叠。
+    baseline_by_id = {
+        str(item.get("id") or ""): item for item in runtime_baseline_slides(runtime)
+    }
+    preserve_mode = (
+        runtime.content_policy in {"preserve", "restore"}
+        or getattr(runtime, "active_intent", "") in {
+            "MODIFY", "LOCAL_REGENERATE", "LAYOUT_ONLY", "CONTENT_UPDATE",
+            "GLOBAL_OPTIMIZE", "STYLE_CHANGE", "TEMPLATE_SWITCH", "IMAGE_UPDATE",
+        }
+    )
     layouts: list[dict[str, Any]] = []
     for source in scoped_slides:
         slide_id = str(source.get("id") or "")
         slide = {**source, **proposed_by_id.get(slide_id, {})}
         rationale = str(slide.get("visual_suggestion") or decision.summary or "")
         if slide.get("page_type") == "cover":
+            from app.agent.agents.layout import _content_start_x, _estimate_height
+
             body = [str(item) for item in (slide.get("body") or [])]
             title = str(slide.get("title") or "")
-            subtitle = body[0] if body else str(slide.get("purpose") or "")
-            question = body[1] if len(body) > 1 else str(slide.get("purpose") or "")
+            purpose = str(slide.get("purpose") or "")
+            # The academic/smart templates reserve a decorative rail on the
+            # left.  The previous fallback used x=.8 unconditionally, which
+            # put canonical text underneath that rail and then made every QA
+            # repair reproduce the same invalid geometry.  Keep the text
+            # column inside the template-specific safe area and give the
+            # aggregate body enough height for every canonical body item.
+            content_x = _content_start_x(runtime.preferred_template, "cover")
+            visual_x = 7.75
+            content_w = max(3.6, visual_x - content_x - 0.4)
+            body_h = max(1.65, min(2.0, _estimate_height(body, content_w, 17)))
             layouts.append({
                 "slide_id": slide_id,
                 "layout_type": "academic_split_hero",
@@ -445,25 +667,25 @@ def _compile_layout_from_analysis(
                 "elements": [
                     {"kind": "textbox", "role": "title", "text": title,
                      "content_ref": "title",
-                     "x": 0.8, "y": 1.15, "w": 4.35, "h": 1.65,
+                     "x": content_x, "y": 1.15, "w": content_w, "h": 1.4,
                      "style": {"size": 34, "bold": True, "color": "primary"}},
-                    {"kind": "textbox", "role": "subtitle", "text": subtitle,
+                    {"kind": "textbox", "role": "body", "text": "\n".join(body),
                      "content_ref": "body",
-                     "x": 0.82, "y": 3.05, "w": 4.2, "h": 0.65,
+                     "x": content_x, "y": 2.85, "w": content_w, "h": body_h,
                      "style": {"size": 17, "color": "muted"}},
-                    {"kind": "shape", "role": "visual_panel", "x": 5.45, "y": 0.85, "w": 7.05, "h": 4.65,
+                    {"kind": "shape", "role": "visual_panel", "x": visual_x, "y": 1.05, "w": 4.85, "h": 4.75,
                      "shape_type": "rounded", "fill": "surface", "line": "secondary"},
                     {"kind": "textbox", "role": "visual_caption", "text": "潜水艇水下受力 · 浮力矢量示意",
-                     "x": 5.85, "y": 4.65, "w": 6.2, "h": 0.45,
+                     "x": visual_x + 0.2, "y": 5.05, "w": 4.45, "h": 0.42,
                      "style": {"size": 15, "bold": True, "color": "primary", "align": "center"}},
-                    {"kind": "shape", "role": "question_card", "x": 0.8, "y": 4.15, "w": 4.35, "h": 1.35,
+                    {"kind": "shape", "role": "purpose_card", "x": content_x, "y": 5.05, "w": content_w, "h": 1.0,
                      "shape_type": "rounded", "fill": "background", "line": "secondary"},
-                    {"kind": "textbox", "role": "question", "text": question,
+                    {"kind": "textbox", "role": "purpose", "text": purpose,
                      "content_ref": "purpose",
-                     "x": 1.05, "y": 4.48, "w": 3.85, "h": 0.72,
-                     "style": {"size": 17, "bold": True, "color": "text"}},
+                     "x": content_x + 0.2, "y": 5.22, "w": content_w - 0.4, "h": 0.66,
+                     "style": {"size": 15, "bold": True, "color": "text"}},
                 ],
-                "visual_region": {"x": 5.75, "y": 1.15, "w": 6.45, "h": 3.25},
+                "visual_region": {"x": visual_x + 0.25, "y": 1.35, "w": 4.35, "h": 3.4},
                 "visual_type": "image",
             })
         else:
@@ -477,9 +699,9 @@ def _compile_layout_from_analysis(
                     "visualType": expected.get("visual_type") or "ai_image",
                     "placement": expected.get("placement") or _existing_visual_region(runtime, slide_id),
                 }
-            elif (
-                runtime.content_policy in {"preserve", "restore"}
-                and any(item.get("kind") in {"image", "chart"} for item in (source.get("elements") or []))
+            elif preserve_mode and any(
+                item.get("kind") in {"image", "chart"}
+                for item in ((baseline_by_id.get(slide_id) or source).get("elements") or [])
             ):
                 visual = {"visualType": "image", "placement": _existing_visual_region(runtime, slide_id)}
             fallback = agent._layout_slide(slide, visual, runtime.preferred_template)
@@ -864,7 +1086,6 @@ def finalize_content(runtime: PipelineRuntime) -> dict[str, Any]:
         # 内容锁定任务不得在发布门禁之后借“确定性修复”修改
         # 标题、正文、备注、时长或任一非目标页；结构不合法就回滚。
         from app.schemas.artifact import PPTContent
-        from app.agent.schemas import PPTAgentError
         try:
             PPTContent.model_validate(content)
         except Exception as exc:
@@ -877,5 +1098,10 @@ def finalize_content(runtime: PipelineRuntime) -> dict[str, Any]:
         return content
     # 确定性修复（结构 + 知识规则）
     from app.services.course_task_service import _validate_and_repair_ppt
-    repaired, _ = _validate_and_repair_ppt(content)
-    return repaired if repaired is not None else content
+    repaired, repair_error = _validate_and_repair_ppt(content)
+    if repaired is None:
+        raise PPTAgentError(
+            "ppt_structure_invalid", f"页面结构校验失败，已保留原 PPT 版本。{repair_error}",
+            retryable=True,
+        )
+    return repaired

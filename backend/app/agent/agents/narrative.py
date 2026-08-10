@@ -61,7 +61,8 @@ class NarrativeAgent(Agent):
 
     @staticmethod
     def _derive_slides(bp: dict, theme: str) -> list[dict]:
-        from app.agents.generators import _PAGE_PURPOSE, make_ppt
+        from app.agents.generators import make_ppt
+        from app.renderers.deck_renderer import PAGE_PURPOSE
         from app.schemas.blueprint import CourseBlueprintSchema
         bp_model = CourseBlueprintSchema.model_validate(bp)
         content = make_ppt(bp_model, theme).model_dump()
@@ -70,7 +71,7 @@ class NarrativeAgent(Agent):
             slides.append({
                 "slideId": slide["id"], "order": index + 1,
                 "sectionId": _section_for_page(slide.get("page_type", "concept")),
-                "purpose": slide.get("purpose") or _PAGE_PURPOSE.get(slide.get("page_type"), "讲解要点"),
+                "purpose": slide.get("purpose") or PAGE_PURPOSE.get(slide.get("page_type"), "讲解要点"),
                 "keyMessage": slide.get("title", ""),
                 "visualIntent": slide.get("visual_suggestion", ""),
             })

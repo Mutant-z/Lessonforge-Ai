@@ -2,7 +2,10 @@ import json
 
 from app.models.entities import CourseProject
 from app.core.database import SessionLocal
-from app.renderers.deck_renderer import role_order, slot_counts
+from app.renderers.deck_renderer import (
+    PAGE_LAYOUT, PAGE_PURPOSE, PAGE_VISUAL, ROLE_PAGE_TYPE, ROLE_WEIGHT,
+    role_order, slot_counts,
+)
 from sqlalchemy import select
 from app.providers.llm.mock import MockProvider
 from app.providers.llm.router import get_provider
@@ -134,49 +137,6 @@ def _blocks_flat_text(blocks: list[dict]) -> list[str]:
     return text
 
 
-# deck 角色 → 现有 page_type 映射（不新增 schema 枚举）
-_ROLE_PAGE_TYPE = {
-    "cover": "cover", "intro": "scenario", "objectives": "objectives",
-    "knowledge_map": "concept", "knowledge_intro": "concept",
-    "core_1": "concept", "core_2": "concept", "core_3": "concept", "core_4": "concept",
-    "case_study": "case", "discussion": "question", "summary": "summary",
-    "assessment": "exercise", "assignment": "homework", "end": "summary",
-}
-_PAGE_PURPOSE = {
-    "cover": "建立课程主题并唤起学习期待",
-    "scenario": "用真实问题激活学生既有经验",
-    "objectives": "明确本课可观察的学习成果",
-    "concept": "建立核心概念与关键关系",
-    "case": "通过案例示范应用过程",
-    "question": "引导互动讨论与判断",
-    "exercise": "即时测验收集学习证据",
-    "summary": "总结本课要点并预告联系",
-    "homework": "布置课后应用任务",
-}
-_PAGE_LAYOUT = {
-    "cover": "cover", "scenario": "question", "objectives": "bullet",
-    "concept": "split", "case": "split", "question": "question",
-    "exercise": "exercise", "summary": "summary", "homework": "bullet",
-}
-_PAGE_VISUAL = {
-    "cover": "纯白背景左侧主色竖栏，课程主题大标题与副标题留白排版",
-    "scenario": "上方大面积留白作为问题区，下方虚线框提示学生写下初步判断",
-    "objectives": "编号列表纵向排列，编号使用主题色圆形徽章",
-    "concept": "左侧概念框图，右侧箭头图表示关键关系，底部保留留白",
-    "case": "横向步骤流程线，每步配编号与短句",
-    "question": "上方问题区，下方作答提示条",
-    "exercise": "左题目右作答分栏，底部自我检查提示条",
-    "summary": "三条结论短句，下方时间轴示意环节推进",
-    "homework": "任务清单卡片，逐条核对",
-}
-_ROLE_WEIGHT = {
-    "cover": 0.04, "intro": 0.10, "objectives": 0.08, "knowledge_map": 0.08,
-    "knowledge_intro": 0.10, "core_1": 0.07, "core_2": 0.07, "core_3": 0.07, "core_4": 0.07,
-    "case_study": 0.10, "discussion": 0.07, "summary": 0.06, "assessment": 0.06,
-    "assignment": 0.03, "end": 0.02,
-}
-
-
 def _blocks_for_body(page_type: str, body: list[str]) -> list[dict]:
     """把扁平 body 构造成结构化内容块（对应知识库 block_guidance）。
 
@@ -241,24 +201,24 @@ def make_ppt(bp: CourseBlueprintSchema, theme: str = "lessonforge_deck_academic"
     deck = make_deck(bp, theme)
     # 时长按角色权重归一化分配，最后一页吸收舍入误差，保证总时长与课程时长一致
     # （视频脚本校验要求分镜总时长 == 制作目标时长）
-    weights = [_ROLE_WEIGHT.get(role, 0.06) for role in role_order()]
+    weights = [ROLE_WEIGHT.get(role, 0.06) for role in role_order()]
     total_weight = sum(weights) or 1.0
     durations = [max(1, int(seconds * w / total_weight)) for w in weights]
     durations[-1] += seconds - sum(durations)
     slides = []
     for index, role in enumerate(role_order()):
         page = deck[index]
-        pt = _ROLE_PAGE_TYPE[role]
+        pt = ROLE_PAGE_TYPE[role]
         body = _clip_ppt_body(page["body"])
         title = _ppt_title(page["title"])
         slides.append(Slide(
             id=f"S{index + 1:02d}",
             page_type=pt,
             title=title,
-            purpose=_PAGE_PURPOSE.get(pt, "讲解要点"),
+            purpose=PAGE_PURPOSE.get(pt, "讲解要点"),
             body=body,
-            layout=_PAGE_LAYOUT.get(pt, "bullet"),
-            visual_suggestion=_PAGE_VISUAL.get(pt, "要点列表"),
+            layout=PAGE_LAYOUT.get(pt, "bullet"),
+            visual_suggestion=PAGE_VISUAL.get(pt, "要点列表"),
             speaker_notes=f"围绕「{title}」讲解核心要点，用提问确认学生理解，并给出下一环节的衔接说明。",
             duration_seconds=durations[index],
             blocks=_blocks_for_body(pt, body),

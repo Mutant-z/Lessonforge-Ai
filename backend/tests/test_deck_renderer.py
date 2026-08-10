@@ -79,3 +79,84 @@ def test_export_builds_deck_package_for_deck_theme(tmp_path):
     slide3_texts = [sh.text_frame.text for sh in prs.slides[2].shapes if sh.has_text_frame]
     assert any(text == "本课学习目标" for text in slide3_texts)
     assert any("OBJ" in text for text in slide3_texts)
+
+
+def test_deck_structure_exposes_roles_and_slot_counts():
+    from app.renderers.deck_renderer import deck_structure
+
+    structure = deck_structure("lessonforge_deck_academic")
+    assert structure["page_count"] == 15
+    assert structure["template_id"] == "lessonforge_deck_academic"
+    assert len(structure["roles"]) == 15
+    roles = {r["role"]: r for r in structure["roles"]}
+    assert roles["cover"]["page_type"] == "cover"
+    assert roles["cover"]["slot_count"] == slot_counts("lessonforge_deck_academic")["cover"]
+    assert roles["objectives"]["page_type"] == "objectives"
+    assert roles["end"]["page_type"] == "summary"
+    for role, item in roles.items():
+        assert item["index"] >= 1 and item["index"] <= 15
+        assert item["slot_count"] == slot_counts("lessonforge_deck_academic")[role]
+
+
+def test_design_system_includes_deck_structure_for_deck_templates():
+    from app.renderers.presentation_builder import design_system_for
+    from app.services.ppt_template_service import resolve_ppt_template
+
+    deck_template = resolve_ppt_template("lessonforge_deck_academic")
+    design = design_system_for(deck_template)
+    assert design["composition"] == "deck"
+    assert design["deck_structure"]["page_count"] == 15
+    # 非 deck 模板不携带 deck_structure（目录当前全为 deck，用合成最小模板测负路径）
+    semantic = {"id": "synthetic_semantic", "composition": "semantic"}
+    design_semantic = design_system_for(semantic)
+    assert design_semantic["composition"] == "semantic"
+    assert "deck_structure" not in design_semantic
+
+
+def test_align_initial_deck_partial_output_maps_by_id_only():
+    from types import SimpleNamespace
+
+    from app.agent.pipeline import _align_initial_deck
+    from app.renderers.deck_renderer import ROLE_PAGE_TYPE
+
+    bp = make_blueprint(_course())
+    runtime = SimpleNamespace(preferred_template="lessonforge_deck_academic", blueprint=bp)
+    # 模型只返回 3 页（S05/S10/S15）→ 非 15 页，不做位置回填，缺页走 make_deck 兜底
+    partial = [
+        {"id": "S05", "title": "模型写的核心页", "body": ["a"], "blocks": [], "speaker_notes": "n"},
+        {"id": "S10", "title": "模型写的案例页", "body": ["b"], "blocks": [], "speaker_notes": "n"},
+        {"id": "S15", "title": "模型写的末页", "body": ["c"], "blocks": [], "speaker_notes": "n"},
+    ]
+    aligned = _align_initial_deck(runtime, partial)
+    assert len(aligned) == 15
+    assert aligned[4]["title"] == "模型写的核心页"   # S05 → 第 5 页
+    assert aligned[9]["title"] == "模型写的案例页"    # S10 → 第 10 页
+    assert aligned[14]["title"] == "模型写的末页"     # S15 → 第 15 页
+    # 缺页用 make_deck 对应角色兜底（封面不被部分页内容错配）
+    assert aligned[0]["title"] == make_deck(bp, "lessonforge_deck_academic")[0]["title"]
+    assert aligned[0]["page_type"] == "cover"
+    # 每页 page_type 与角色对齐
+    for index, role in enumerate(role_order()):
+        assert aligned[index]["page_type"] == ROLE_PAGE_TYPE[role]
+
+
+def test_align_initial_deck_order_fallback_only_when_full():
+    from types import SimpleNamespace
+
+    from app.agent.pipeline import _align_initial_deck
+
+    bp = make_blueprint(_course())
+    runtime = SimpleNamespace(preferred_template="lessonforge_deck_academic", blueprint=bp)
+    # 恰好 15 页且无 id/编号 → 位置回填为页序
+    full = [{"title": f"页{i + 1}", "body": [], "blocks": [], "speaker_notes": "n"} for i in range(15)]
+    aligned = _align_initial_deck(runtime, full)
+    assert len(aligned) == 15
+    assert aligned[0]["title"] == "页1"
+    assert aligned[14]["title"] == "页15"
+    assert aligned[0]["page_type"] == "cover"
+    assert aligned[14]["page_type"] == "summary"
+    # 18 页超量且无 id → 只前 15 页按位置对齐
+    too_many = [{"title": f"页{i + 1}", "body": [], "blocks": [], "speaker_notes": "n"} for i in range(18)]
+    aligned_many = _align_initial_deck(runtime, too_many)
+    assert len(aligned_many) == 15
+    assert aligned_many[0]["title"] == "页1"

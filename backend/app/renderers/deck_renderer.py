@@ -39,6 +39,76 @@ def slot_counts(template_id: str) -> dict[str, int]:
     return {role: len(spec["content"]) for role, spec in roles.items()}
 
 
+# deck 角色 → 现有 page_type 映射（不新增 schema 枚举）。
+ROLE_PAGE_TYPE: dict[str, str] = {
+    "cover": "cover", "intro": "scenario", "objectives": "objectives",
+    "knowledge_map": "concept", "knowledge_intro": "concept",
+    "core_1": "concept", "core_2": "concept", "core_3": "concept", "core_4": "concept",
+    "case_study": "case", "discussion": "question", "summary": "summary",
+    "assessment": "exercise", "assignment": "homework", "end": "summary",
+}
+PAGE_PURPOSE: dict[str, str] = {
+    "cover": "建立课程主题并唤起学习期待",
+    "scenario": "用真实问题激活学生既有经验",
+    "objectives": "明确本课可观察的学习成果",
+    "concept": "建立核心概念与关键关系",
+    "case": "通过案例示范应用过程",
+    "question": "引导互动讨论与判断",
+    "exercise": "即时测验收集学习证据",
+    "summary": "总结本课要点并预告联系",
+    "homework": "布置课后应用任务",
+}
+PAGE_LAYOUT: dict[str, str] = {
+    "cover": "cover", "scenario": "question", "objectives": "bullet",
+    "concept": "split", "case": "split", "question": "question",
+    "exercise": "exercise", "summary": "summary", "homework": "bullet",
+}
+PAGE_VISUAL: dict[str, str] = {
+    "cover": "纯白背景左侧主色竖栏，课程主题大标题与副标题留白排版",
+    "scenario": "上方大面积留白作为问题区，下方虚线框提示学生写下初步判断",
+    "objectives": "编号列表纵向排列，编号使用主题色圆形徽章",
+    "concept": "左侧概念框图，右侧箭头图表示关键关系，底部保留留白",
+    "case": "横向步骤流程线，每步配编号与短句",
+    "question": "上方问题区，下方作答提示条",
+    "exercise": "左题目右作答分栏，底部自我检查提示条",
+    "summary": "三条结论短句，下方时间轴示意环节推进",
+    "homework": "任务清单卡片，逐条核对",
+}
+ROLE_WEIGHT: dict[str, float] = {
+    "cover": 0.04, "intro": 0.10, "objectives": 0.08, "knowledge_map": 0.08,
+    "knowledge_intro": 0.10, "core_1": 0.07, "core_2": 0.07, "core_3": 0.07, "core_4": 0.07,
+    "case_study": 0.10, "discussion": 0.07, "summary": 0.06, "assessment": 0.06,
+    "assignment": 0.03, "end": 0.02,
+}
+
+
+def deck_structure(template_id: str) -> dict:
+    """返回模板的 deck 角色结构，供 LLM 生成内容时对齐真实模板的页序与槽位。
+
+    每项含角色名、映射 page_type、页面目的、版式、视觉建议与内容槽位数。
+    slides[i]（i 从 0 起）对应模板第 i+1 页；LLM 按此结构生成恰好
+    ``page_count`` 页、页序不可改变的内容。
+    """
+    counts = slot_counts(template_id)
+    roles = []
+    for index, role in enumerate(role_order(), 1):
+        page_type = ROLE_PAGE_TYPE.get(role, "concept")
+        roles.append({
+            "index": index,
+            "role": role,
+            "page_type": page_type,
+            "purpose": PAGE_PURPOSE.get(page_type, "讲解要点"),
+            "layout": PAGE_LAYOUT.get(page_type, "bullet"),
+            "visual_suggestion": PAGE_VISUAL.get(page_type, "要点列表"),
+            "slot_count": counts.get(role, 0),
+        })
+    return {
+        "template_id": template_id,
+        "page_count": len(roles),
+        "roles": roles,
+    }
+
+
 def _find_shape(slide, anchor: dict, tol_inches: float):
     """返回最接近锚点 (x,y) 英寸坐标的文本形状，无则 None。
 

@@ -19,6 +19,7 @@ from pptx.util import Emu, Inches, Pt
 
 from app.services.ppt_template_service import resolve_ppt_template
 from app.agent.slide_rendering import infer_render_mode, semantic_body_texts
+from app.renderers.deck_renderer import deck_structure
 
 SLIDE_WIDTH = 13.333
 SLIDE_HEIGHT = 7.5
@@ -76,10 +77,15 @@ def _color(palette: dict[str, str], key: str) -> RGBColor:
 
 
 def design_system_for(template: dict[str, Any]) -> dict[str, Any]:
-    """把 catalog 模板元数据扩展为可渲染的设计系统（含装饰几何）。"""
+    """把 catalog 模板元数据扩展为可渲染的设计系统（含装饰几何）。
+
+    deck 模板（composition=="deck"）额外携带 deck_structure：15 页角色顺序、
+    每页映射 page_type/目的/版式/视觉建议与内容槽位数，供 LLM 生成内容时
+    对齐真实模板的页序与槽位，也让所有 Agent 能感知模板的页面结构。
+    """
     template_id = template["id"]
     decor = TEMPLATE_DECOR.get(template_id, TEMPLATE_DECOR["lessonforge_deck_academic"])
-    return {
+    design = {
         "id": template_id,
         "palette": template.get("palette", {}),
         "typography": template.get("typography", {}),
@@ -88,6 +94,9 @@ def design_system_for(template: dict[str, Any]) -> dict[str, Any]:
         "safe_margin": {"x": 0.6, "y": 0.5, "bottom": 0.7},
         "canvas": {"width": SLIDE_WIDTH, "height": SLIDE_HEIGHT},
     }
+    if design["composition"] == "deck":
+        design["deck_structure"] = deck_structure(template_id)
+    return design
 
 
 class PresentationBuilder:

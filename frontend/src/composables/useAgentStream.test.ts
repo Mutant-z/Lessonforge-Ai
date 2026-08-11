@@ -58,6 +58,19 @@ describe('buildStreamNodes', () => {
     });
   });
 
+  it('shows pause and resume events instead of making a stopped run look inert', () => {
+    const nodes = buildStreamNodes([
+      item(1, 'agent_status_delta', { run_id: 'run-paused', agent_key: 'orchestrator', text: '正在理解修改范围。' }),
+      item(2, 'task_paused', { run_id: 'run-paused', message: '用户暂停' }),
+      item(3, 'task_resumed', { run_id: 'run-paused' }),
+    ], {}, []);
+
+    expect(nodes.filter(node => node.kind === 'event')).toEqual([
+      expect.objectContaining({ kind: 'event', type: 'task_paused' }),
+      expect.objectContaining({ kind: 'event', type: 'task_resumed' }),
+    ]);
+  });
+
   it('puts user instruction before the session head and reply at the tail for message runs', () => {
     const nodes = buildStreamNodes(fullRunItems, { 'run-1:narrative': '…' }, [
       { id: 'u1', role: 'user', content: '请把第3页改成对比版式', run_id: 'run-1', status: 'completed' },
@@ -172,5 +185,48 @@ describe('buildStreamNodes', () => {
     ]);
 
     expect(turns.at(-1)?.users.at(-1)?.content).toBe('刚发送的指令');
+  });
+
+  it('preserves failed delivery status so an optimistic bubble is not shown as successful', () => {
+    const nodes = buildStreamNodes([], {}, [
+      { id: 'local-failed', role: 'user', content: '继续润色首页', status: 'failed' },
+    ]);
+
+    expect(nodes[0]).toMatchObject({ kind: 'user', content: '继续润色首页', status: 'failed' });
+  });
+
+  it('does not show a historical server processing status as a delivery spinner', () => {
+    const nodes = buildStreamNodes([], {}, [
+      { id: 'server-message', role: 'user', content: '润色首页', status: 'pending', run_id: 'run-complete' },
+    ]);
+
+    expect(nodes[0]).toMatchObject({ kind: 'user', content: '润色首页' });
+    expect(nodes[0]).not.toHaveProperty('status', 'pending');
+  });
+
+  it('strips the [针对第 N 页] scope prefix from the teacher bubble', () => {
+    const nodes = buildStreamNodes([], {}, [
+      { id: 'u-scoped', role: 'user', content: '[针对第 4 页] 请调整本页版式', run_id: 'run-1', status: 'completed' },
+    ]);
+
+    expect(nodes[0]).toMatchObject({ kind: 'user', content: '请调整本页版式' });
+  });
+
+  it('strips both [目标页面:...] and [针对第 N 页] prefixes', () => {
+    const nodes = buildStreamNodes([], {}, [
+      { id: 'u-target', role: 'user', content: '[目标页面: S02,S03] 改标题', status: 'completed' },
+      { id: 'u-multi', role: 'user', content: '[针对第 1、3 页] 增加案例', status: 'completed' },
+    ]);
+
+    expect(nodes[0]).toMatchObject({ kind: 'user', content: '改标题' });
+    expect(nodes[1]).toMatchObject({ kind: 'user', content: '增加案例' });
+  });
+
+  it('keeps teacher text intact when no scope prefix is present', () => {
+    const nodes = buildStreamNodes([], {}, [
+      { id: 'u-plain', role: 'user', content: '润色整份课件', status: 'completed' },
+    ]);
+
+    expect(nodes[0]).toMatchObject({ kind: 'user', content: '润色整份课件' });
   });
 });

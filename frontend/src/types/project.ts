@@ -193,7 +193,16 @@ export interface ProjectTaskEvent {
   phase_status?: TaskActivity['status'];
   elapsed_ms?: number;
   message_id?: string;
+  agent_key?: string;
+  text?: string;
   delta?: string;
   reset?: boolean;
+  issue?: Record<string, any>;
   payload?: Record<string, any>;
 }
+
+/** 润色范围：auto（自动）| layout（只改布局）| text（只改文字）| image（只改图片） */
+export type PPTPolishModality = 'auto' | 'layout' | 'text' | 'image';
+
+/** slide_id → 该页修复原因（从 qa.issue / repair.started 事件累计，已去重） */
+export type SlideRepairNotes = Record<string, string[]>;

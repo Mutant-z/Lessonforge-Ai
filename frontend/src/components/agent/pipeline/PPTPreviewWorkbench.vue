@@ -16,12 +16,14 @@ const props = defineProps<{
   modifiedSlides?: Set<number>;
   draftSlideIndex?: number;
   selectedSlides?: Set<number>;
+  slideRepairNotes?: Record<string, string[]>;
   loading?: boolean;
 }>();
 
 const emit = defineEmits<{
   (e: 'select-slide', index: number, additive?: boolean): void;
   (e: 'modify-slide', index: number): void;
+  (e: 'show-repair-detail', index: number): void;
   (e: 'open-template-drawer'): void;
   (e: 'open-version-drawer'): void;
   (e: 'sync-context'): void;
@@ -94,7 +96,9 @@ function handleModifySlide(index: number) {
           :template="pptTheme"
           :modified-slides="modifiedSlides"
           :selected-slides="selectedSlides"
+          :slide-repair-notes="slideRepairNotes"
           @select-slide="handleSelectSlide"
+          @show-repair-detail="emit('show-repair-detail', $event)"
         />
         <PPTPreviewStage
           v-if="viewMode === 'preview'"

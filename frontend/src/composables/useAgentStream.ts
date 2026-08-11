@@ -4,7 +4,7 @@ import type { ProjectAgentMessage } from '../types';
 /** Codex 式会话流：一个用户请求对应一个 Turn，执行轨迹和最终回复都归属于该 Turn。 */
 
 export type AgentStreamNode =
-  | { kind: 'user'; id: string; content: string }                                   // > 教师指令
+  | { kind: 'user'; id: string; content: string; status?: ProjectAgentMessage['status'] } // > 教师指令
   | { kind: 'session'; id: string; runId: string }                                  // ◈ 教学 Agent 会话头
   | { kind: 'thought'; id: string; runId: string; agentKey: string; thoughtKey: string; content: string; active: boolean }  // 灰色可见执行摘要
   | { kind: 'tool'; id: string; runId: string; toolName: string; input: Record<string, any>; output: Record<string, any>; ok: boolean; running: boolean; error?: string | null; durationMs?: number }
@@ -20,7 +20,7 @@ export interface AgentStreamTurn {
 }
 
 /** 纯底层标记，终端流不展示 */
-const IGNORED_TYPES = new Set(['pipeline_started', 'pipeline_completed', 'task_paused', 'task_resumed']);
+const IGNORED_TYPES = new Set(['pipeline_started', 'pipeline_completed']);
 
 /** 作为紧凑事件行渲染的领域事件 */
 const EVENT_TYPES = new Set([
@@ -31,6 +31,7 @@ const EVENT_TYPES = new Set([
   'slide.layout.updated', 'slide.asset.updated', 'slide.rendering', 'slide.rendered', 'slide.qa',
   'slide.completed', 'slide.failed', 'qa.started', 'qa.issue', 'repair.started', 'repair.completed',
   'human.required', 'run.instruction.queued', 'run.instruction.merged', 'run.failed', 'run.cancelled',
+  'task_paused', 'task_resumed', 'run.paused', 'run.resumed',
 ]);
 
 interface StreamSession {
@@ -197,7 +198,13 @@ export function buildAgentTurns(
       if (!text) continue;
       const userNode: AgentStreamNode = {
         kind: 'user', id: `user-${msg.id}`,
-        content: msg.content.replace(/^\[目标页面:[^\]]+\]\s*/, ''),
+        // 后端 create_run 会加 [目标页面:...]，前端 Composer 单页/多页定位会加
+        // [针对第 N 页]；两种范围前缀都不应出现在教师气泡正文里。
+        content: msg.content.replace(/^\[(?:目标页面|针对第 [^\]]+页)[^\]]*\]\s*/, ''),
+        // Delivery state belongs to the local optimistic envelope. Historical
+        // server messages may retain `pending` as their processing status even
+        // after the Run completed, which must not be rendered as “发送中”.
+        status: msg.id.startsWith('local-') ? msg.status : undefined,
       };
       if (target) {
         const firstTrace = target.nodes.findIndex(node => node.kind !== 'user');

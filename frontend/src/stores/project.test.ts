@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { api } from '../api/client';
 import { useProjectStore } from './project';
-import type { CourseProjectWorkspace, CourseTask } from '../types';
+import type { CourseProjectWorkspace, CourseTask, ProjectTaskEvent } from '../types';
 
 vi.mock('../api/client', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn() },
@@ -160,8 +160,37 @@ describe('project task store', () => {
     } });
     await request;
 
+    expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-1/instructions', {
+      content: '调整当前页配色', selected_slide_ids: ['S02'], resume_if_paused: false, modality: 'auto',
+    });
     expect(store.currentTask.messages).toEqual([
       expect.objectContaining({ id: 'message-1', content: '调整当前页配色', status: 'completed', run_id: 'run-1' }),
+    ]);
+  });
+
+  it('atomically queues an instruction and resumes its paused PPT run', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = { ...store.project.tasks[0], status: 'paused', messages: [] };
+    store.pipelineStatus = 'paused';
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      instruction_id: 'instruction-resume', message_id: 'message-resume', status: 'resumed',
+      message: {
+        id: 'message-resume', role: 'user', content: '继续润色首页',
+        status: 'completed', run_id: 'run-paused',
+      },
+    } });
+
+    const result = await store.enqueuePPTInstruction('run-paused', '继续润色首页', ['slide_01'], true);
+
+    expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-paused/instructions', {
+      content: '继续润色首页', selected_slide_ids: ['slide_01'], resume_if_paused: true, modality: 'auto',
+    });
+    expect(result.status).toBe('resumed');
+    expect(store.pipelineStatus).toBe('queued');
+    expect(store.currentTask.status).toBe('queued');
+    expect(store.currentTask.messages).toEqual([
+      expect.objectContaining({ id: 'message-resume', run_id: 'run-paused', status: 'completed' }),
     ]);
   });
 
@@ -179,13 +208,52 @@ describe('project task store', () => {
     await store.createPPTRun('course-1', '润色一下首页', ['slide_01']);
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs', {
-      course_id: 'course-1', instruction: '润色一下首页', action: 'message', selected_slide_ids: ['slide_01'],
+      course_id: 'course-1', instruction: '润色一下首页', action: 'message', selected_slide_ids: ['slide_01'], modality: 'auto',
     });
     expect(store.pipelineStatus).toBe('queued');
     expect(store.currentTask.active_run_id).toBe('run-2');
     expect(store.currentTask.messages?.at(-1)).toMatchObject({
       id: 'message-2', run_id: 'run-2', content: '润色一下首页', status: 'completed',
     });
+  });
+
+  it('preserves first-run SSE feedback that arrives before createRun resolves', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+    store.pipelineEvents = [{ type: 'pipeline_completed', data: { run_id: 'run-old' }, event_id: 10 }];
+    store.lastEventId = 10;
+    vi.spyOn(store, 'startActiveTaskPolling').mockImplementation(() => undefined);
+
+    let resolveRequest!: (value: any) => void;
+    vi.mocked(api.post).mockReturnValue(new Promise(resolve => { resolveRequest = resolve; }));
+
+    const request = store.createPPTRun('course-1', '润色一下首页', ['slide_01']);
+    expect(store.pipelineEvents).toEqual([]);
+
+    store.applyEvent('agent_status_delta', {
+      event_id: 11,
+      course_id: 'course-1',
+      run_id: 'run-2',
+      task_id: 'task-ppt',
+      agent_key: 'orchestrator',
+      text: '正在理解修改范围。',
+      status: 'running',
+    });
+
+    resolveRequest({ data: {
+      run_id: 'run-2', task_id: 'task-ppt', message_id: 'message-2',
+      status: 'queued', selected_slide_ids: ['slide_01'],
+    } });
+    await request;
+
+    expect(store.pipelineEvents).toEqual([
+      expect.objectContaining({
+        type: 'agent_status_delta',
+        event_id: 11,
+        data: expect.objectContaining({ run_id: 'run-2', text: '正在理解修改范围。' }),
+      }),
+    ]);
   });
 
   it('preserves the large PPT artifact identity during status polling', async () => {
@@ -336,5 +404,93 @@ describe('project task store', () => {
     expect(store.currentTask.activity_run_id).toBe('run-2');
     expect(store.currentTask.activities).toHaveLength(1);
     expect(store.currentTask.current_activity).toMatchObject({ phase: 'preparing', progress: 10 });
+  });
+
+  it('passes the chosen polish modality through createRun and enqueue', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+    vi.spyOn(store, 'startActiveTaskPolling').mockImplementation(() => undefined);
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      run_id: 'run-modality', task_id: 'task-ppt', message_id: 'message-modality',
+      status: 'queued', selected_slide_ids: ['slide_01'],
+    } });
+
+    await store.createPPTRun('course-1', '只调整排版', ['slide_01'], 'layout');
+
+    expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs', {
+      course_id: 'course-1', instruction: '只调整排版', action: 'message',
+      selected_slide_ids: ['slide_01'], modality: 'layout',
+    });
+
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      instruction_id: 'instruction-modality', message_id: 'message-enqueue', status: 'queued',
+      message: { id: 'message-enqueue', role: 'user', content: '只改文字', status: 'completed', run_id: 'run-modality' },
+    } });
+    await store.enqueuePPTInstruction('run-modality', '只改文字', ['slide_01'], false, 'text');
+
+    expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-modality/instructions', {
+      content: '只改文字', selected_slide_ids: ['slide_01'], resume_if_paused: false, modality: 'text',
+    });
+  });
+
+  it('accumulates per-slide repair notes from qa_issue_found / qa.issue and repair.started events', () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+
+    store.applyEvent('qa_issue_found', {
+      event_id: 101, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1', status: 'running',
+      issue: { severity: 'critical', slide_id: 'slide_03', rule_id: 'content.not_rendered', message: '页面语义文字没有进入最终渲染层', target_agent: 'layout' },
+    });
+    store.applyEvent('repair.started', {
+      event_id: 102, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1', status: 'running',
+      payload: {
+        target_agents: ['layout'],
+        issues: [
+          { severity: 'major', slide_id: 'slide_03', rule_id: 'layout.blank_region', message: '页面内容只覆盖画布少部分，大面积空白', target_agent: 'layout' },
+          { severity: 'minor', slide_id: 'slide_07', rule_id: 'content.missing_title', message: '页面缺少标题', target_agent: 'slide_content' },
+        ],
+      },
+    });
+
+    expect(store.slideRepairNotes['slide_03']).toEqual([
+      '严重：页面语义文字没有进入最终渲染层（content.not_rendered）',
+      '主要：页面内容只覆盖画布少部分，大面积空白（layout.blank_region）',
+    ]);
+    expect(store.slideRepairNotes['slide_07']).toEqual([
+      '次要：页面缺少标题（content.missing_title）',
+    ]);
+  });
+
+  it('does not duplicate identical repair notes across rounds', () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+
+    const repair = (eventId: number): ProjectTaskEvent => ({
+      event_id: eventId, course_id: 'course-1', task_id: 'task-ppt', run_id: 'run-1', status: 'running',
+      payload: { issues: [{ severity: 'major', slide_id: 'slide_03', rule_id: 'layout.blank_region', message: '大面积空白', target_agent: 'layout' }] },
+    });
+    store.applyEvent('repair.started', repair(201));
+    store.applyEvent('repair.started', repair(202));
+
+    expect(store.slideRepairNotes['slide_03']).toHaveLength(1);
+  });
+
+  it('clears repair notes when a fresh PPT run starts', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+    store.slideRepairNotes = { slide_03: ['严重：页面文字没有进入最终渲染层'] };
+    vi.spyOn(store, 'startActiveTaskPolling').mockImplementation(() => undefined);
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      run_id: 'run-fresh', task_id: 'task-ppt', message_id: 'message-fresh',
+      status: 'queued', selected_slide_ids: [],
+    } });
+
+    await store.createPPTRun('course-1', '整体润色');
+
+    expect(store.slideRepairNotes).toEqual({});
   });
 });

@@ -8,6 +8,7 @@ import { useProjectStore } from '../../../stores/project';
 import { usePipelineStore } from '../../../stores/pipeline';
 import { useModelConfigStore } from '../../../stores/modelConfigs';
 import type { PPTContent, PPTTemplate } from '../../../types';
+import type { PPTPolishModality } from '../../../types/project';
 import { PIPELINE_STATUS_LABELS } from '../../../types/agentPipeline';
 import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
@@ -153,15 +154,23 @@ async function loadTemplates() {
   }
 }
 
-async function send(content: string) {
-  const runId = pipelineStore.run?.generation_run_id;
-  if (isRunning.value && runId) {
-    await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value);
+async function send(content: string, modality: PPTPolishModality = 'auto') {
+  const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
+  if (paused.value && runId) {
+    const result = await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, true, modality);
+    if (result.status === 'resumed' && pipelineStore.detail?.run) {
+      pipelineStore.detail.run.status = 'queued';
+    }
+    await loadDetail();
+    startPolling();
+  }
+  else if (isRunning.value && runId) {
+    await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, false, modality);
     await loadDetail();
   }
   else {
     pipelineStore.beginRun();
-    await projectStore.createPPTRun(props.courseId, content, selectedSlideIds.value);
+    await projectStore.createPPTRun(props.courseId, content, selectedSlideIds.value, modality);
     await loadDetail();
   }
   targetSlideContext.value = null;
@@ -214,7 +223,16 @@ function handleSelectSlide(index: number, additive = false) {
 }
 
 function handleModifySlide(index: number) {
-  targetSlideContext.value = index;
+  // “修改本页”路径：把该页收进多选范围（selected_slide_ids），让后端只改这一页。
+  const safeIndex = normalizeSlideIndex(index, previewContent.value?.slides?.length || 0);
+  selectedSlideIndexes.value = new Set([safeIndex]);
+  targetSlideContext.value = safeIndex;
+  mobilePane.value = 'agent';
+}
+
+function handleShowRepairDetail(index: number) {
+  handleSelectSlide(index, false);
+  // 胶片徽标点击 → 定位到该页并切到 Agent 侧（桌面两侧同屏时即时间线上下文）。
   mobilePane.value = 'agent';
 }
 
@@ -369,7 +387,7 @@ watch(
           </el-tag>
         </div>
         <div class="pane-controls">
-          <el-button v-if="status === 'running'" size="small" :loading="pipelineStore.pauseLoading" @click="pause">
+          <el-button v-if="['running', 'queued'].includes(status) && !pausing" size="small" :loading="pipelineStore.pauseLoading" @click="pause">
             <el-icon><VideoPause /></el-icon>&nbsp;暂停
           </el-button>
           <el-button v-else-if="pausing" size="small" loading disabled>暂停中</el-button>
@@ -394,7 +412,7 @@ watch(
         :target-slide="targetSlideContext"
         :target-slides="[...selectedSlideIndexes]"
         :is-running="isRunning"
-        :pause-loading="pipelineStore.pauseLoading || pausing"
+        :pausing="pausing || pipelineStore.pauseLoading"
         :model-config-id="task?.model_config_id"
         :image-model-config-id="task?.image_model_config_id"
         :image-model-available-count="imageModelCandidates.length"
@@ -432,9 +450,11 @@ watch(
         :active-slide-index="activeSlideIndex"
         :draft-slide-index="draftSlideIndex"
         :selected-slides="selectedSlideIndexes"
+        :slide-repair-notes="projectStore.slideRepairNotes"
         :loading="previewLoading"
         @select-slide="handleSelectSlide"
         @modify-slide="handleModifySlide"
+        @show-repair-detail="handleShowRepairDetail"
         @open-template-drawer="showTemplateDrawer = true"
         @open-version-drawer="emit('open-version-drawer')"
         @sync-context="projectStore.runTask(courseId, taskType, 'sync_context')"

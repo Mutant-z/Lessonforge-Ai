@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { api, errorMessage } from '../api/client';
 import { pipelineApi } from '../api/pipeline';
-import type { Artifact, ArtifactUpdateSource, CourseProjectWorkspace, CourseTask, HydrationStatus, ProjectAgentMessage, ProjectTaskEvent } from '../types';
+import type { Artifact, ArtifactUpdateSource, CourseProjectWorkspace, CourseTask, HydrationStatus, PPTPolishModality, ProjectAgentMessage, ProjectTaskEvent, SlideRepairNotes } from '../types';
 import { useCourseStore } from './courses';
 
 const TASK_EVENTS = [
@@ -135,6 +135,33 @@ function reconcileTaskArtifact(incoming: CourseTask, existing: CourseTask | null
   };
 }
 
+/** QA / 修复事件里可能携带的问题对象（兼容 legacy 与 canonical 两种信封） */
+interface RepairIssueShape {
+  slide_id?: unknown;
+  severity?: unknown;
+  rule_id?: unknown;
+  message?: unknown;
+}
+
+const REPAIR_SEVERITY_LABELS: Record<string, string> = { critical: '严重', major: '主要', minor: '次要' };
+
+function collectRepairIssues(event: Record<string, any>): RepairIssueShape[] {
+  const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+  const candidates: unknown[] = [];
+  if (Array.isArray(payload.issues)) candidates.push(...payload.issues);
+  if (payload.issue && typeof payload.issue === 'object') candidates.push(payload.issue);
+  if (event.issue && typeof event.issue === 'object') candidates.push(event.issue);
+  if (Array.isArray(event.issues)) candidates.push(...event.issues);
+  return candidates.filter((item): item is RepairIssueShape => Boolean(item) && typeof item === 'object');
+}
+
+function formatRepairNote(issue: RepairIssueShape): string {
+  const severity = REPAIR_SEVERITY_LABELS[String(issue.severity || '')] || '';
+  const message = String(issue.message || '').trim();
+  const rule = issue.rule_id ? `（${String(issue.rule_id)}）` : '';
+  return `${severity ? `${severity}：` : ''}${message || '页面存在质量问题'}${rule}`;
+}
+
 export const useProjectStore = defineStore('project', {
   state: () => ({
     project: null as CourseProjectWorkspace | null,
@@ -151,6 +178,7 @@ export const useProjectStore = defineStore('project', {
     activeTaskPollInFlight: false,
     pipelineEvents: [] as Array<{ type: string; data: Record<string, any>; event_id: number }>,
     pipelineStatus: '' as string,
+    slideRepairNotes: {} as SlideRepairNotes,
     officialArtifact: null as Artifact | null,
     viewedArtifact: null as Artifact | null,
     hydrationStatus: 'idle' as HydrationStatus,
@@ -220,6 +248,7 @@ export const useProjectStore = defineStore('project', {
         if (courseChanged) {
           this.pipelineEvents = [];
           this.pipelineStatus = '';
+          this.slideRepairNotes = {};
           this.officialArtifact = null;
           this.viewedArtifact = null;
         }
@@ -303,7 +332,13 @@ export const useProjectStore = defineStore('project', {
         throw cause;
       }
     },
-    async enqueuePPTInstruction(runId: string, content: string, selectedSlideIds: string[] = []) {
+    async enqueuePPTInstruction(
+      runId: string,
+      content: string,
+      selectedSlideIds: string[] = [],
+      resumeIfPaused = false,
+      modality: PPTPolishModality = 'auto',
+    ) {
       const local: ProjectAgentMessage = {
         id: `local-${crypto.randomUUID()}`,
         role: 'user',
@@ -314,9 +349,13 @@ export const useProjectStore = defineStore('project', {
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
       try {
-        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds);
+        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds, resumeIfPaused, modality);
         Object.assign(local, data.message, { status: 'completed' as const });
-        if (this.currentTask) this.currentTask.messages = deduplicateMessages([...(this.currentTask.messages || [])]);
+        if (this.currentTask) {
+          this.currentTask.messages = deduplicateMessages([...(this.currentTask.messages || [])]);
+          if (data.status === 'resumed') this.currentTask.status = 'queued';
+        }
+        if (data.status === 'resumed') this.pipelineStatus = 'queued';
         return data;
       } catch (cause) {
         local.status = 'failed';
@@ -324,9 +363,11 @@ export const useProjectStore = defineStore('project', {
         throw cause;
       }
     },
-    async createPPTRun(courseId: string, content: string, selectedSlideIds: string[] = []) {
+    async createPPTRun(courseId: string, content: string, selectedSlideIds: string[] = [], modality: PPTPolishModality = 'auto') {
       const previousPipelineStatus = this.pipelineStatus;
       const previousTaskStatus = this.currentTask?.status;
+      const previousPipelineEvents = this.pipelineEvents;
+      const previousRepairNotes = this.slideRepairNotes;
       const local: ProjectAgentMessage = {
         id: `local-${crypto.randomUUID()}`,
         role: 'user',
@@ -335,12 +376,16 @@ export const useProjectStore = defineStore('project', {
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      // Clear the previous run before starting the request. Clearing after the
+      // response races with SSE and can erase the new run's first visible status
+      // events (pipeline_started / orchestrator status), making Send look inert.
+      this.pipelineEvents = [];
+      this.slideRepairNotes = {};
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds);
+        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds, modality);
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
-        this.pipelineEvents = [];
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
           this.currentTask.status = 'queued';
@@ -352,6 +397,8 @@ export const useProjectStore = defineStore('project', {
         return data;
       } catch (cause) {
         local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.slideRepairNotes = previousRepairNotes;
         this.pipelineStatus = previousPipelineStatus;
         if (this.currentTask && previousTaskStatus) this.currentTask.status = previousTaskStatus;
         throw cause;
@@ -408,6 +455,21 @@ export const useProjectStore = defineStore('project', {
       this.lastEventId = Math.max(this.lastEventId, event.event_id || 0);
       if (PIPELINE_EVENT_TYPES.has(type)) {
         this.pipelineEvents.push({ type, data: event as Record<string, any>, event_id: event.event_id || 0 });
+        // 修复原因：qa.issue / repair.started 携带每页 QA 问题，按 slide_id 累计展示。
+        if (type === 'qa_issue_found' || type === 'qa.issue' || type === 'repair.started') {
+          const issues = collectRepairIssues(event as unknown as Record<string, any>);
+          if (issues.length) {
+            const next = { ...this.slideRepairNotes };
+            for (const issue of issues) {
+              const slideId = String(issue.slide_id || '');
+              if (!slideId) continue;
+              const note = formatRepairNote(issue);
+              const existing = next[slideId] || [];
+              if (!existing.includes(note)) next[slideId] = [...existing, note];
+            }
+            this.slideRepairNotes = next;
+          }
+        }
         if (type === 'run.instruction.queued' && event.payload?.user_message && this.currentTask) {
           const userMessage = event.payload.user_message as ProjectAgentMessage;
           const messages = this.currentTask.messages || [];

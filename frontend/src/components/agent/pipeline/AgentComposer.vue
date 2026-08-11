@@ -1,21 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
-import { Close, Loading, MagicStick, Promotion, VideoPause } from '@element-plus/icons-vue';
+import { nextTick, ref, watch } from 'vue';
+import { Close, Loading, MagicStick, Picture, Promotion, VideoPause } from '@element-plus/icons-vue';
 import ModelSelector from '../ModelSelector.vue';
 import { isImageGenerationInstruction } from '../../../utils/imageModelSelection';
+import type { PPTPolishModality } from '../../../types/project';
 
 const props = defineProps<{
   targetSlide?: number | null;
   targetSlides?: number[];
   isRunning?: boolean;
+  pausing?: boolean;
   modelConfigId?: string | null;
   imageModelConfigId?: string | null;
   imageModelAvailableCount?: number;
-  pauseLoading?: boolean;
 }>();
 
 const emit = defineEmits<{
-  (e: 'send', text: string): void;
+  (e: 'send', text: string, modality: PPTPolishModality): void;
   (e: 'pause'): void;
   (e: 'clear-target-slide'): void;
   (e: 'change-model', modelId: string): void;
@@ -26,12 +27,22 @@ const emit = defineEmits<{
 const input = ref('');
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 
+/** 润色范围选择：auto（自动）| layout（只改布局）| text（只改文字）| image（只改图片） */
+const modality = ref<PPTPolishModality>('auto');
+const modalityOptions: Array<{ value: PPTPolishModality; label: string; tip: string }> = [
+  { value: 'auto', label: '自动', tip: '由 Agent 按指令自动判断润色范围' },
+  { value: 'layout', label: '只改布局', tip: '只调整页面排版，不改文字与图片' },
+  { value: 'text', label: '只改文字', tip: '只优化文字表达，不动布局与图片' },
+  { value: 'image', label: '只改图片', tip: '只处理图片素材，不动文字与布局' },
+];
+
 const quickPrompts = [
+  '润色本页文字表达',
+  '调整本页排版与页面分布',
   '优化教学目标与重难点表达',
   '增加课堂互动与提问环节设计',
   '精简课件页面文字与层级',
   '补充教学案例与情境导入',
-  '润色 PPT 整体风格与排版配比',
 ];
 
 function adjustHeight() {
@@ -65,23 +76,14 @@ function applyQuickPrompt(promptText: string) {
   });
 }
 
-function handleButtonClick() {
-  if (props.isRunning) {
-    if (props.pauseLoading) return;
-    emit('pause');
-    return;
-  }
-  handleSubmit();
-}
-
 function handleGenerateImage() {
   if (props.isRunning) return;
   
   // 特殊指令触发图片生成
   const imagePrompt = '生成一张高清图片，风格专业，适合PPT插入';
   const finalText = `[图片生成] ${imagePrompt}`;
-  
-  emit('send', finalText);
+
+  emit('send', finalText, modality.value);
   input.value = '';
   adjustHeight();
 }
@@ -101,7 +103,7 @@ function handleSubmit() {
     finalText = `[针对第 ${props.targetSlide + 1} 页] ${rawText}`;
   }
 
-  emit('send', finalText);
+  emit('send', finalText, modality.value);
   input.value = '';
   adjustHeight();
 }
@@ -139,6 +141,23 @@ function clearSlideTarget() {
         <span v-else>已定位：<strong>第 {{ (targetSlide ?? 0) + 1 }} 页</strong></span>
         <button type="button" class="clear-target-btn" title="清除页面定位" @click="clearSlideTarget">
           <el-icon><Close /></el-icon>
+        </button>
+      </div>
+
+      <!-- 润色范围选择 -->
+      <div class="polish-modality" role="group" aria-label="润色范围">
+        <span class="modality-label">润色范围</span>
+        <button
+          v-for="m in modalityOptions"
+          :key="m.value"
+          type="button"
+          class="modality-btn"
+          :class="{ active: modality === m.value }"
+          :disabled="isRunning"
+          :title="m.tip"
+          @click="modality = m.value"
+        >
+          {{ m.label }}
         </button>
       </div>
 
@@ -182,30 +201,39 @@ function clearSlideTarget() {
         </div>
         <div class="bottom-right">
           <span class="tip-key">Shift+Enter 换行</span>
-<button v-if="isRunning && input.trim()" type="button" class="queue-btn" @click="handleSubmit">
-  加入队列
-</button>
-<button 
-  v-if="!isRunning && !props.imageModelConfigId" 
-  type="button" 
-  class="send-circle-btn"
-  @click="handleGenerateImage()"
-  title="一键生成图片"
->
-  <el-icon><Picture /></el-icon>
-</button>
-
+          <button v-if="isRunning && input.trim()" type="button" class="queue-btn" @click="handleSubmit">
+            加入队列
+          </button>
           <button
+            v-if="isRunning"
+            type="button"
+            class="send-circle-btn is-pausing"
+            :disabled="props.pausing"
+            :title="props.pausing ? '暂停中...' : '暂停 Agent 推演'"
+            @click="emit('pause')"
+          >
+            <el-icon v-if="props.pausing" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else><VideoPause /></el-icon>
+          </button>
+          <button
+            v-if="!isRunning && !props.imageModelConfigId"
             type="button"
             class="send-circle-btn"
-            :class="{ 'is-pausing': isRunning }"
-            :disabled="isRunning ? pauseLoading : !input.trim()"
-            :title="isRunning ? '暂停 Agent 推演' : '发送修改指令'"
-            @click="handleButtonClick"
+            title="一键生成图片"
+            @click="handleGenerateImage()"
           >
-            <el-icon v-if="pauseLoading" class="is-loading"><Loading /></el-icon>
-            <el-icon v-else-if="isRunning"><VideoPause /></el-icon>
-            <el-icon v-else><Promotion /></el-icon>
+            <el-icon><Picture /></el-icon>
+          </button>
+
+          <button
+            v-if="!isRunning"
+            type="button"
+            class="send-circle-btn"
+            :disabled="!input.trim()"
+            title="发送修改指令"
+            @click="handleSubmit"
+          >
+            <el-icon><Promotion /></el-icon>
           </button>
         </div>
       </div>
@@ -339,6 +367,50 @@ function clearSlideTarget() {
 }
 .clear-target-btn:hover {
   color: #1d4ed8;
+}
+
+/* —— 润色范围选择 —— */
+.polish-modality {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.modality-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.modality-btn {
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 150ms ease;
+}
+
+.modality-btn:hover:not(:disabled) {
+  border-color: #a5b4fc;
+  color: #4f46e5;
+}
+
+.modality-btn.active {
+  background: #4f46e5;
+  border-color: #4f46e5;
+  color: #ffffff;
+}
+
+.modality-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .composer-input-wrapper textarea {

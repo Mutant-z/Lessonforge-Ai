@@ -24,6 +24,7 @@ const scrollRef = ref<HTMLElement | null>(null);
 const isUserScrolledUp = ref(false);
 const unreadCount = ref(0);
 const expandedTools = ref<Set<string>>(new Set());
+const expandedEvents = ref<Set<string>>(new Set());
 let lastUnreadMessageId = '';
 
 /** Codex 式 Turn：教师指令、执行轨迹、最终回复不会跨轮混排。 */
@@ -79,12 +80,63 @@ function toggleTool(id: string) {
   expandedTools.value = next;
 }
 
+/** QA / 修复类事件：可展开查看 severity/rule/message 明细 */
+const ISSUE_EVENT_TYPES = new Set([
+  'qa_issue_found', 'qa.issue', 'qa_completed', 'qa.completed',
+  'repair.started', 'revision_started',
+]);
+
+const SEVERITY_LABELS: Record<string, string> = { critical: '严重', major: '主要', minor: '次要' };
+
+function isIssueEvent(type: string): boolean {
+  return ISSUE_EVENT_TYPES.has(type);
+}
+
+function severityLabel(severity: string): string {
+  return SEVERITY_LABELS[severity] || severity || '问题';
+}
+
+interface IssueDetail { severity: string; rule_id: string; message: string; slide_id: string }
+
+function eventIssues(node: Extract<AgentStreamNode, { kind: 'event' }>): IssueDetail[] {
+  const d = node.data;
+  const payload = d.payload && typeof d.payload === 'object' ? d.payload : {};
+  const candidates: unknown[] = [];
+  if (Array.isArray(payload.issues)) candidates.push(...payload.issues);
+  if (payload.issue && typeof payload.issue === 'object') candidates.push(payload.issue);
+  if (d.issue && typeof d.issue === 'object') candidates.push(d.issue);
+  if (Array.isArray(d.issues)) candidates.push(...d.issues);
+  return candidates
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map(item => ({
+      severity: String(item.severity || ''),
+      rule_id: String(item.rule_id || ''),
+      message: String(item.message || ''),
+      slide_id: String(item.slide_id || ''),
+    }))
+    .filter(detail => detail.message || detail.rule_id);
+}
+
+function toggleEvent(node: Extract<AgentStreamNode, { kind: 'event' }>) {
+  const next = new Set(expandedEvents.value);
+  if (next.has(node.id)) next.delete(node.id);
+  else next.add(node.id);
+  expandedEvents.value = next;
+}
+
 function slideIndexFor(node: Extract<AgentStreamNode, { kind: 'event' }>): number | null {
   const v = node.data.slide_index;
-  return typeof v === 'number' ? v : null;
+  if (typeof v === 'number') return v;
+  const page = node.data.slide?.page;
+  if (typeof page === 'number') return page;
+  return null;
 }
 
 function handleEventClick(node: Extract<AgentStreamNode, { kind: 'event' }>) {
+  if (isIssueEvent(node.type)) {
+    toggleEvent(node);
+    return;
+  }
   const idx = slideIndexFor(node);
   if (idx !== null) emit('select-slide', idx);
 }
@@ -93,11 +145,13 @@ function eventIcon(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
   switch (node.type) {
     case 'artifact_created': case 'artifact_started': case 'artifact_patch': return '📄';
     case 'asset_generated': return '🖼';
-    case 'qa_completed': case 'qa_issue_found': return '🧪';
-    case 'revision_started': case 'revision_completed': return '🔄';
+    case 'qa_completed': case 'qa_issue_found': case 'qa.issue': case 'qa.completed': return '🧪';
+    case 'revision_started': case 'revision_completed': case 'repair.started': case 'repair.completed': return '🔄';
     case 'skill.discovered': case 'skill.loaded': case 'skill.completed': return '🧩';
     case 'agent.handoff': return '↪';
     case 'human.required': return '🙋';
+    case 'task_paused': case 'run.paused': return '⏸';
+    case 'task_resumed': case 'run.resumed': return '▶';
     default: return '·';
   }
 }
@@ -115,22 +169,24 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
       return d.degraded
         ? `图片模型不可用，已生成替代图${d.degraded_reason ? `：${d.degraded_reason}` : ''}`
         : `已生成视觉素材 ${d.file_path || ''}`;
-    case 'qa_completed': {
-      const sev = d.severity_counts || {};
-      return `视觉 QA 评分 ${d.score} · 严重${sev.critical || 0}/主要${sev.major || 0}/次要${sev.minor || 0}`;
+    case 'qa_completed': case 'qa.completed': {
+      const sev = d.severity_counts || d.payload?.severity_counts || {};
+      return d.message || `视觉 QA 评分 ${d.score ?? d.payload?.score ?? '-'} · 严重${sev.critical || 0}/主要${sev.major || 0}/次要${sev.minor || 0}`;
     }
-    case 'qa_issue_found':
-      return `发现 QA 问题：${d.issue?.message || ''}`;
-    case 'revision_started':
-      return `自动修订（第 ${d.round}/${d.max_rounds} 轮）${d.reason ? `：${d.reason}` : ''}`;
-    case 'revision_completed':
-      return `修订完成（第 ${d.round} 轮）`;
+    case 'qa_issue_found': case 'qa.issue':
+      return `发现 QA 问题：${d.issue?.message || d.payload?.issue?.message || ''}`;
+    case 'revision_started': case 'repair.started':
+      return d.message || `自动修订（第 ${d.round ?? d.payload?.round ?? 1}/${d.max_rounds ?? d.payload?.max_rounds ?? '?'} 轮）${d.reason || ''}`;
+    case 'revision_completed': case 'repair.completed':
+      return d.message || `修订完成（第 ${d.round ?? d.payload?.round ?? ''} 轮）`;
     case 'plan.created': return d.message || '已创建动态执行计划';
     case 'skill.discovered': return `发现 Skill：${d.payload?.name || ''}`;
     case 'skill.loaded': return `已加载 Skill：${d.payload?.name || ''}`;
     case 'skill.completed': return d.message || `Skill ${d.payload?.name || ''} 已完成`;
     case 'agent.handoff': return d.message || `Agent 已交接给 ${d.payload?.to || '下一位 Agent'}`;
     case 'human.required': return d.message || '需要教师确认';
+    case 'task_paused': case 'run.paused': return d.message || '运行已暂停，可点击顶部“继续”恢复';
+    case 'task_resumed': case 'run.resumed': return d.message || '运行已继续';
     case 'run.failed': return `运行失败：${d.message || d.payload?.error?.message || '请重试'}`;
     case 'run.cancelled': return '运行已取消，未完成草稿已撤销';
     default:
@@ -191,7 +247,11 @@ watch(traceSignature, () => {
               <span class="identity-name">教师</span>
               <span class="identity-avatar user-avatar">师</span>
             </div>
-            <div class="message-bubble user-bubble">{{ node.content }}</div>
+            <div class="message-bubble user-bubble">
+              <span>{{ node.content }}</span>
+              <span v-if="node.status === 'pending'" class="message-delivery">发送中…</span>
+              <span v-else-if="node.status === 'failed'" class="message-delivery failed">发送失败，请重试</span>
+            </div>
           </div>
 
           <div v-if="turn.trace.length || turn.replies.length" class="message-row assistant-row">
@@ -238,18 +298,48 @@ watch(traceSignature, () => {
           <div
             v-else-if="node.kind === 'event'"
             class="term-line term-event"
-            :class="{ clickable: slideIndexFor(node) !== null }"
+            :class="{
+              clickable: slideIndexFor(node) !== null || isIssueEvent(node.type),
+              expandable: isIssueEvent(node.type),
+              expanded: expandedEvents.has(node.id),
+            }"
             @click="handleEventClick(node)"
           >
             <span class="term-event-icon">{{ eventIcon(node) }}</span>
             <span class="term-event-text">{{ eventLabel(node) }}</span>
+            <span v-if="isIssueEvent(node.type) && eventIssues(node).length" class="event-issue-badges">
+              <span
+                v-for="issue in eventIssues(node).slice(0, 3)"
+                :key="`${issue.rule_id}-${issue.message}`"
+                class="sev-badge"
+                :class="issue.severity"
+              >
+                {{ severityLabel(issue.severity) }}
+              </span>
+              <span v-if="eventIssues(node).length > 3" class="sev-more">+{{ eventIssues(node).length - 3 }}</span>
+            </span>
             <span v-if="slideIndexFor(node) !== null" class="term-jump">🎯 第 {{ slideIndexFor(node)! + 1 }} 页</span>
+            <span v-if="isIssueEvent(node.type) && eventIssues(node).length" class="expand-caret" aria-hidden="true">
+              {{ expandedEvents.has(node.id) ? '▾' : '▸' }}
+            </span>
             <span v-if="node.type === 'human.required'" class="human-options">
               <button v-for="option in node.data.payload?.options || []" :key="option.id" type="button"
                       @click.stop="emit('human-response', node.data.payload?.request_id, option.id)">
                 {{ option.label }}
               </button>
             </span>
+          </div>
+          <div
+            v-if="node.kind === 'event' && isIssueEvent(node.type) && expandedEvents.has(node.id)"
+            class="event-issue-detail"
+          >
+            <div v-for="(issue, issueIndex) in eventIssues(node)" :key="issueIndex" class="issue-row">
+              <span class="sev-badge" :class="issue.severity">{{ severityLabel(issue.severity) }}</span>
+              <code class="issue-rule">{{ issue.rule_id || '—' }}</code>
+              <span class="issue-message">{{ issue.message }}</span>
+              <span v-if="issue.slide_id" class="issue-slide">#{{ issue.slide_id }}</span>
+            </div>
+            <div v-if="!eventIssues(node).length" class="issue-row empty">该事件没有附带问题明细。</div>
           </div>
 
               </template>
@@ -378,6 +468,10 @@ watch(traceSignature, () => {
 }
 
 .user-bubble {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
   max-width: 100%;
   padding: 10px 14px;
   color: #ffffff;
@@ -385,6 +479,17 @@ watch(traceSignature, () => {
   background: linear-gradient(135deg, #4f46e5, #4338ca);
   border-radius: 16px 16px 4px 16px;
   box-shadow: 0 4px 14px rgba(79, 70, 229, 0.18);
+}
+
+.message-delivery {
+  color: rgba(255, 255, 255, 0.68);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.message-delivery.failed {
+  color: #fecaca;
+  font-weight: 700;
 }
 
 .assistant-content {
@@ -578,6 +683,10 @@ watch(traceSignature, () => {
   background: #eef2ff;
 }
 
+.term-event.expandable.expanded {
+  background: #f5f3ff;
+}
+
 .term-event-icon {
   flex-shrink: 0;
 }
@@ -589,6 +698,85 @@ watch(traceSignature, () => {
 .term-jump {
   color: #4f46e5;
   font-weight: 700;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+/* —— QA / 修复事件明细 —— */
+.event-issue-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.sev-badge {
+  font-size: 10px;
+  font-weight: 800;
+  padding: 0 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.sev-badge.critical { color: #b91c1c; background: #fee2e2; }
+.sev-badge.major { color: #b45309; background: #fef3c7; }
+.sev-badge.minor { color: #1d4ed8; background: #dbeafe; }
+
+.sev-more {
+  font-size: 10px;
+  font-weight: 800;
+  color: #64748b;
+}
+
+.expand-caret {
+  color: #7c3aed;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.event-issue-detail {
+  margin: 2px 0 4px 26px;
+  padding: 6px 10px;
+  background: #faf5ff;
+  border-left: 2px solid #ddd6fe;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.issue-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.issue-row.empty {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.issue-rule {
+  color: #6d28d9;
+  background: #ede9fe;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.issue-message {
+  color: #475569;
+  word-break: break-word;
+}
+
+.issue-slide {
+  color: #94a3b8;
+  font-size: 10px;
   margin-left: auto;
   flex-shrink: 0;
 }

@@ -1,8 +1,14 @@
 import { api } from './client';
 import type { PipelineDetail } from '../types/agentPipeline';
+import type { PPTPolishModality } from '../types/project';
 
 export const pipelineApi = {
-  async createRun(courseId: string, instruction: string, selectedSlideIds: string[] = []): Promise<{
+  async createRun(
+    courseId: string,
+    instruction: string,
+    selectedSlideIds: string[] = [],
+    modality: PPTPolishModality = 'auto',
+  ): Promise<{
     run_id: string;
     task_id: string;
     message_id: string;
@@ -14,6 +20,7 @@ export const pipelineApi = {
       instruction,
       action: 'message',
       selected_slide_ids: selectedSlideIds,
+      modality: modality ?? 'auto',
     });
     return data;
   },
@@ -29,7 +36,13 @@ export const pipelineApi = {
     const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/resume`);
     return data;
   },
-  async enqueue(runId: string, content: string, selectedSlideIds: string[] = []): Promise<{
+  async enqueue(
+    runId: string,
+    content: string,
+    selectedSlideIds: string[] = [],
+    resumeIfPaused = false,
+    modality: PPTPolishModality = 'auto',
+  ): Promise<{
     instruction_id: string;
     message_id: string;
     message: { id: string; role: 'user'; content: string; run_id: string; status: 'completed' };
@@ -38,6 +51,8 @@ export const pipelineApi = {
     const { data } = await api.post(`/ppt-agent/runs/${runId}/instructions`, {
       content,
       selected_slide_ids: selectedSlideIds,
+      resume_if_paused: resumeIfPaused,
+      modality: modality ?? 'auto',
     });
     return data;
   },

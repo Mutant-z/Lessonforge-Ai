@@ -8,11 +8,20 @@ const props = defineProps<{
   template?: PPTTemplate | null;
   modifiedSlides?: Set<number>;
   selectedSlides?: Set<number>;
+  slideRepairNotes?: Record<string, string[]>;
 }>();
 
 const emit = defineEmits<{
   (e: 'select-slide', index: number, additive: boolean): void;
+  (e: 'show-repair-detail', index: number): void;
 }>();
+
+/** 该页累计的修复原因（按 slide_id 匹配），无则返回空数组 */
+function repairNotesFor(index: number): string[] {
+  const slide = props.slides[index];
+  if (!slide?.id || !props.slideRepairNotes) return [];
+  return props.slideRepairNotes[slide.id] || [];
+}
 </script>
 
 <template>
@@ -37,8 +46,19 @@ const emit = defineEmits<{
       >
         <div class="item-header">
           <span class="item-index">{{ String(index + 1).padStart(2, '0') }}</span>
-          <span v-if="modifiedSlides?.has(index)" class="modified-dot" title="最新修订页面">
-            ✨ 已更新
+          <span class="item-badges">
+            <span v-if="modifiedSlides?.has(index)" class="modified-dot" title="最新修订页面">
+              ✨ 已更新
+            </span>
+            <button
+              v-if="repairNotesFor(index).length"
+              type="button"
+              class="repair-badge"
+              :title="`修复原因：${repairNotesFor(index).join('；')}`"
+              @click.stop="emit('show-repair-detail', index)"
+            >
+              🛠 {{ repairNotesFor(index).length }}
+            </button>
           </span>
         </div>
 
@@ -153,6 +173,31 @@ const emit = defineEmits<{
   background: #f3e8ff;
   padding: 0 4px;
   border-radius: 4px;
+}
+
+.item-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+.repair-badge {
+  border: 0;
+  font-size: 9px;
+  font-weight: 800;
+  color: #b45309;
+  background: #fef3c7;
+  padding: 0 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  line-height: 1.5;
+  transition: all 150ms ease;
+}
+
+.repair-badge:hover {
+  background: #fde68a;
+  color: #92400e;
 }
 
 .thumbnail-aspect {

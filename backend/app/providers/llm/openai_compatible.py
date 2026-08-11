@@ -358,6 +358,52 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             return await self._structured_request(system, recovery_prompt, schema, json_mode=False)
 
+    async def structured_with_image(self, system: str, prompt: str, image_b64: str,
+                                    image_media_type: str, schema: type[T]) -> T:
+        """带图像输入的结构化输出：image_url content block + json_object 响应格式。"""
+        settings = get_settings()
+        if not self.api_key:
+            raise LLMProviderError("upstream_http_error", "当前模型未配置 API Key，请先完成模型设置。")
+        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        data_url = f"data:{image_media_type};base64,{image_b64}"
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": f"{prompt}\n\n请仅返回符合以下 JSON Schema 的 JSON 对象：\n{schema_json}"},
+                ]},
+            ],
+            "temperature": 0.2,
+            "max_tokens": settings.llm_max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        data, response = await self._post_chat(payload)
+        raw_content = self._content_from_response(data, response)
+        content = self._strip_json_fence(self._sanitize_control_chars(raw_content))
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            repaired = self._try_repair_truncated_json(content)
+            if repaired is not None:
+                logger.warning("structured_with_image: repaired truncated JSON (model=%s)", self.model_name)
+                decoded = repaired
+            else:
+                raise self._response_error(
+                    "upstream_invalid_json",
+                    "模型返回的内容不是有效 JSON，请检查模型的结构化输出能力。",
+                    response,
+                )
+        try:
+            return schema.model_validate(decoded)
+        except ValidationError as exc:
+            raise self._response_error(
+                "upstream_schema_mismatch",
+                "模型返回的需求结构不完整，请重试或切换支持结构化输出的模型。",
+                response,
+            ) from exc
+
     async def stream_decision(self, system: str, prompt: str, schema: type[T]):
         """流式返回结构化决策：实时 yield thinking 增量，最终 yield decision_ready。
 

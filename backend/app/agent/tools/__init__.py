@@ -8,6 +8,7 @@
 - asset_tools：图片/图表工具
 - qa_tools：QA 工具
 - workspace_tools：文件工具
+- vision_tools：几何蓝图图渲染 + 视觉模型自检
 """
 from app.agent.tools import (  # noqa: F401
     artifact_tools,
@@ -17,4 +18,5 @@ from app.agent.tools import (  # noqa: F401
     asset_tools,
     qa_tools,
     workspace_tools,
+    vision_tools,
 )

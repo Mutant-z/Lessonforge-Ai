@@ -34,6 +34,10 @@ class LLMProvider(ABC):
     async def structured(self, system: str, prompt: str, schema: type[T]) -> T:
         raise NotImplementedError
 
+    async def structured_with_image(self, system: str, prompt: str, image_b64: str,
+                                    image_media_type: str, schema: type[T]) -> T:
+        raise NotImplementedError("该 provider 不支持图像输入")
+
     @abstractmethod
     async def stream_decision(self, system: str, prompt: str, schema: type[T]) -> AsyncIterator[DecisionStreamEvent]:
         """流式返回结构化决策。

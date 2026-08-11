@@ -69,6 +69,33 @@ class AnthropicProvider(LLMProvider):
             
             return schema.model_validate_json(clean)
 
+    async def structured_with_image(self, system: str, prompt: str, image_b64: str,
+                                    image_media_type: str, schema: type[T]) -> T:
+        """带图像输入的结构化输出：图像 content block + tool_use 强制 JSON 输出。"""
+        url = f"{self.base_url}/v1/messages"
+        payload = {
+            "model": self.model_name,
+            "max_tokens": 1024,
+            "system": system,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": image_media_type, "data": image_b64,
+                }},
+                {"type": "text", "text": prompt},
+            ]}],
+            "tools": [{"type": "custom", "name": "output",
+                       "description": "输出 JSON",
+                       "input_schema": schema.model_json_schema()}],
+            "tool_choice": {"type": "tool", "name": "output"},
+        }
+        async with build_async_client(url, timeout=self.timeout) as client:
+            resp = await client.post(url, headers=self._headers(), json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        raw = next((item.get("input") for item in data.get("content", [])
+                    if item.get("type") == "tool_use"), "")
+        return schema.model_validate(raw)
+
     async def stream_decision(self, system: str, prompt: str, schema: type[T]):
         """流式返回结构化决策：yield thinking 增量 + decision_ready，异常回退 structured。"""
         prompt_with_schema = (

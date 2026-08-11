@@ -9,6 +9,11 @@ class MockProvider(LLMProvider):
     async def structured(self, system: str, prompt: str, schema: type[T]) -> T:
         raise NotImplementedError("Mock 内容由领域 Agent 的确定性生成器提供")
 
+    async def structured_with_image(self, system: str, prompt: str, image_b64: str,
+                                    image_media_type: str, schema: type[T]) -> T:
+        # Mock 无视觉能力，返回 schema 默认值（调用方按 provider_supports_vision 跳过）
+        return schema.model_validate({})
+
     async def stream_decision(self, system: str, prompt: str, schema: type[T]):
         # Mock 路径不走 LLM 流：pipeline 直接调用确定性 decide()，并合成 thinking 增量。
         raise NotImplementedError("Mock 模式使用确定性 decide()，不提供流式决策")

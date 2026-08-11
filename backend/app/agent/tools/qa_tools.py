@@ -68,14 +68,17 @@ def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "target_agent": "layout",
                     })
         # 空间利用率：把全部文字挤在一角、其余大片空白的布局能通过“内容存在”
-        # 检查，这里从几何上拦截“挤成一团”类不合格页面。少于 3 条文字的稀疏
-        # 但合法页面（如大标题 + 单条正文）不判定为异常。
+        # 检查，这里从几何上拦截“挤成一团”类不合格页面。只要存在正文内容引用
+        # 就做空间检查（大标题 + 单条窄正文的稀疏页面也拦截）；旧报告无
+        # content_ref 时沿用 len>=3 兜底，避免把少量正文的合法页面误判为异常。
         text_items = [item for item in items if item["kind"] in {"textbox", "note"}]
-        if len(text_items) >= 3:
-            text_x = [float(item["x"]) for item in text_items]
-            text_y = [float(item["y"]) for item in text_items]
-            text_right = [float(item["x"]) + float(item["w"]) for item in text_items]
-            text_bottom = [float(item["y"]) + float(item["h"]) for item in text_items]
+        body_items = [item for item in text_items if item.get("content_ref") and item["content_ref"] != "title"]
+        spatial_items = body_items if body_items else text_items
+        if body_items or len(text_items) >= 3:
+            text_x = [float(item["x"]) for item in spatial_items]
+            text_y = [float(item["y"]) for item in spatial_items]
+            text_right = [float(item["x"]) + float(item["w"]) for item in spatial_items]
+            text_bottom = [float(item["y"]) + float(item["h"]) for item in spatial_items]
             span_h = max(text_bottom) - min(text_y)
             span_w = max(text_right) - min(text_x)
             content_h = SAFE_CONTENT_BOTTOM - MARGIN_Y
@@ -92,6 +95,13 @@ def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "message": f"文字横向只占 {span_w:.1f}in，被压成窄条堆在一侧",
                     "target_agent": "layout",
                 })
+            # 窄条竖排但占满高度、横向细条 → 右侧大片空白
+            if span_h >= content_h * MIN_BODY_VERTICAL_USAGE and span_w < full_body_w * 0.45:
+                issues.append({
+                    "severity": "major", "slide_id": slide_id, "rule_id": "layout.column_balance",
+                    "message": f"文字横向只占 {span_w:.1f}in，右侧大片空白",
+                    "target_agent": "layout",
+                })
             content_items = [item for item in items if item["kind"] in {"textbox", "note", "image", "chart"}]
             xs = [float(item["x"]) for item in content_items]
             ys = [float(item["y"]) for item in content_items]
@@ -104,6 +114,26 @@ def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "severity": "major", "slide_id": slide_id, "rule_id": "layout.blank_region",
                     "message": f"页面内容只覆盖画布 {covered:.0f}in²（<{canvas_area * 0.18:.0f}in²），大面积空白",
                     "target_agent": "layout",
+                })
+        # 标题框必须落在标题轨（y 0.35..1.6，注释轨 0.55..1.35）
+        for item in text_items:
+            if item.get("content_ref") == "title":
+                ty = float(item["y"])
+                if ty < 0.35 or ty + float(item["h"]) > 1.6:
+                    issues.append({
+                        "severity": "major", "slide_id": slide_id, "rule_id": "geometry.title_in_rail",
+                        "message": f"标题框 y={ty:.2f} 未落在标题轨", "target_agent": "layout",
+                    })
+        # min_margin：执行 0.5in 安全边距
+        for item in items:
+            if item["kind"] in {"textbox", "note", "image", "chart"} and (
+                float(item["x"]) < 0.5 - 0.01 or float(item["y"]) < 0.5 - 0.01
+                or float(item["x"]) + float(item["w"]) > SLIDE_WIDTH - 0.5 + 0.01
+                or float(item["y"]) + float(item["h"]) > SLIDE_HEIGHT - 0.5 + 0.01
+            ):
+                issues.append({
+                    "severity": "major", "slide_id": slide_id, "rule_id": "geometry.min_margin",
+                    "message": f"元素 {item['element_id']} 侵入 0.5in 安全边距", "target_agent": "layout",
                 })
     return issues
 

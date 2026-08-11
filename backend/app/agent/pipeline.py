@@ -20,7 +20,8 @@ from app.agent.definitions import AGENT_BY_KEY, agent_specs_for_trigger
 from app.agent.events import PipelineEventEmitter
 from app.agent.registry import ToolContext, execute_tool, summarize
 from app.agent.schemas import (
-    AgentDecision, AgentSpec, PipelinePlan, PPTAgentError, SlideContentPatch, SlideLayoutArtifact, VisualPlanArtifact,
+    AgentDecision, AgentSpec, LayoutDirectiveArtifact, PipelinePlan, PPTAgentError, SlideContentPatch,
+    SlideLayoutArtifact, VisualPlanArtifact,
 )
 from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs
 from app.core.database import SessionLocal
@@ -452,7 +453,36 @@ def _expand_aggregate_body_into_items(layout_slide: dict[str, Any], canonical: d
 async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: AgentDecision) -> AgentDecision:
     """Validate LLM aesthetics and compile semantic proposals to safe geometry."""
     targets = set(runtime.selected_slide_ids or [])
-    from app.agent.agents.layout import normalize_visual_region
+    # 新路径：LLM 输出语义 LayoutDirective（无坐标）→ 引擎编译为可执行 PageLayoutSpec。
+    # 仅当输出不含 elements（旧坐标格式）时判定为 directive；旧格式继续走旧路径，
+    # 保证既有的"校验+绑定+覆盖+规范化+聚合拆条+canonicalize"行为不变。
+    raw_slides = (decision.output or {}).get("slides")
+    directive_parsed = None
+    if isinstance(raw_slides, list) and not any(
+        isinstance(item, dict) and bool(item.get("elements")) for item in raw_slides
+    ):
+        try:
+            directive_parsed = LayoutDirectiveArtifact.model_validate(decision.output or {})
+        except Exception:
+            directive_parsed = None
+    if directive_parsed is not None:
+        # 几何由代码算出，不可能非法：直接编译并复用统一的发布前收尾。
+        from app.agent.layouts.engine import compile_layout
+        canonical_slides = runtime_baseline_slides(runtime)
+        canonical_by_id = {str(item.get("id") or ""): item for item in canonical_slides}
+        compiled = []
+        for directive in directive_parsed.slides:
+            slide_id = directive.slide_id
+            if targets and slide_id not in targets:
+                continue
+            if not targets and slide_id not in canonical_by_id:
+                continue  # 整本修订时剔除不在 deck 中的非法 slide_id
+            canonical = canonical_by_id.get(slide_id) or {}
+            compiled.append(compile_layout(runtime.preferred_template, canonical, directive.model_dump()))
+        if compiled:
+            parsed = SlideLayoutArtifact.model_validate({"slides": compiled})
+            return await _finalize_executable_layout(runtime, parsed, decision, targets, agent)
+    # 旧路径原样保留：schema 校验失败（或输出带坐标）时回退 _compile_layout_from_analysis
     try:
         parsed = SlideLayoutArtifact.model_validate(decision.output or {})
         if targets:
@@ -479,13 +509,29 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
             parsed.slides = [item for item in parsed.slides if item.slide_id in targets]
             if {item.slide_id for item in parsed.slides} != targets:
                 raise RuntimeError("LLM 布局结果超出目标页范围或缺少目标页")
+    return await _finalize_executable_layout(runtime, parsed, decision, targets, agent)
+
+
+async def _finalize_executable_layout(
+    runtime: PipelineRuntime,
+    parsed: SlideLayoutArtifact,
+    decision: AgentDecision,
+    targets: set[str],
+    agent,
+) -> AgentDecision:
+    """新老路径共用的发布前收尾：覆盖校验 + 视觉槽规范化 + 权威文字绑定 + 聚合拆条 + canonicalize。
+
+    从 _ensure_executable_layout 抽取；旧路径与新路径（directive 编译）共用，
+    保证旧路径行为逐字不变。
+    """
+    from app.agent.agents.layout import _content_start_x, canonicalize_spatial_layout, normalize_visual_region
+    from app.agent.slide_rendering import bind_content_refs, render_coverage
+
     # LLM geometry is usable only when every canonical text fragment for this
     # revision remains renderable. Preserve/restore compare against the locked
     # source; edit compares against the newly produced slide_content Artifact.
     # This prevents a schema-valid layout from silently copying the previous
     # version's textbox text over freshly edited semantic fields.
-    from app.agent.agents.layout import _content_start_x
-    from app.agent.slide_rendering import bind_content_refs, render_coverage
     canonical_slides = runtime_baseline_slides(runtime)
     if runtime.content_policy == "edit" and runtime.artifacts is not None:
         edited_content = await runtime.artifacts.latest("slide_content")
@@ -598,7 +644,6 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
         reserved_slides.append(data)
     # 发布前最后一道确定性防线：把“挤成一团/大片空白”的正文列重排为均匀分布。
     # LLM 输出只要 schema 合法即可通过内容覆盖检查，因此必须在校验后再规范化一次。
-    from app.agent.agents.layout import canonicalize_spatial_layout
     reserved_slides = [
         canonicalize_spatial_layout(
             runtime.preferred_template,

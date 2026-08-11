@@ -153,3 +153,64 @@ def test_normalize_layout_params_bounds():
     assert normalize_layout_params({"gap_scale": 5.0})["gap_scale"] == 1.5
     assert normalize_layout_params({"gap_scale": 0.1})["gap_scale"] == 0.8
     assert normalize_layout_params({})["font_tier"] == "default"
+
+
+# ---------- Task 6: LayoutDirective schema + 引擎编译为可执行坐标 ----------
+
+from app.agent.schemas import LayoutDirectiveArtifact, SlideLayoutArtifact
+
+
+def test_layout_directive_artifact_parses():
+    art = LayoutDirectiveArtifact.model_validate({"slides": [
+        {"slide_id": "S01", "layout_type": "bullet_flow", "style": {"gap_scale": 1.2}},
+    ]})
+    assert art.slides[0].layout_type == "bullet_flow"
+
+
+def test_compile_layout_output_is_page_layout_spec_compatible():
+    out = compile_layout("lessonforge_deck_academic", _slide(), {"slide_id": "S01", "layout_type": "bullet_flow"})
+    spec = SlideLayoutArtifact.model_validate({"slides": [out]})
+    assert spec.slides[0].elements
+
+
+async def test_ensure_executable_layout_compiles_directive_via_engine():
+    """新路径：LayoutDirective（layout_type/style）→ 引擎编译为可执行坐标。
+
+    旧路径会忽略 directive 的 layout_type 而按内容确定性选择版式；
+    新路径必须让 directive 指定的版式经引擎编译生效。
+    """
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.pipeline import _ensure_executable_layout
+    from app.agent.schemas import AgentDecision
+
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "浮力成因",
+        "purpose": "", "body": ["上下压力差产生浮力", "液体密度越大浮力越大"],
+        "blocks": [], "speaker_notes": "", "duration_seconds": 30,
+    }
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            return None
+
+    runtime = SimpleNamespace(
+        selected_slide_ids=["slide_01"], content_policy="preserve",
+        active_intent="LAYOUT_ONLY", baseline_slides=[source], artifacts=Artifacts(),
+        emitter=None, preferred_template="lessonforge_deck_academic",
+        expected_visual_requests=[], builder=None,
+    )
+    decision = AgentDecision(completed=True, output={"slides": [
+        {"slide_id": "slide_01", "layout_type": "split_two_column",
+         "style": {"gap_scale": 1.2}, "rationale": "引擎编译验证"},
+    ]})
+    normalized = await _ensure_executable_layout(runtime, LAYOUT_AGENT, decision)
+    slide = normalized.output["slides"][0]
+    assert slide["slide_id"] == "slide_01"
+    assert slide["layout_type"] == "split_two_column", "directive 的 layout_type 必须经引擎编译生效"
+    spec = SlideLayoutArtifact.model_validate({"slides": [slide]})
+    body = [el for el in spec.slides[0].elements if str(el.content_ref or "").startswith("body")]
+    assert len(body) == 2
+    xs = {round(float(el.x), 1) for el in body}
+    assert len(xs) == 2, "split_two_column 应生成左右双栏"

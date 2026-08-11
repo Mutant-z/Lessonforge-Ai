@@ -85,6 +85,28 @@ class SlideLayoutArtifact(BaseModel):
     slides: list[PageLayoutSpec] = Field(min_length=1)
 
 
+class LayoutDirectiveSlide(BaseModel):
+    """LLM 输出的语义版式指令：不携带像素坐标，坐标由确定性引擎计算。
+
+    该 schema 必须区别于旧坐标格式（旧格式带 elements），
+    以保证 _ensure_executable_layout 能识别出 directive 并走引擎编译路径。
+    """
+
+    slide_id: str = Field(min_length=1)
+    layout_type: str = "bullet_flow"
+    content_allocation: dict[str, list[str]] = Field(default_factory=dict)
+    style: dict[str, Any] = Field(default_factory=dict)
+    visual_region: dict[str, float] | None = None
+    visual_type: str | None = None
+    rationale: str = ""
+
+
+class LayoutDirectiveArtifact(BaseModel):
+    """布局 Agent 的语义产物：每页一条 LayoutDirective，交引擎编译为可执行坐标。"""
+
+    slides: list[LayoutDirectiveSlide] = Field(min_length=1)
+
+
 class VisualPlacement(BaseModel):
     """A bounded image region in slide inches."""
 

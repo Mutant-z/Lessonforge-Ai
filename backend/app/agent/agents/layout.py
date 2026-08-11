@@ -10,7 +10,7 @@ from app.agent.agents.base import Agent
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, ToolCall
 from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs
-from app.agent.layouts.engine import compile_layout
+from app.agent.layouts.engine import PRESET_KEYS, compile_layout
 from app.renderers.presentation_builder import SLIDE_HEIGHT, SLIDE_WIDTH
 
 MARGIN_X = 0.65
@@ -169,23 +169,18 @@ class LayoutAgent(Agent):
         scope = "、".join(targets) if targets else "全部页面"
         return super().build_system_prompt(tc) + (
             "\n你必须真实分析当前页面已有元素、文字层级、留白、对齐、模板配色与视觉重心，"
-            "并将审美判断转化为可执行坐标，不能只改 visual_suggestion 或返回原始 slide 内容。\n"
+            "并从预设版式库中为每页选择一种版式与风格参数，不输出具体像素坐标（坐标由引擎计算）。\n"
             f"本轮唯一允许设计的页面：{scope}。不得输出其他页面。\n"
-            "completed.output 必须严格为 {slides:[{slide_id, layout_type, designRationale, "
-            "elements:[{kind,role,content_ref,text,x,y,w,h,style}]}]}。"
-            "视觉/图片任务只能改变坐标和样式，文字必须逐字来自当前页面内容。坐标单位英寸，画布 13.333×7.5。"
-            "普通内容页的图片必须位于右侧安全槽位（x≥7.0、y≥1.7），与标题/正文保持至少 0.3 英寸间距；"
-            "不得让图片覆盖任何 textbox、note 或 visual_caption。\n"
-            "空间分布硬约束（违反会被判定为不合格布局）：\n"
-            "· 正文列必须纵向铺满内容区：标题固定 y=0.55，正文从 y≈1.7 起，至少延伸到 y≈5.0 以上；\n"
-            "· 正文条目逐条独立成框，条间距 ≥0.3 英寸，禁止把所有文字叠在一个角落或使用互相重叠的文本框；\n"
-            "· 标题与正文必须覆盖内容列宽度（x 从安全边距到右侧视觉槽），禁止把文字压成小窄条；\n"
-            "· 每个文字元素必须带 content_ref（title / body / body.N / blocks.* / purpose），"
-            "且文字逐字来自页面内容，不得自己改写措辞；引用不存在的 content_ref 会被判定为不合格；\n"
-            "· 结构块应按语义排版：steps 用横向编号卡片（2~4 列平铺）、compare 用左右双栏、"
-            "bullets/正文用纵向条目流，不要把所有条目压成单条竖排；\n"
-            "· 正文条目尽量横向展开（利用整个内容列宽度），只有条目极少时才允许集中在一侧；\n"
-            "· 不靠放大装饰图形或空白形状占位，页面空间应由文字与图片真实利用。"
+            "预设版式库（layout_type 只能取以下 key）："
+            + "、".join(sorted(PRESET_KEYS)) + "\n"
+            "completed.output 必须严格为 {slides:[{slide_id, layout_type, content_allocation:{区域→content_refs}, "
+            "style:{font_tier: default|compact|spacious, gap_scale: 0.8..1.5, highlight: bool}, "
+            "visual_region:{x,y,w,h}, visual_type, rationale}]}。\n"
+            "· 文字必须逐字来自当前页面内容，不得自撰措辞；content_ref 用 title/body.N/blocks.*。\n"
+            "· 普通内容页默认用 bullet_flow 或 split_two_column；有图片诉求用 left_text_right_visual；"
+            "steps 块用 steps_horizontal；compare 块用 compare_columns；quote 块用 quote_center；封面用 cover_left/cover_center。\n"
+            "· 如果当前页面空间分布已合理，可以选择与当前相同的版式但调整 gap_scale/字号档来体现间距诉求；"
+            "如果页面明显拥挤或空白失衡，选择能改善分布的版式。"
         )
 
     async def decide(self, tc: ToolContext) -> AgentDecision:

@@ -9,8 +9,8 @@ from typing import Any
 from app.agent.agents.base import Agent
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, ToolCall
-from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs, semantic_body_texts
-from app.agent.layouts.metrics import estimate_text_height
+from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs
+from app.agent.layouts.engine import compile_layout
 from app.renderers.presentation_builder import SLIDE_HEIGHT, SLIDE_WIDTH
 
 MARGIN_X = 0.65
@@ -240,104 +240,33 @@ class LayoutAgent(Agent):
 
     @staticmethod
     def _layout_slide(slide: dict, visual: dict | None, template_id: str = "") -> dict:
-        slide_id = slide.get("id", "")
-        page_type = slide.get("page_type", "concept")
-        title = slide.get("title", "")
-        body = semantic_body_texts(slide)
-        elements = []
-        content_x = _content_start_x(template_id, page_type)
-        if page_type == "cover":
-            has_visual = bool(visual and visual.get("visualType") not in {"none", ""})
-            visual_region = (
-                normalize_visual_region(
-                    visual.get("placement") or {"x": 7.0, "y": 1.2, "w": 5.3, "h": 4.5},
-                    template_id,
-                    page_type,
-                )
-                if has_visual else None
-            )
-            title_width = (
-                max(3.2, float(visual_region.get("x") or 7.0) - content_x - 0.4)
-                if visual_region else SLIDE_WIDTH - content_x - 0.9
-            )
-            elements.append({"kind": "textbox", "role": "title", "text": title,
-                             "content_ref": "title",
-                             "x": content_x, "y": 2.05 if has_visual else 2.3,
-                             "w": title_width, "h": 1.6,
-                             "style": {"size": 40, "color": "primary", "bold": True}})
-            if body:
-                elements.append({"kind": "textbox", "role": "subtitle", "text": " · ".join(body[:2]),
-                                 "content_ref": "body",
-                                 "x": content_x, "y": 4.0,
-                                 "w": title_width, "h": 0.8,
-                                 "style": {"size": 20, "color": "muted"}})
-            purpose = str(slide.get("purpose") or "").strip()
-            if purpose:
-                elements.append({"kind": "textbox", "role": "purpose", "text": purpose,
-                                 "content_ref": "purpose",
-                                 "x": content_x, "y": 5.0,
-                                 "w": title_width, "h": 0.65,
-                                 "style": {"size": 15, "color": "primary", "bold": True}})
-            result = {"slide_id": slide_id, "layout_type": "cover_visual" if has_visual else "cover",
-                      "designRationale": "封面：左侧标题 + 右侧保留原视觉资源" if has_visual else "封面：居中标题 + 副标题留白",
-                      "elements": elements, "render_mode": "absolute"}
-            if has_visual:
-                result["visual_region"] = visual_region
-                result["visual_type"] = visual.get("visualType", "image")
-            return result
+        directive = {"slide_id": str(slide.get("id") or ""),
+                     "layout_type": LayoutAgent._preset_for_page(slide, visual),
+                     "style": {},
+                     "rationale": "确定性版式（引擎编译）"}
+        page_type = str(slide.get("page_type") or "concept")
+        if visual and visual.get("visualType") not in {"none", ""}:
+            placement = visual.get("placement") or {"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2}
+            directive["visual_region"] = placement
+            directive["visual_type"] = visual.get("visualType", "image")
+        return compile_layout(template_id, slide, directive)
 
-        has_visual = bool(visual and visual.get("visualType") not in {"none", ""})
-        visual_region = (
-            normalize_visual_region(
-                visual.get("placement") or {"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2},
-                template_id,
-                page_type,
-            )
-            if has_visual else None
-        )
-        body_w = (
-            max(3.2, float(visual_region.get("x") or 7.4) - content_x - 0.4)
-            if visual_region else SLIDE_WIDTH - content_x - 0.78
-        )
-        body_x = content_x
-        elements.append({"kind": "textbox", "role": "title", "text": title,
-                         "content_ref": "title",
-                         "x": content_x, "y": 0.55, "w": SLIDE_WIDTH - content_x - 0.78, "h": 0.8,
-                         "style": {"size": 28, "color": "primary", "bold": True}})
-        # 左侧正文逐条独立成框、上下留白，解决"文字间隔/太单调"类诉求；
-        # content_ref 用精确条目引用（body.N / blocks.*），QA 覆盖由
-        # _ref_covers + 文本匹配兜底，不再把全部条目压进单行文本框。
-        # 条目过多（正文 + 结构化块叠加）时退回单框，避免逐条溢出画布底部。
-        body_refs = semantic_body_refs(slide)
-        if len(body_refs) > MAX_BODY_ITEMS:
-            body_h = estimate_text_height("\n".join(body), body_w, BODY_FONT)
-            body_h = max(2.0, min(4.4, body_h))
-            elements.append({"kind": "textbox", "role": "body", "text": "\n".join(body),
-                             "content_ref": "body",
-                             "x": body_x, "y": MARGIN_Y, "w": body_w, "h": body_h,
-                             "style": {"size": BODY_FONT, "color": "text"}})
-        else:
-            cursor_y = MARGIN_Y
-            total_h = 0.0
-            for ref, text in body_refs:
-                item_h = max(0.5, _estimate_height([text], body_w, BODY_FONT))
-                elements.append({"kind": "textbox", "role": "body",
-                                 "text": text, "content_ref": ref,
-                                 "x": body_x, "y": round(cursor_y, 3), "w": body_w, "h": round(item_h, 3),
-                                 "style": {"size": BODY_FONT, "color": "text"}})
-                total_h += item_h
-                cursor_y += item_h + BODY_ITEM_GAP
-            body_h = max(2.0, min(4.4, total_h + BODY_ITEM_GAP * (len(body_refs) - 1)))
-        result = {"slide_id": slide_id, "layout_type": "title_and_body",
-                  "designRationale": "标题 + 正文流（条目独立成框、逐条留白）",
-                  "elements": elements, "render_mode": "absolute"}
-        if has_visual:
-            visual_type = visual.get("visualType", "image")
-            result["layout_type"] = "left_text_right_visual"
-            result["designRationale"] = "左侧正文、右侧视觉区"
-            result["visual_region"] = visual_region
-            result["visual_type"] = visual_type
-        return result
+    @staticmethod
+    def _preset_for_page(slide: dict, visual: dict | None) -> str:
+        page_type = str(slide.get("page_type") or "concept")
+        if page_type == "cover":
+            return "cover_left" if visual and visual.get("visualType") not in {"none", ""} else "cover_center"
+        blocks = slide.get("blocks") or []
+        if any(b.get("kind") == "steps" for b in blocks):
+            return "steps_horizontal"
+        if any(b.get("kind") == "compare" for b in blocks):
+            return "compare_columns"
+        if any(b.get("kind") == "quote" for b in blocks):
+            return "quote_center"
+        if visual and visual.get("visualType") not in {"none", ""}:
+            return "left_text_right_visual"
+        body = [t for t in (slide.get("body") or []) if str(t).strip()]
+        return "split_two_column" if len(body) >= 6 else "bullet_flow"
 
 
 LAYOUT_AGENT = LayoutAgent()

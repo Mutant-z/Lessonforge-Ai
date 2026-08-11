@@ -90,6 +90,16 @@ def test_steps_horizontal_invariants():
     _invariants(PRESETS["steps_horizontal"](zones_for("lessonforge_deck_academic", "process"), _slide(blocks=blocks, page_type="process"), {}), require_vertical_fill=False)
 
 
+def test_steps_horizontal_caps_cards_at_four():
+    blocks = [{"kind": "steps", "steps": [
+        {"title": f"第 {i} 步", "detail": f"要点 {i}"} for i in range(6)
+    ]}]
+    elements = PRESETS["steps_horizontal"](zones_for("lessonforge_deck_academic", "process"), _slide(blocks=blocks, page_type="process"), {})
+    _invariants(elements, require_vertical_fill=False)
+    assert max(e["x"] + e["w"] for e in elements) <= 13.333 + 1e-6
+    assert sum(1 for e in elements if e["content_ref"].startswith("blocks.0.steps.")) <= 8
+
+
 def test_compare_columns_invariants():
     blocks = [{"kind": "compare", "left": {"heading": "传统教学", "items": ["讲授为主", "统一进度"]},
                "right": {"heading": "探究教学", "items": ["任务驱动", "个性化"]}}]

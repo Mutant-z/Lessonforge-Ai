@@ -125,7 +125,7 @@ def steps_horizontal(zones: LayoutZones, content: dict[str, Any], params: dict[s
     col = zones.body_column
     n = min(MAX_CARD_COLUMNS, len(steps))
     card_w = (col.w - ITEM_GAP * (n - 1)) / n
-    for index, step in enumerate(steps):
+    for index, step in enumerate(steps[:n]):
         x = col.x + index * (card_w + ITEM_GAP)
         title = str(step.get("title") or f"第 {index + 1} 步")
         detail = str(step.get("detail") or "")

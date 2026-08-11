@@ -11,6 +11,7 @@ from typing import Any
 
 
 MAX_BLOCK_CHARS = 6000       # 单块最大字符数
+MAX_KNOWLEDGE_BLOCK_CHARS = 18_000   # knowledge.json 17.5KB，需整体可达（typography/ppt_skills 不能丢）
 MAX_CONTEXT_CHARS = 48_000   # 单次 prompt 上下文预算（工具结果先丢最旧）
 KEEP_TOOL_RESULTS = 12       # 保留最近 N 条工具结果
 
@@ -128,7 +129,13 @@ class ContextState:
         parts: list[str] = []
         used = 0
         for block in fixed:
-            text = block.serialize()
+            if block.kind == "knowledge":
+                # 知识库是唯一需要整体注入的大块（字号表/设计模式库不能丢），
+                # 用独立预算，避免 6000 字符截断 typography/ppt_skills。
+                body = json.dumps(block.payload, ensure_ascii=False, default=str)
+                text = _clip(body, MAX_KNOWLEDGE_BLOCK_CHARS)
+            else:
+                text = block.serialize()
             used += len(text)
             parts.append(f"## {block.kind}: {block.title}\n{text}")
         for block in reversed(tool_blocks):

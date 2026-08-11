@@ -610,3 +610,15 @@ def test_knowledge_block_not_truncated_for_layout():
     prompt = ctx.to_prompt("layout")
     assert "typography" in prompt
     assert "ppt_skills" in prompt or "cover_patterns" in prompt
+
+
+# ---- Task 7: 结构化意图提取（LLM；Mock/失败由关键词 infer_intent 兜底） ----
+from app.agent.intents import extract_polish_intent  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_extract_polish_intent_falls_back_on_mock():
+    from app.providers.llm.mock import MockProvider
+
+    runtime = SimpleNamespace(provider=MockProvider())
+    assert await extract_polish_intent(runtime) is None

@@ -24,17 +24,28 @@ from app.services.ppt_pipeline_service import PAUSE_EVENTS
 
 router = APIRouter(prefix="/ppt-agent", tags=["PPT Agent Runtime"])
 
+# 前端单页范围选择：modality 非 auto 时在消息前缀加 [范围:布局/文字/图片]，
+# 供运行时 _modality_from_instruction 解析并显式覆盖 active_intent。
+_MODALITY_SCOPE = {
+    "layout": "[范围:布局] ",
+    "text": "[范围:文字] ",
+    "image": "[范围:图片] ",
+}
+
 
 class CreateRunRequest(BaseModel):
     course_id: str
     instruction: str = Field(default="", max_length=8000)
     action: str = "initial"
     selected_slide_ids: list[str] = Field(default_factory=list, max_length=50)
+    modality: str = Field(default="auto", description="auto|layout|text|image")
 
 
 class InstructionRequest(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
     selected_slide_ids: list[str] = Field(default_factory=list, max_length=50)
+    resume_if_paused: bool = False
+    modality: str = Field(default="auto", description="auto|layout|text|image")
 
 
 class HumanResponseRequest(BaseModel):
@@ -81,7 +92,11 @@ async def create_run(payload: CreateRunRequest, user: User = Depends(current_use
         if not task.current_artifact_id:
             raise HTTPException(409, "PPT 尚未生成，不能提交修改指令")
         scope = f"[目标页面: {','.join(payload.selected_slide_ids)}] " if payload.selected_slide_ids else ""
-        message = AgentMessage(course_id=payload.course_id, task_id=task.id, module_type="ppt", role="user", content=scope + payload.instruction.strip(), status="pending")
+        modality_prefix = _MODALITY_SCOPE.get(payload.modality, "")
+        message = AgentMessage(
+            course_id=payload.course_id, task_id=task.id, module_type="ppt", role="user",
+            content=f"{scope}{modality_prefix}{payload.instruction.strip()}", status="pending",
+        )
         db.add(message)
         trigger = "message"
     try:
@@ -135,9 +150,10 @@ async def stream_events(run_id: str, request: Request, after: int = Query(0, ge=
 @router.post("/runs/{run_id}/instructions", status_code=202)
 async def enqueue_instruction(run_id: str, payload: InstructionRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     generation, pipeline = await _owned_run(run_id, user, db)
-    if pipeline.status not in {"queued", "running", "paused"}:
+    if pipeline.status not in {"queued", "running", "pausing", "paused"}:
         raise HTTPException(409, "当前 Run 已结束，请创建新的修改 Run")
-    content = payload.content.strip()
+    modality_prefix = _MODALITY_SCOPE.get(payload.modality, "")
+    content = f"{modality_prefix}{payload.content.strip()}"
     row = PPTAgentInstruction(pipeline_run_id=pipeline.id, user_id=user.id, content=content, selected_slide_ids_json=payload.selected_slide_ids, disposition="queued")
     user_message = AgentMessage(
         course_id=generation.course_id,
@@ -151,6 +167,15 @@ async def enqueue_instruction(run_id: str, payload: InstructionRequest, user: Us
     db.add(row)
     db.add(user_message)
     await db.flush()
+    should_resume = payload.resume_if_paused and pipeline.status == "paused"
+    if should_resume:
+        pause_event = PAUSE_EVENTS.pop(generation.id, None)
+        if pause_event is not None:
+            pause_event.clear()
+        generation.status = pipeline.status = "queued"
+        task = await db.get(CourseTask, generation.course_task_id) if generation.course_task_id else None
+        if task:
+            task.status = "queued"
     instruction_id = row.id
     message_payload = {
         "id": user_message.id,
@@ -161,12 +186,22 @@ async def enqueue_instruction(run_id: str, payload: InstructionRequest, user: Us
     }
     await db.commit()
     emitter = await PipelineEventEmitter.for_run(generation, pipeline)
-    await emitter.emit_domain("run.instruction.queued", message="教师指令已加入执行队列", payload={
+    await emitter.emit_domain("run.instruction.queued", message=(
+        "教师指令已加入执行队列并恢复运行" if should_resume else "教师指令已加入执行队列"
+    ), payload={
         "instruction_id": instruction_id,
         "selected_slide_ids": payload.selected_slide_ids,
         "user_message": message_payload,
     })
-    return {"instruction_id": instruction_id, "message_id": user_message.id, "message": message_payload, "status": "queued"}
+    if should_resume:
+        await emitter.task_resumed(resume_from_step=pipeline.current_step_index)
+        start_task_run(generation.id)
+    return {
+        "instruction_id": instruction_id,
+        "message_id": user_message.id,
+        "message": message_payload,
+        "status": "resumed" if should_resume else "queued",
+    }
 
 
 @router.post("/runs/{run_id}/pause", status_code=202)

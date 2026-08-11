@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -40,6 +41,63 @@ async def test_queued_instruction_is_persisted_as_visible_user_message(client, a
     assert instruction.disposition == "merged"
     decision_agents = {item.get("agent") for item in runtime.context.decisions}
     assert {"slide_content", "layout", "ppt_editor"}.issubset(decision_agents)
+
+
+@pytest.mark.asyncio
+async def test_instruction_atomically_resumes_a_paused_run(client, auth_headers, monkeypatch):
+    from app.models.entities import CourseTask
+    from app.services.ppt_pipeline_service import PAUSE_EVENTS
+
+    course_id = await ready_course(client, auth_headers, model_name="Paused Instruction Mock")
+    runtime = await build_runtime(course_id, trigger="message")
+    resumed_runs: list[str] = []
+    monkeypatch.setattr("app.api.v1.ppt_agent.start_task_run", resumed_runs.append)
+
+    async with SessionLocal() as db:
+        generation = await db.get(GenerationRun, runtime.generation_run.id)
+        pipeline = await db.get(PipelineRun, runtime.pipeline_run.id)
+        task = await db.get(CourseTask, runtime.task.id)
+        generation.status = "paused"
+        pipeline.status = "paused"
+        task.status = "paused"
+        task.active_run_id = generation.id
+        await db.commit()
+
+    pause_event = PAUSE_EVENTS.setdefault(runtime.generation_run.id, asyncio.Event())
+    pause_event.set()
+    response = await client.post(
+        f"/api/v1/ppt-agent/runs/{runtime.generation_run.id}/instructions",
+        headers=auth_headers,
+        json={
+            "content": "继续润色首页",
+            "selected_slide_ids": ["slide_01"],
+            "resume_if_paused": True,
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["status"] == "resumed"
+    assert resumed_runs == [runtime.generation_run.id]
+    assert not pause_event.is_set()
+
+    async with SessionLocal() as db:
+        generation = await db.get(GenerationRun, runtime.generation_run.id)
+        pipeline = await db.get(PipelineRun, runtime.pipeline_run.id)
+        task = await db.get(CourseTask, runtime.task.id)
+        instruction = await db.get(PPTAgentInstruction, payload["instruction_id"])
+        message = await db.get(AgentMessage, payload["message_id"])
+        resumed_event = await db.scalar(select(GenerationEvent).where(
+            GenerationEvent.run_id == runtime.generation_run.id,
+            GenerationEvent.event_type == "task_resumed",
+        ))
+    assert generation.status == pipeline.status == task.status == "queued"
+    assert task.active_run_id == runtime.generation_run.id
+    assert instruction.disposition == "queued"
+    assert instruction.selected_slide_ids_json == ["slide_01"]
+    assert message.run_id == runtime.generation_run.id
+    assert resumed_event is not None
+    PAUSE_EVENTS.pop(runtime.generation_run.id, None)
 
 
 @pytest.mark.asyncio
@@ -294,3 +352,25 @@ async def test_strict_image_runtime_records_real_asset_and_add_image_evidence(cl
     assert patched_slide["title"] == target["title"]
     assert patched_slide.get("body") == target.get("body")
     assert any(item.get("kind") == "image" for item in patched_slide.get("elements") or [])
+
+
+@pytest.mark.asyncio
+async def test_create_run_accepts_modality(client, auth_headers):
+    """POST /ppt-agent/runs 带 modality=layout → 202 且消息内容带 [范围:布局] 前缀。"""
+    course_id = await ready_course(client, auth_headers, model_name="Modality Scope Mock")
+    project = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
+    ppt_task = next(item for item in project["tasks"] if item["task_type"] == "ppt")
+    artifact = ppt_task["current_artifact"]
+    slide_id = artifact["content_json"]["slides"][0]["id"]
+
+    created = await client.post("/api/v1/ppt-agent/runs", headers=auth_headers, json={
+        "course_id": course_id,
+        "instruction": "让这一页更整齐",
+        "selected_slide_ids": [slide_id],
+        "modality": "layout",
+    })
+    assert created.status_code == 202, created.text
+    async with SessionLocal() as db:
+        message = await db.scalar(select(AgentMessage).where(AgentMessage.id == created.json()["message_id"]))
+    assert message is not None
+    assert "[范围:布局]" in message.content

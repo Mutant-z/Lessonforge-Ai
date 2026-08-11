@@ -5,6 +5,7 @@ honours explicit handoffs, and returns to the orchestrator before the next actio
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ INTENT_AGENTS: dict[str, list[str]] = {
     "GENERATE": ["narrative", "template_analysis", "slide_content", "visual_plan", "layout", "media", "ppt_editor", "visual_qa"],
     "MODIFY": ["slide_content", "layout", "media", "ppt_editor", "visual_qa"],
     "LOCAL_REGENERATE": ["slide_content", "layout", "media", "ppt_editor", "visual_qa"],
+    "LAYOUT_ONLY": ["layout", "ppt_editor", "visual_qa"],
     "GLOBAL_OPTIMIZE": ["template_analysis", "visual_plan", "layout", "media", "ppt_editor", "visual_qa"],
     "STYLE_CHANGE": ["template_analysis", "layout", "ppt_editor", "visual_qa"],
     "TEMPLATE_SWITCH": ["template_analysis", "layout", "ppt_editor", "visual_qa"],
@@ -45,6 +47,7 @@ INTENT_CAPABILITIES: dict[str, list[str]] = {
     "GENERATE": ["storytelling", "template-analysis", "layout-design", "teaching-diagram", "visual-qa", "content-qa"],
     "MODIFY": ["layout-design", "slide-repair", "visual-qa", "content-qa"],
     "LOCAL_REGENERATE": ["layout-design", "slide-repair"],
+    "LAYOUT_ONLY": ["layout-design", "visual-qa"],
     "GLOBAL_OPTIMIZE": ["layout-design", "visual-qa"],
     "STYLE_CHANGE": ["template-analysis", "template-relayout"],
     "TEMPLATE_SWITCH": ["template-analysis", "template-relayout", "visual-qa"],
@@ -55,7 +58,7 @@ INTENT_CAPABILITIES: dict[str, list[str]] = {
 }
 
 MUTATION_INTENTS = {
-    "MODIFY", "LOCAL_REGENERATE", "GLOBAL_OPTIMIZE", "STYLE_CHANGE",
+    "MODIFY", "LOCAL_REGENERATE", "LAYOUT_ONLY", "GLOBAL_OPTIMIZE", "STYLE_CHANGE",
     "TEMPLATE_SWITCH", "CONTENT_UPDATE", "IMAGE_UPDATE",
 }
 CONTENT_REPAIR_INTENTS = {"GENERATE", "MODIFY", "LOCAL_REGENERATE", "CONTENT_UPDATE"}
@@ -64,7 +67,31 @@ RESTORE_MARKERS = (
     "把文字", "文字被去", "文字去掉", "内容不见", "内容丢失",
     "恢复原", "恢复文字", "恢复内容", "找回文字",
 )
-EDIT_MARKERS = ("改写", "精简", "补充文案", "修改文字", "润色文案", "删掉文字", "删除文字")
+EDIT_MARKERS = (
+    "改写", "精简", "补充文案", "修改文字", "润色文案", "删掉文字", "删除文字",
+    "措辞", "表达", "语句", "用词", "扩写", "缩写", "改字", "改文案",
+)
+# 布局/排版/留白/分布类诉求：只调整几何与间距，不改语义文字。
+LAYOUT_MARKERS = (
+    "布局", "排版", "页面分布", "分布", "版式", "间距", "间隔", "留白", "空白",
+    "太挤", "太密", "拥挤", "松散", "居中", "对齐", "字距", "行距", "挤成一团",
+    "挤在一起", "堆积", "空着", "太空",
+)
+
+# 前端单页范围选择：消息前缀 [范围:布局/文字/图片] 显式限定模态（modality）。
+_MODALITY_PREFIXES = {
+    "布局": "layout",
+    "文字": "text",
+    "图片": "image",
+}
+
+
+def _modality_from_instruction(instruction: str) -> str:
+    """解析消息前缀 [范围:布局/文字/图片] → modality；未指定返回 auto。"""
+    match = re.search(r"\[范围:([^\]\s]+)\]", instruction or "")
+    if not match:
+        return "auto"
+    return _MODALITY_PREFIXES.get(match.group(1), "auto")
 
 
 def _is_restore_request(text: str) -> bool:
@@ -87,6 +114,10 @@ def _has_positive_edit_request(text: str) -> bool:
     return False
 
 
+def _has_layout_request(text: str) -> bool:
+    return any(marker in text for marker in LAYOUT_MARKERS)
+
+
 def normalize_agent_plan(intent: str, agents: list[str], content_policy: str = "edit") -> list[str]:
     """Keep dynamic planning, but enforce the dependencies required to mutate slides."""
     filtered = [key for key in dict.fromkeys(agents) if key in AGENT_BY_KEY]
@@ -96,6 +127,8 @@ def normalize_agent_plan(intent: str, agents: list[str], content_policy: str = "
         return ["visual_plan", "layout", "media", "ppt_editor", "visual_qa"]
     if intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}:
         return ["template_analysis", "layout", "ppt_editor", "visual_qa"]
+    if intent == "LAYOUT_ONLY":
+        return ["layout", "ppt_editor", "visual_qa"]
     if intent not in {"MODIFY", "LOCAL_REGENERATE"}:
         return filtered
     optional = [
@@ -117,6 +150,9 @@ def infer_intent(trigger_type: str, instruction: str = "", selected_slide_ids: l
         return "IMAGE_UPDATE"
     if "检查" in text or "qa" in text or "质检" in text:
         return "VISUAL_QA"
+    # 布局/排版/留白/分布类诉求：只改几何与间距，不重写文字，不重生成配图。
+    if _has_layout_request(text) and not _has_positive_edit_request(text):
+        return "LAYOUT_ONLY"
     if selected_slide_ids:
         return "LOCAL_REGENERATE"
     if trigger_type == "message":
@@ -132,7 +168,7 @@ def infer_content_policy(intent: str, instruction: str = "") -> str:
         return "edit"
     if _is_restore_request(text):
         return "restore"
-    if intent in {"IMAGE_UPDATE", "TEMPLATE_SWITCH", "STYLE_CHANGE", "GLOBAL_OPTIMIZE", "VISUAL_QA", "EXPORT"}:
+    if intent in {"LAYOUT_ONLY", "IMAGE_UPDATE", "TEMPLATE_SWITCH", "STYLE_CHANGE", "GLOBAL_OPTIMIZE", "VISUAL_QA", "EXPORT"}:
         return "preserve"
     return "edit"
 
@@ -552,6 +588,24 @@ class PPTAgentRuntime:
         self.pipeline.active_intent = initial["intent"]
         self.pipeline.content_policy = initial["content_policy"]
         self.pipeline.baseline_content_hashes = dict(initial["baseline_content_hashes"])
+        # Task 7: LLM 结构化意图提取；Mock/失败返回 None，由关键词 infer_intent 兜底。
+        # modality 显式覆盖：前端单页范围选择（[范围:布局/文字/图片]）优先于意图提取。
+        from app.agent.intents import dimension_to_engine_params, extract_polish_intent
+
+        self.pipeline.modality = _modality_from_instruction(self.pipeline.context.user_instruction)
+        self.pipeline.polish_intent = await extract_polish_intent(self.pipeline)
+        if self.pipeline.polish_intent is not None:
+            params = dimension_to_engine_params(self.pipeline.polish_intent)
+            if params:
+                self.pipeline.context.add_note(
+                    f"润色意图：{self.pipeline.polish_intent.summary}；引擎参数 {params}"
+                )
+        modality = getattr(self.pipeline, "modality", "auto")
+        if modality in {"layout", "text", "image"}:
+            self.pipeline.active_intent = {
+                "layout": "LAYOUT_ONLY", "text": "MODIFY", "image": "IMAGE_UPDATE",
+            }[modality]
+            self.pipeline.content_policy = "preserve" if modality in {"layout", "image"} else "edit"
         config = {"configurable": {"thread_id": self.pipeline.generation_run.id}, "recursion_limit": 100}
         if not self.persistent_checkpoints:
             final = await self._build_graph(MemorySaver()).ainvoke(initial, config)
@@ -576,6 +630,34 @@ class PPTAgentRuntime:
             self._assert_template_switch_integrity(final)
             return
         if self.pipeline.active_intent != "IMAGE_UPDATE":
+            qa_data = self.pipeline.context.get_tool_output("run_qa") or {}
+            blocking = [
+                item for item in qa_data.get("issues", [])
+                if item.get("severity") in {"critical", "major"}
+                and (
+                    not self.pipeline.selected_slide_ids
+                    or str(item.get("slide_id") or "") in set(self.pipeline.selected_slide_ids)
+                )
+            ]
+            self.pipeline.blocking_issues = blocking
+            if blocking:
+                rules = {str(item.get("rule_id") or "") for item in blocking}
+                if "layout.incomplete_absolute" in rules:
+                    error_code = "layout_incomplete"
+                    error_message = "绝对布局没有覆盖页面全部必要文字，已保留原 PPT 版本。"
+                elif "content.not_rendered" in rules:
+                    error_code = "content_not_rendered"
+                    error_message = "页面文字没有完整进入最终版式，已保留原 PPT 版本。"
+                elif "content.accidentally_removed" in rules:
+                    error_code = "content_accidentally_removed"
+                    error_message = "页面语义内容被意外修改，已保留原 PPT 版本。"
+                else:
+                    error_code = "qa_blocked"
+                    error_message = "页面未通过发布前质量检查，已保留原 PPT 版本。"
+                raise PPTAgentError(
+                    error_code, error_message,
+                    retryable=True, details={"issues": blocking[:20]},
+                )
             if self.pipeline.content_policy in {"preserve", "restore"}:
                 source_slides = {
                     str(item.get("id") or ""): item

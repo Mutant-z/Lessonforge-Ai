@@ -115,15 +115,18 @@ def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "message": f"页面内容只覆盖画布 {covered:.0f}in²（<{canvas_area * 0.18:.0f}in²），大面积空白",
                     "target_agent": "layout",
                 })
-        # 标题框必须落在标题轨（y 0.35..1.6，注释轨 0.55..1.35）
-        for item in text_items:
-            if item.get("content_ref") == "title":
-                ty = float(item["y"])
-                if ty < 0.35 or ty + float(item["h"]) > 1.6:
-                    issues.append({
-                        "severity": "major", "slide_id": slide_id, "rule_id": "geometry.title_in_rail",
-                        "message": f"标题框 y={ty:.2f} 未落在标题轨", "target_agent": "layout",
-                    })
+        # 标题框必须落在标题轨（y 0.35..1.6，注释轨 0.55..1.35）。
+        # 封面标题按设计位于 y≈2+（hero 布局），不适用标题轨规则，豁免。
+        page_type = str(items[0].get("page_type") or "concept") if items else "concept"
+        if page_type != "cover":
+            for item in text_items:
+                if item.get("content_ref") == "title":
+                    ty = float(item["y"])
+                    if ty < 0.35 or ty + float(item["h"]) > 1.6:
+                        issues.append({
+                            "severity": "major", "slide_id": slide_id, "rule_id": "geometry.title_in_rail",
+                            "message": f"标题框 y={ty:.2f} 未落在标题轨", "target_agent": "layout",
+                        })
         # min_margin：执行 0.5in 安全边距
         for item in items:
             if item["kind"] in {"textbox", "note", "image", "chart"} and (

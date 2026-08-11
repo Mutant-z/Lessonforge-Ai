@@ -290,6 +290,7 @@ class PresentationBuilder:
             for element in self.render_elements(slide):
                 report.append({
                     "slide_id": slide["id"], "element_id": element["id"], "kind": element["kind"],
+                    "page_type": slide.get("page_type", "concept"),
                     "x": element["x"], "y": element["y"], "w": element["w"], "h": element["h"],
                     "text": element.get("text", ""),
                     "style": element.get("style", {}),

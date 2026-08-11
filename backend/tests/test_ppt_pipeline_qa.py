@@ -148,3 +148,19 @@ def test_sparse_two_textboxes_still_checked():
               _el("S1", x=0.65, y=1.7, w=1.5, h=0.6, text="短", content_ref="body.0")]
     issues = run_geometry_qa(report)
     assert any(i["rule_id"] == "layout.cluster_cramming" for i in issues)
+
+
+def test_title_in_rail_exempts_cover_and_flags_content():
+    # 封面标题按 hero 设计位于 y≈2.05，不适用标题轨规则 → 豁免
+    cover = [
+        {"slide_id": "S1", "element_id": "cover-title", "kind": "textbox", "page_type": "cover",
+         "x": 2.2, "y": 2.05, "w": 8.0, "h": 1.6, "text": "课程封面", "style": {"size": 40}, "content_ref": "title"},
+    ]
+    assert not any(i["rule_id"] == "geometry.title_in_rail" for i in run_geometry_qa(cover))
+    # 内容页标题落在正文区 y=2.0 → 必须触发
+    content = [
+        {"slide_id": "S2", "element_id": "content-title", "kind": "textbox", "page_type": "concept",
+         "x": 2.2, "y": 2.0, "w": 8.0, "h": 0.8, "text": "标题", "style": {"size": 28}, "content_ref": "title"},
+    ]
+    issues = run_geometry_qa(content)
+    assert any(i["rule_id"] == "geometry.title_in_rail" for i in issues)

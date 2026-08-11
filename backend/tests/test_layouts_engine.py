@@ -130,3 +130,26 @@ def test_cover_center_invariants():
     z = zones_for("lessonforge_deck_academic", "cover", has_visual=True, visual_region={"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2})
     slide = {"page_type": "cover", "title": "课程封面", "purpose": "单元导入", "body": ["目标一", "目标二"], "blocks": []}
     _invariants(PRESETS["cover_center"](z, slide, {}), require_vertical_fill=False)
+
+
+from app.agent.layouts.engine import compile_layout, normalize_layout_params
+
+
+def test_compile_layout_unknown_type_falls_back_to_bullet():
+    slide = _slide()
+    out = compile_layout("lessonforge_deck_academic", slide, {"slide_id": "S01", "layout_type": "not_a_preset", "style": {}})
+    assert out["layout_type"] == "bullet_flow"
+    assert out["slide_id"] == "S01"
+    assert out["elements"]
+
+
+def test_compile_layout_aliases_old_names():
+    slide = _slide()
+    out = compile_layout("lessonforge_deck_academic", slide, {"slide_id": "S01", "layout_type": "title_and_body", "style": {}})
+    assert out["layout_type"] == "bullet_flow"
+
+
+def test_normalize_layout_params_bounds():
+    assert normalize_layout_params({"gap_scale": 5.0})["gap_scale"] == 1.5
+    assert normalize_layout_params({"gap_scale": 0.1})["gap_scale"] == 0.8
+    assert normalize_layout_params({})["font_tier"] == "default"

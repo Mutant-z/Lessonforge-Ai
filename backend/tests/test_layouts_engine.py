@@ -1,4 +1,5 @@
 import pytest
+from app.agent.layouts.metrics import estimate_text_height
 from app.agent.layouts.zones import LayoutZones, zones_for
 
 
@@ -23,3 +24,12 @@ def test_visual_slot_narrows_body_column():
                   visual_region={"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2})
     assert z.visual_slot is not None
     assert z.body_column.right == pytest.approx(7.4 - 0.4)
+
+
+def test_estimate_text_height_multiline_and_min():
+    # 单行 10 个 CJK 字符 @18pt 在 3in 宽框内：每行约可放 int(3/(18/72*0.98))=12 字
+    assert estimate_text_height("十个中文字符十个中文字符十个中文字符十个中文字符", 3.0, 18) > 0.6
+    assert estimate_text_height("短", 3.0, 18) == 0.6  # 最小高度
+    multi = estimate_text_height("一二三\n四五六", 3.0, 18)
+    single = estimate_text_height("一二三", 3.0, 18)
+    assert multi > single  # 换行增加行数

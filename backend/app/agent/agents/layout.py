@@ -9,12 +9,86 @@ from typing import Any
 from app.agent.agents.base import Agent
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, ToolCall
-from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_texts
+from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs, semantic_body_texts
 from app.renderers.presentation_builder import SLIDE_HEIGHT, SLIDE_WIDTH
 
 MARGIN_X = 0.65
 MARGIN_Y = 1.7
 BODY_FONT = 18
+BODY_ITEM_GAP = 0.3
+MAX_BODY_ITEMS = 6
+# 正文列必须纵向铺满内容区，禁止把所有文字挤在一角。
+MIN_BODY_VERTICAL_USAGE = 0.45
+SAFE_CONTENT_BOTTOM = SLIDE_HEIGHT - 0.7  # 6.8
+
+
+def _is_body_content_ref(ref: Any) -> bool:
+    ref = str(ref or "")
+    return ref == "body" or ref.startswith("body.") or ref.startswith("blocks.")
+
+
+def canonicalize_spatial_layout(
+    template_id: str, slide: dict[str, Any], layout: dict[str, Any],
+) -> dict[str, Any]:
+    """确定性重排被“挤成一团”的正文列。
+
+    LLM 输出的绝对布局只要 schema 合法就会被信任，但一个把全部文字堆在
+    左上角、其余空白一片的布局能通过内容覆盖检查。这里在发布前把“既没有
+    纵向铺满、也没有横向展开”的正文强制重排为逐条独立文本框 + 均匀纵向
+    分布。多列/横向卡片等真正利用横向空间的版式（span_w 达标）原样保留。
+    """
+    page_type = str(slide.get("page_type") or "concept")
+    if page_type == "cover":
+        return layout
+    elements = list(layout.get("elements") or [])
+    body_indexes = [
+        index for index, element in enumerate(elements)
+        if element.get("kind") in {"textbox", "note"} and _is_body_content_ref(element.get("content_ref"))
+    ]
+    if not body_indexes:
+        return layout
+    body_refs = semantic_body_refs(slide)
+    if not body_refs:
+        return layout
+    body_elements = [elements[index] for index in body_indexes]
+    min_y = min(float(item.get("y") or 0) for item in body_elements)
+    max_bottom = max(float(item.get("y") or 0) + float(item.get("h") or 0) for item in body_elements)
+    min_x = min(float(item.get("x") or 0) for item in body_elements)
+    max_right = max(float(item.get("x") or 0) + float(item.get("w") or 0) for item in body_elements)
+    available_h = SAFE_CONTENT_BOTTOM - MARGIN_Y
+    content_x = _content_start_x(template_id, page_type)
+    visual_region = layout.get("visual_region") or {}
+    visual_x = float(visual_region.get("x") or 0) if visual_region else 0.0
+    body_w = max(3.2, visual_x - content_x - 0.4) if visual_x > content_x + 1 else SLIDE_WIDTH - content_x - 0.78
+    vertical_underused = max_bottom - min_y < available_h * MIN_BODY_VERTICAL_USAGE
+    horizontal_clustered = max_right - min_x < body_w * 0.6
+    if not (vertical_underused and horizontal_clustered):
+        return layout
+    items: list[tuple[str, str, float]] = []
+    for ref, text in body_refs:
+        item_h = max(0.5, _estimate_height([text], body_w, BODY_FONT))
+        items.append((ref, text, item_h))
+    total_h = sum(item_h for _ref, _text, item_h in items) + BODY_ITEM_GAP * max(0, len(items) - 1)
+    gap = BODY_ITEM_GAP
+    target_h = available_h * MIN_BODY_VERTICAL_USAGE
+    if len(items) > 1 and total_h < target_h:
+        gap = BODY_ITEM_GAP + (target_h - total_h) / (len(items) - 1)
+
+    kept = [element for index, element in enumerate(elements) if index not in body_indexes]
+    title_index = next((index for index, element in enumerate(kept) if element.get("content_ref") == "title"), None)
+    if title_index is not None:
+        kept[title_index] = {
+            **kept[title_index],
+            "x": content_x, "y": 0.55, "w": SLIDE_WIDTH - content_x - 0.78, "h": 0.8,
+        }
+    cursor_y = MARGIN_Y
+    for ref, text, item_h in items:
+        kept.append({"kind": "textbox", "role": "body", "text": text, "content_ref": ref,
+                     "x": round(content_x, 3), "y": round(cursor_y, 3),
+                     "w": round(body_w, 3), "h": round(item_h, 3),
+                     "style": {"size": BODY_FONT, "color": "text"}})
+        cursor_y += item_h + gap
+    return {**layout, "elements": kept}
 
 
 def _content_start_x(template_id: str, page_type: str = "concept") -> float:
@@ -77,12 +151,8 @@ def normalize_visual_region(
 
 
 def _estimate_height(texts: list[str], box_width: float, font_size: float) -> float:
-    if not texts:
-        return 0.5
-    char_w = font_size / 72.0 * 0.98
-    chars_per_line = max(1, int(box_width / char_w))
-    lines = sum(max(1, math.ceil(len(item) / chars_per_line)) for item in texts)
-    return max(0.6, lines * font_size / 72.0 * 1.28)
+    from app.agent.layouts.metrics import estimate_item_height
+    return estimate_item_height(list(texts), box_width, font_size)
 
 
 class LayoutAgent(Agent):
@@ -104,7 +174,17 @@ class LayoutAgent(Agent):
             "elements:[{kind,role,content_ref,text,x,y,w,h,style}]}]}。"
             "视觉/图片任务只能改变坐标和样式，文字必须逐字来自当前页面内容。坐标单位英寸，画布 13.333×7.5。"
             "普通内容页的图片必须位于右侧安全槽位（x≥7.0、y≥1.7），与标题/正文保持至少 0.3 英寸间距；"
-            "不得让图片覆盖任何 textbox、note 或 visual_caption。"
+            "不得让图片覆盖任何 textbox、note 或 visual_caption。\n"
+            "空间分布硬约束（违反会被判定为不合格布局）：\n"
+            "· 正文列必须纵向铺满内容区：标题固定 y=0.55，正文从 y≈1.7 起，至少延伸到 y≈5.0 以上；\n"
+            "· 正文条目逐条独立成框，条间距 ≥0.3 英寸，禁止把所有文字叠在一个角落或使用互相重叠的文本框；\n"
+            "· 标题与正文必须覆盖内容列宽度（x 从安全边距到右侧视觉槽），禁止把文字压成小窄条；\n"
+            "· 每个文字元素必须带 content_ref（title / body / body.N / blocks.* / purpose），"
+            "且文字逐字来自页面内容，不得自己改写措辞；引用不存在的 content_ref 会被判定为不合格；\n"
+            "· 结构块应按语义排版：steps 用横向编号卡片（2~4 列平铺）、compare 用左右双栏、"
+            "bullets/正文用纵向条目流，不要把所有条目压成单条竖排；\n"
+            "· 正文条目尽量横向展开（利用整个内容列宽度），只有条目极少时才允许集中在一侧；\n"
+            "· 不靠放大装饰图形或空白形状占位，页面空间应由文字与图片真实利用。"
         )
 
     async def decide(self, tc: ToolContext) -> AgentDecision:
@@ -132,7 +212,10 @@ class LayoutAgent(Agent):
                 if item.get("visualRequired"):
                     visual_by_slide[item["slideId"]] = item
         if (
-            getattr(tc.runtime, "active_intent", "") in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}
+            getattr(tc.runtime, "active_intent", "") in {
+                "MODIFY", "LOCAL_REGENERATE", "CONTENT_UPDATE", "GLOBAL_OPTIMIZE",
+                "STYLE_CHANGE", "TEMPLATE_SWITCH",
+            }
             or getattr(tc.runtime, "content_policy", "edit") in {"preserve", "restore"}
         ):
             for slide in source_slides:
@@ -220,14 +303,32 @@ class LayoutAgent(Agent):
                          "content_ref": "title",
                          "x": content_x, "y": 0.55, "w": SLIDE_WIDTH - content_x - 0.78, "h": 0.8,
                          "style": {"size": 28, "color": "primary", "bold": True}})
-        body_h = _estimate_height(body, body_w, BODY_FONT)
-        body_h = max(2.0, min(4.4, body_h))
-        elements.append({"kind": "textbox", "role": "body", "text": "\n".join(body),
-                         "content_ref": "body",
-                         "x": body_x, "y": MARGIN_Y, "w": body_w, "h": body_h,
-                         "style": {"size": BODY_FONT, "color": "text"}})
+        # 左侧正文逐条独立成框、上下留白，解决"文字间隔/太单调"类诉求；
+        # content_ref 用精确条目引用（body.N / blocks.*），QA 覆盖由
+        # _ref_covers + 文本匹配兜底，不再把全部条目压进单行文本框。
+        # 条目过多（正文 + 结构化块叠加）时退回单框，避免逐条溢出画布底部。
+        body_refs = semantic_body_refs(slide)
+        if len(body_refs) > MAX_BODY_ITEMS:
+            body_h = _estimate_height(body, body_w, BODY_FONT)
+            body_h = max(2.0, min(4.4, body_h))
+            elements.append({"kind": "textbox", "role": "body", "text": "\n".join(body),
+                             "content_ref": "body",
+                             "x": body_x, "y": MARGIN_Y, "w": body_w, "h": body_h,
+                             "style": {"size": BODY_FONT, "color": "text"}})
+        else:
+            cursor_y = MARGIN_Y
+            total_h = 0.0
+            for ref, text in body_refs:
+                item_h = max(0.5, _estimate_height([text], body_w, BODY_FONT))
+                elements.append({"kind": "textbox", "role": "body",
+                                 "text": text, "content_ref": ref,
+                                 "x": body_x, "y": round(cursor_y, 3), "w": body_w, "h": round(item_h, 3),
+                                 "style": {"size": BODY_FONT, "color": "text"}})
+                total_h += item_h
+                cursor_y += item_h + BODY_ITEM_GAP
+            body_h = max(2.0, min(4.4, total_h + BODY_ITEM_GAP * (len(body_refs) - 1)))
         result = {"slide_id": slide_id, "layout_type": "title_and_body",
-                  "designRationale": "标题 + 正文流",
+                  "designRationale": "标题 + 正文流（条目独立成框、逐条留白）",
                   "elements": elements, "render_mode": "absolute"}
         if has_visual:
             visual_type = visual.get("visualType", "image")

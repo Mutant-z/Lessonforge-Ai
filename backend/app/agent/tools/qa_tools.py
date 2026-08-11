@@ -17,20 +17,11 @@ from app.agent.slide_rendering import (
     runtime_baseline_slides,
     semantic_content_changed,
 )
+from app.agent.agents.layout import MARGIN_Y, MIN_BODY_VERTICAL_USAGE, SAFE_CONTENT_BOTTOM
+from app.agent.layouts.metrics import estimate_text_height as _text_height_inches
 
 SEVERITY_WEIGHT = {"critical": 15, "major": 8, "minor": 3}
 CONTENT_QA_INTENTS = {"GENERATE", "MODIFY", "LOCAL_REGENERATE", "CONTENT_UPDATE"}
-
-
-def _text_height_inches(text: str, box_width: float, font_size: float) -> float:
-    if not text:
-        return 0.0
-    char_w = font_size / 72.0 * 0.98
-    chars_per_line = max(1, int(box_width / char_w))
-    lines = 0
-    for segment in str(text).split("\n"):
-        lines += max(1, math.ceil(len(segment) / chars_per_line))
-    return lines * font_size / 72.0 * 1.28
 
 
 def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -77,6 +68,44 @@ def run_geometry_qa(report: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         "message": f"元素 {id_a} 与 {id_b} 重叠（面积 {ox * oy:.2f}in²）",
                         "target_agent": "layout",
                     })
+        # 空间利用率：把全部文字挤在一角、其余大片空白的布局能通过“内容存在”
+        # 检查，这里从几何上拦截“挤成一团”类不合格页面。少于 3 条文字的稀疏
+        # 但合法页面（如大标题 + 单条正文）不判定为异常。
+        text_items = [item for item in items if item["kind"] in {"textbox", "note"}]
+        if len(text_items) >= 3:
+            text_x = [float(item["x"]) for item in text_items]
+            text_y = [float(item["y"]) for item in text_items]
+            text_right = [float(item["x"]) + float(item["w"]) for item in text_items]
+            text_bottom = [float(item["y"]) + float(item["h"]) for item in text_items]
+            span_h = max(text_bottom) - min(text_y)
+            span_w = max(text_right) - min(text_x)
+            content_h = SAFE_CONTENT_BOTTOM - MARGIN_Y
+            full_body_w = SLIDE_WIDTH - 1.3
+            if span_h < content_h * MIN_BODY_VERTICAL_USAGE and span_w < full_body_w * 0.6:
+                issues.append({
+                    "severity": "major", "slide_id": slide_id, "rule_id": "layout.vertical_underuse",
+                    "message": f"文字纵向只占内容列 {span_h:.1f}in（<{content_h * MIN_BODY_VERTICAL_USAGE:.1f}in）且横向未展开，页面下方大段空白",
+                    "target_agent": "layout",
+                })
+            if span_w < 4.0:
+                issues.append({
+                    "severity": "major", "slide_id": slide_id, "rule_id": "layout.cluster_cramming",
+                    "message": f"文字横向只占 {span_w:.1f}in，被压成窄条堆在一侧",
+                    "target_agent": "layout",
+                })
+            content_items = [item for item in items if item["kind"] in {"textbox", "note", "image", "chart"}]
+            xs = [float(item["x"]) for item in content_items]
+            ys = [float(item["y"]) for item in content_items]
+            rights = [float(item["x"]) + float(item["w"]) for item in content_items]
+            bottoms = [float(item["y"]) + float(item["h"]) for item in content_items]
+            covered = (max(rights) - min(xs)) * (max(bottoms) - min(ys))
+            canvas_area = SLIDE_WIDTH * SLIDE_HEIGHT
+            if covered < canvas_area * 0.18:
+                issues.append({
+                    "severity": "major", "slide_id": slide_id, "rule_id": "layout.blank_region",
+                    "message": f"页面内容只覆盖画布 {covered:.0f}in²（<{canvas_area * 0.18:.0f}in²），大面积空白",
+                    "target_agent": "layout",
+                })
     return issues
 
 
@@ -143,7 +172,15 @@ async def _run_qa(tc: ToolContext, _: RunQaInput) -> ToolResult:
             slide_id = str(slide.get("id") or "")
             if coverage_scope and slide_id not in coverage_scope:
                 continue
-            baseline = source_by_id.get(slide_id, slide)
+            # Preserve/restore must prove coverage against the immutable source.
+            # An edit run intentionally changes semantic copy, so its absolute
+            # layout must be checked against the newly edited slide instead of
+            # stale text from the previous Artifact version.
+            baseline = (
+                source_by_id.get(slide_id, slide)
+                if getattr(tc.runtime, "content_policy", "edit") in {"preserve", "restore"}
+                else slide
+            )
             coverage = render_coverage(slide, baseline=baseline)
             coverage_by_slide[slide_id] = coverage
             if coverage["missing_refs"]:

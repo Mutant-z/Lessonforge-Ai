@@ -25,6 +25,7 @@ from app.agent.slide_rendering import (
     runtime_baseline_slides,
     semantic_content_changed,
     semantic_content_hash,
+    semantic_geometry_hash,
 )
 from app.providers.llm.mock import MockProvider
 
@@ -92,6 +93,16 @@ def _modality_from_instruction(instruction: str) -> str:
     if not match:
         return "auto"
     return _MODALITY_PREFIXES.get(match.group(1), "auto")
+
+
+# 几何/结构性 QA 规则：修复路径不需要重新调用 LLM 换版式，直接对受影响页用引擎
+# 按规则换参重编译（确定性收敛），避免审美 LLM 在同一缺陷上反复空转。
+DETERMINISTIC_RULES = frozenset({
+    "geometry.overlap", "geometry.out_of_bounds", "geometry.text_overflow",
+    "geometry.font_too_small", "geometry.min_margin", "geometry.min_gap",
+    "geometry.title_in_rail", "layout.vertical_underuse", "layout.cluster_cramming",
+    "layout.column_balance", "layout.blank_region", "layout.monotony",
+})
 
 
 def _is_restore_request(text: str) -> bool:
@@ -493,6 +504,8 @@ class PPTAgentRuntime:
                 ]
                 repair_round = int(state.get("repair_round") or 0)
                 if issues and repair_round < self.pipeline.pipeline_run.max_revision_rounds:
+                    deterministic = [i for i in issues if i.get("rule_id") in DETERMINISTIC_RULES]
+                    aesthetic = [i for i in issues if i.get("rule_id") not in DETERMINISTIC_RULES]
                     targets = (
                         ["layout"]
                         if self.pipeline.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}
@@ -501,7 +514,20 @@ class PPTAgentRuntime:
                     if self.pipeline.content_policy in {"preserve", "restore"}:
                         targets = ["layout" if target == "slide_content" else target for target in targets]
                     targets = [target for target in targets if target in AGENT_BY_KEY and target != "visual_qa"]
-                    update["remaining_agents"] = list(dict.fromkeys(["revision", *targets, "ppt_editor", "visual_qa"]))
+                    if deterministic and not aesthetic:
+                        # 几何类 → 不重调 LLM，直接对受影响页用引擎按规则换参重编译（确定性收敛）。
+                        # repair_mode 同时写入 pipeline 与 state（state 由 LangGraph 忽略未声明键，
+                        # 布局引擎经 runtime 读取确定性分支参数）。
+                        self.pipeline.repair_mode = "deterministic"
+                        update["repair_mode"] = "deterministic"
+                        update["remaining_agents"] = list(dict.fromkeys(["layout", "ppt_editor", "visual_qa"]))
+                    else:
+                        # 审美类 → LLM 换版式（带上一版失败反馈）。
+                        feedback = "；".join(f"{i.get('rule_id')}:{i.get('message','')[:60]}" for i in issues[:8])
+                        self.pipeline.context.add_note(f"视觉自检反馈：{feedback}，请更换版式或调整参数")
+                        self.pipeline.repair_mode = "llm_feedback"
+                        update["repair_mode"] = "llm_feedback"
+                        update["remaining_agents"] = list(dict.fromkeys(["revision", *targets, "ppt_editor", "visual_qa"]))
                     update["repair_round"] = repair_round + 1
                     from app.renderers.presentation_builder import PresentationBuilder
                     current_content = self.pipeline.builder.to_ppt_content() if self.pipeline.builder is not None else (
@@ -691,6 +717,21 @@ class PPTAgentRuntime:
                         "绝对布局没有覆盖页面全部必要文字，已保留原 PPT 版本。" if incomplete_absolute
                         else "页面文字没有完整进入最终版式，已保留原 PPT 版本。",
                         retryable=True, details={"missing": missing},
+                    )
+                # 单调性门禁：preserve/restore 必须产生实际几何变化，否则视为修复收敛到空转。
+                unchanged = [
+                    slide_id for slide_id in target_ids
+                    if slide_id in source_slides and slide_id in current_slides
+                    and semantic_geometry_hash(source_slides[slide_id]) == semantic_geometry_hash(current_slides[slide_id])
+                ]
+                if unchanged:
+                    self.pipeline.blocking_issues.append({
+                        "severity": "major", "slide_id": unchanged[0], "rule_id": "layout.monotony",
+                        "message": "润色后页面布局没有实际变化", "target_agent": "layout",
+                    })
+                    raise PPTAgentError(
+                        "layout_monotony", "润色后页面布局没有实际变化，已保留原 PPT 版本。",
+                        retryable=True, details={"slides": sorted(unchanged)},
                     )
             self.pipeline.publishable = True
             final["publishable"] = True

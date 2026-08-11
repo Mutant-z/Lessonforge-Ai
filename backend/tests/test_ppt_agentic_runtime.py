@@ -622,3 +622,23 @@ async def test_extract_polish_intent_falls_back_on_mock():
 
     runtime = SimpleNamespace(provider=MockProvider())
     assert await extract_polish_intent(runtime) is None
+
+
+# ---- Task 10: 收敛性修复（几何类规则确定性收敛 + 单调性门禁） ----
+from app.agent.runtime import DETERMINISTIC_RULES  # noqa: E402
+from app.agent.slide_rendering import semantic_geometry_hash  # noqa: E402
+
+
+def test_geometry_rules_are_deterministic():
+    assert "geometry.overlap" in DETERMINISTIC_RULES
+    assert "geometry.text_overflow" in DETERMINISTIC_RULES
+    assert "layout.cluster_cramming" in DETERMINISTIC_RULES
+    assert "layout.column_balance" in DETERMINISTIC_RULES
+
+
+def test_semantic_geometry_hash_detects_monotony():
+    a = {"id": "S1", "elements": [{"kind": "textbox", "content_ref": "body.0", "x": 0.65, "y": 1.7, "w": 5, "h": 1}]}
+    b = {"id": "S1", "elements": [{"kind": "textbox", "content_ref": "body.0", "x": 0.65, "y": 1.7, "w": 5, "h": 1}]}
+    c = {"id": "S1", "elements": [{"kind": "textbox", "content_ref": "body.0", "x": 0.65, "y": 3.0, "w": 5, "h": 1}]}
+    assert semantic_geometry_hash(a) == semantic_geometry_hash(b)
+    assert semantic_geometry_hash(a) != semantic_geometry_hash(c)

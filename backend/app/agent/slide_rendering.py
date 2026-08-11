@@ -60,6 +60,24 @@ def semantic_content_hash(slide: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def semantic_geometry_hash(slide: dict[str, Any]) -> str:
+    """把 elements 的 kind/content_ref/x/y/w/h 序列化哈希，忽略文本样式细节。
+
+    用于收敛性修复的单调性判定：preserve 模式润色后页面布局没有实际几何变化时，
+    视为空转并触发 layout.monotony 门禁。
+    """
+    elements = sorted(
+        (
+            (str(e.get("kind") or ""), str(e.get("content_ref") or ""),
+             round(float(e.get("x") or 0), 3), round(float(e.get("y") or 0), 3),
+             round(float(e.get("w") or 0), 3), round(float(e.get("h") or 0), 3))
+            for e in slide.get("elements") or []
+        ),
+        key=lambda t: t,
+    )
+    return hashlib.sha256(json.dumps(elements, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _block_texts(block: dict[str, Any], prefix: str) -> list[tuple[str, str]]:
     kind = block.get("kind")
     refs: list[tuple[str, str]] = []
@@ -116,7 +134,19 @@ def semantic_body_texts(slide: dict[str, Any]) -> list[str]:
     not for rendering or content-visibility QA.
     """
     texts: list[str] = []
-    seen: set[str] = set()
+    # Structured blocks commonly mirror the top-level title/body fields.  A
+    # ``lead`` block in particular often repeats the slide title; treating it
+    # as body makes an absolute ``content_ref=body`` textbox render the title a
+    # second time.  Seed the de-duplication set with separately rendered
+    # semantic fields before projecting body + blocks.
+    seen: set[str] = {
+        normalized
+        for normalized in (
+            _normalized_text(slide.get("title")),
+            _normalized_text(slide.get("purpose")),
+        )
+        if normalized
+    }
     for ref, text in semantic_text_refs(slide):
         if ref in {"title", "purpose"}:
             continue
@@ -125,6 +155,184 @@ def semantic_body_texts(slide: dict[str, Any]) -> list[str]:
             seen.add(normalized)
             texts.append(text)
     return texts
+
+
+def semantic_body_refs(slide: dict[str, Any]) -> list[tuple[str, str]]:
+    """Canonical visible body column as ``(content_ref, text)`` pairs.
+
+    Mirrors ``semantic_body_texts`` de-duplication while preserving the exact
+    ``content_ref`` of each surviving text, so a layout can render the left
+    column as separate, vertically-spaced textboxes instead of one cramped
+    ``\n``-joined paragraph.  This is what lets "文字间隔/太单调" style requests
+    produce a visible change.
+    """
+    seen: set[str] = {
+        normalized
+        for normalized in (
+            _normalized_text(slide.get("title")),
+            _normalized_text(slide.get("purpose")),
+        )
+        if normalized
+    }
+    items: list[tuple[str, str]] = []
+    for ref, text in semantic_text_refs(slide):
+        if ref in {"title", "purpose"}:
+            continue
+        normalized = _normalized_text(text)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            items.append((ref, text))
+    return items
+
+
+# 与 ppt_design_knowledge 的 density_limits 保持一致（标题30 / 每条25 / 每页6 / 合计120）。
+DENSITY_ITEM_CHARS = 25
+DENSITY_BODY_ITEMS = 6
+DENSITY_BODY_CHARS = 120
+# 常见装饰前缀（emoji/项目符号），会虚增密度字符数。
+_PREFIX_STRIP_CHARS = "•-*●○◆◇🔹🔸💡⚓🎈✨✅📌✏️💬⭐🔥🎯💪📚🧠👀⚠️❓❗❗️💡"
+
+
+def _strip_text_prefix(text: str) -> str:
+    result = str(text or "").lstrip(" \t")
+    while result:
+        char = result[0]
+        if char in _PREFIX_STRIP_CHARS:
+            result = result[1:].lstrip(" \t:")
+        else:
+            break
+    return result
+
+
+def _clip_text_unit(text: str, limit: int = DENSITY_ITEM_CHARS) -> str:
+    text = _strip_text_prefix(text)
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit].rstrip("，。、；：  ")
+    if len(clipped) > limit - 1:
+        clipped = clipped[:limit - 1]
+    return clipped + "…"
+
+
+def sanitize_slide_density(slide: dict[str, Any]) -> bool:
+    """确定性收敛页面密度，使边缘超标（如 27 字 > 25 字）不再阻断发布。
+
+    - 逐条剥离装饰前缀并截断到 ≤25 字（body 与所有 blocks 文本单元）；
+    - body 条数 ≤6、块文本单元数 ≤6、正文+块合计 ≤120 字（超出的尾部截掉）。
+
+    返回 True 表示发生了修正。仅修改语义字段，不改元素几何。
+    """
+    changed = False
+    body = slide.get("body")
+    if isinstance(body, list):
+        clipped = [_clip_text_unit(item) for item in body]
+        if clipped != body:
+            slide["body"] = clipped
+            changed = True
+        if len(slide["body"]) > DENSITY_BODY_ITEMS:
+            slide["body"] = slide["body"][:DENSITY_BODY_ITEMS]
+            changed = True
+    blocks = slide.get("blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("kind")
+            if kind == "lead":
+                for key in ("text", "sub"):
+                    if block.get(key) and len(str(block[key])) > DENSITY_ITEM_CHARS:
+                        block[key] = _clip_text_unit(block[key])
+                        changed = True
+            elif kind == "bullets":
+                for item in block.get("items") or []:
+                    if isinstance(item, dict) and len(str(item.get("text") or "")) > DENSITY_ITEM_CHARS:
+                        item["text"] = _clip_text_unit(item["text"])
+                        changed = True
+            elif kind == "steps":
+                for step in block.get("steps") or []:
+                    for key in ("title", "detail"):
+                        if isinstance(step, dict) and len(str(step.get(key) or "")) > DENSITY_ITEM_CHARS:
+                            step[key] = _clip_text_unit(step[key])
+                            changed = True
+            elif kind == "compare":
+                for column in (block.get("left"), block.get("right")):
+                    if not isinstance(column, dict):
+                        continue
+                    if len(str(column.get("heading") or "")) > DENSITY_ITEM_CHARS:
+                        column["heading"] = _clip_text_unit(column["heading"])
+                        changed = True
+                    items = column.get("items") or []
+                    clipped_items = [
+                        _clip_text_unit(item) if len(str(item)) > DENSITY_ITEM_CHARS else item
+                        for item in items
+                    ]
+                    if clipped_items != items:
+                        column["items"] = clipped_items
+                        changed = True
+            elif kind == "quote":
+                for key in ("text", "citation"):
+                    if block.get(key) and len(str(block[key])) > DENSITY_ITEM_CHARS:
+                        block[key] = _clip_text_unit(block[key])
+                        changed = True
+            elif kind == "note":
+                if block.get("text") and len(str(block["text"])) > DENSITY_ITEM_CHARS:
+                    block["text"] = _clip_text_unit(block["text"])
+                    changed = True
+            elif kind == "visual":
+                if block.get("caption") and len(str(block["caption"])) > DENSITY_ITEM_CHARS:
+                    block["caption"] = _clip_text_unit(block["caption"])
+                    changed = True
+        # 总量/块数封顶：超过上限时按顺序裁掉末尾块，直到合计 ≤120 字且块数 ≤6。
+        blocks = [block for block in blocks if isinstance(block, dict) and block.get("kind")]
+        total = sum(
+            len(unit)
+            for unit, _count in _density_units(blocks)
+        )
+        while len(blocks) > DENSITY_BODY_ITEMS or total > DENSITY_BODY_CHARS:
+            if not blocks:
+                break
+            removed = blocks.pop()
+            removed_chars = sum(len(unit) for unit, _count in _density_units([removed]))
+            total -= removed_chars
+            changed = True
+        slide["blocks"] = blocks
+    return changed
+
+
+def _density_units(blocks: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Return (text, block_index) pairs per visible text unit for density accounting."""
+    units: list[tuple[str, int]] = []
+    for block_index, block in enumerate(blocks):
+        kind = block.get("kind")
+        contributed: list[str] = []
+        if kind == "lead":
+            contributed = [str(block.get("text") or ""), str(block.get("sub") or "")]
+        elif kind == "bullets":
+            contributed = [str(item.get("text") or "") for item in (block.get("items") or [])]
+        elif kind == "steps":
+            for step in block.get("steps") or []:
+                contributed.append(str(step.get("title") or ""))
+                detail = step.get("detail")
+                if detail:
+                    contributed.append(str(detail))
+        elif kind == "compare":
+            for column in (block.get("left"), block.get("right")):
+                if not column:
+                    continue
+                if column.get("heading"):
+                    contributed.append(str(column["heading"]))
+                contributed.extend(str(value) for value in (column.get("items") or []))
+        elif kind == "quote":
+            contributed = [str(block.get("text") or ""), str(block.get("citation") or "")]
+        elif kind == "visual":
+            if block.get("caption"):
+                contributed = [str(block["caption"])]
+        elif kind == "note":
+            contributed = [str(block.get("text") or "")]
+        for unit in contributed:
+            if unit:
+                units.append((unit, block_index))
+    return units
 
 
 def resolve_content_ref(slide: dict[str, Any], content_ref: str) -> str | None:
@@ -194,7 +402,10 @@ def _normalized_text(value: Any) -> str:
 def _ref_covers(element_ref: str, expected_ref: str) -> bool:
     if element_ref == expected_ref:
         return True
-    if element_ref == "body" and (expected_ref.startswith("body.") or expected_ref.startswith("blocks.")):
+    # body 聚合引用，或任一 body.N 单项文本框，都视为覆盖正文/内容块引用。
+    # 文本是否真正覆盖由 render_coverage 的 expected_text 匹配兜底，因此
+    # 布局可以把正文拆成多个独立文本框而不误报内容缺失。
+    if element_ref.startswith("body") and (expected_ref.startswith("body.") or expected_ref.startswith("blocks.")):
         return True
     if element_ref == "blocks" and expected_ref.startswith("blocks."):
         return True

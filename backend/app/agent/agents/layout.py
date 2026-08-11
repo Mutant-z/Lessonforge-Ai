@@ -10,6 +10,7 @@ from app.agent.agents.base import Agent
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, ToolCall
 from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs, semantic_body_texts
+from app.agent.layouts.metrics import estimate_text_height
 from app.renderers.presentation_builder import SLIDE_HEIGHT, SLIDE_WIDTH
 
 MARGIN_X = 0.65
@@ -309,7 +310,7 @@ class LayoutAgent(Agent):
         # 条目过多（正文 + 结构化块叠加）时退回单框，避免逐条溢出画布底部。
         body_refs = semantic_body_refs(slide)
         if len(body_refs) > MAX_BODY_ITEMS:
-            body_h = _estimate_height(body, body_w, BODY_FONT)
+            body_h = estimate_text_height("\n".join(body), body_w, BODY_FONT)
             body_h = max(2.0, min(4.4, body_h))
             elements.append({"kind": "textbox", "role": "body", "text": "\n".join(body),
                              "content_ref": "body",

@@ -2,7 +2,6 @@
 
 没有 LibreOffice 的环境也能用几何 + 字宽估算做主要闸门。
 """
-import math
 from pathlib import Path
 from typing import Any
 

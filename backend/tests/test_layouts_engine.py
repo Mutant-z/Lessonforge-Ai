@@ -33,3 +33,13 @@ def test_estimate_text_height_multiline_and_min():
     multi = estimate_text_height("一二三\n四五六", 3.0, 18)
     single = estimate_text_height("一二三", 3.0, 18)
     assert multi > single  # 换行增加行数
+
+
+def test_estimate_text_height_aggregate_box_is_sum_not_max():
+    # layout 的 >6 条聚合单框回退需要整框高度 = 各条目高度之和，而非单条最大值。
+    # 每条约 2 行（24 个 CJK 字符 @18pt / 3in 宽框，每行 12 字）。
+    items = ["十个中文字符" * 4] * 7
+    joined = "\n".join(items)
+    total = sum(estimate_text_height(item, 3.0, 18) for item in items)
+    assert estimate_text_height(joined, 3.0, 18) == total
+    assert total > estimate_text_height(items[0], 3.0, 18)  # 求和 > 最大单条

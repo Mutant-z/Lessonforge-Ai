@@ -565,6 +565,10 @@ class AgentMessage(Base, TimestampMixin):
     module_type: Mapped[str] = mapped_column(String(40), index=True)
     role: Mapped[str] = mapped_column(String(20))
     content: Mapped[str] = mapped_column(Text)
+    # Scope/modality are execution metadata, not user-authored prose.  Keeping
+    # them structured prevents UI labels such as [活动页面] from polluting LLM
+    # intent parsing and the visible conversation transcript.
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="completed")
     artifact_id: Mapped[str | None] = mapped_column(ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True)
 

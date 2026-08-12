@@ -4,7 +4,9 @@ import asyncio
 import pytest
 from sqlalchemy import select
 
-from app.agent.pipeline import PipelineRuntime, build_plan, run_agent_loop
+from app.agent.pipeline import PipelineRuntime, _agent_call, build_plan, run_agent_loop
+from app.agent.agents.layout import LayoutAgent
+from app.agent.layouts.engine import compile_layout
 from app.agent.schemas import AgentDecision, PPTAgentError, SlideLayoutArtifact, ToolCall
 from app.agent.artifacts import PipelineArtifactManager
 from app.agent.events import PipelineEventEmitter
@@ -29,6 +31,110 @@ class _ScriptedProvider:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+@pytest.mark.asyncio
+async def test_confirmed_layout_candidate_bypasses_provider_and_clears_second_confirmation():
+    source = {
+        "id": "slide_03", "page_type": "objectives", "title": "预习目标",
+        "body": ["理解浮力本质", "澄清深度误区", "推导核心原理"],
+        "blocks": [{
+            "kind": "steps", "steps": [
+                {"title": "任务一", "detail": "分析上下表面压力差"},
+                {"title": "任务二", "detail": "辨析完全浸没后的浮力"},
+                {"title": "任务三", "detail": "归纳阿基米德原理"},
+            ],
+        }],
+        "elements": [
+            {"kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "预习目标", "x": 2.45, "y": 0.55, "w": 9.5, "h": 0.8,
+             "style": {"size": 28}},
+            *[
+                {"kind": "textbox", "role": "body", "content_ref": f"body.{index}",
+                 "text": text, "x": 2.45 + index * 2.7, "y": 1.7,
+                 "w": 2.3, "h": 0.6, "style": {"size": 14}}
+                for index, text in enumerate(("理解浮力本质", "澄清深度误区", "推导核心原理"))
+            ],
+        ],
+    }
+    candidate = compile_layout(
+        "lessonforge_deck_smart_ai", source,
+        {
+            "slide_id": "slide_03", "layout_type": "steps_horizontal",
+            "style": {"font_tier": "spacious", "font_scale": 1.04, "gap_scale": 1.3},
+            "objectives": [
+                {"metric": "font_size", "direction": "increase", "hard_requirement": True},
+                {"metric": "vertical_utilization", "direction": "increase", "hard_requirement": True},
+            ],
+            "quality_mode": "polish_v2",
+        },
+    )
+    candidate_id = str(candidate["selected_candidate_id"])
+    candidate["requires_candidate_confirmation"] = True
+    candidate["candidate_rankings"] = [{"candidate_id": "must-not-render-again"}]
+    runtime = type("ConfirmedRuntime", (), {})()
+    runtime.provider = object()  # No provider methods: any LLM call would fail this test.
+    runtime.layout_engine_params = {
+        "confirmed_candidate": candidate,
+        "confirmed_candidate_id": candidate_id,
+        "quality_mode": "polish_v2",
+    }
+    runtime.repair_mode = ""
+    runtime.emitter = None
+    runtime.selected_slide_ids = ["slide_03"]
+    runtime.baseline_slides = [source]
+    runtime.content_policy = "preserve"
+    runtime.artifacts = None
+    runtime.preferred_template = "lessonforge_deck_smart_ai"
+    runtime.active_intent = "LAYOUT_ONLY"
+    runtime.layout_compile_results = []
+    runtime.tool_context = ToolContext(runtime=runtime)
+
+    decision = await _agent_call(runtime, "layout", LayoutAgent(), 0)
+
+    applied = decision.output["slides"][0]
+    assert [
+        (item["kind"], item.get("content_ref"), item["x"], item["y"], item["w"], item["h"], item.get("style") or {})
+        for item in applied["elements"]
+    ] == [
+        (item["kind"], item.get("content_ref"), item["x"], item["y"], item["w"], item["h"], item.get("style") or {})
+        for item in candidate["elements"]
+    ]
+    assert applied["selected_candidate_id"] == candidate_id
+    assert applied["requires_candidate_confirmation"] is False
+    assert applied["candidate_rankings"] == []
+    assert runtime.layout_compile_results[0]["selected_candidate_id"] == candidate_id
+    assert runtime.layout_compile_results[0]["requires_candidate_confirmation"] is False
+    assert runtime.layout_compile_results[0]["candidate_rankings"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_preserves_original_exception_without_shadowing_ppt_error(monkeypatch):
+    """Regression for b2ae2c7b: local imports must not cause UnboundLocalError."""
+    from types import SimpleNamespace
+
+    from app.agent import pipeline as pipeline_module
+    from app.agent.schemas import AgentSpec, PipelinePlan
+
+    async def fail_agent_call(*_args, **_kwargs):
+        raise ValueError("layout compiler sentinel")
+
+    class Emitter:
+        async def agent_started(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(pipeline_module, "_agent_call", fail_agent_call)
+    runtime = SimpleNamespace(
+        tool_context=SimpleNamespace(ctx=None), pause_requested=lambda: False,
+        current_agent_key="", context=SimpleNamespace(
+            current_agent="", to_prompt=lambda _key: "",
+        ),
+        emitter=Emitter(), _steps=0,
+    )
+    plan = PipelinePlan(agents=[AgentSpec(key="layout", role="layout", max_steps=1)])
+
+    with pytest.raises(ValueError, match="layout compiler sentinel"):
+        await run_agent_loop(runtime, plan, start_step=0)
 
 
 async def _create_course(client, headers):
@@ -285,6 +391,13 @@ async def test_locked_image_layout_tool_failure_aborts_instead_of_reaching_qa(cl
     assert caught.value.code == "layout_incomplete"
     assert runtime.builder.to_ppt_content() == before
 
+    # The same failure in a normal layout run used to reference a function-
+    # local PPTAgentError import that was only assigned in IMAGE_UPDATE.
+    runtime.active_intent = "LAYOUT_ONLY"
+    with pytest.raises(PPTAgentError) as caught:
+        await _execute_tool_call(runtime, "ppt_editor", call, runtime.tool_context)
+    assert caught.value.code == "layout_incomplete"
+
 
 @pytest.mark.asyncio
 async def test_local_edit_tools_and_qa_cannot_escape_selected_slide(client, auth_headers):
@@ -317,7 +430,12 @@ async def test_local_edit_tools_and_qa_cannot_escape_selected_slide(client, auth
 
     layout = await execute_tool("layout_slide_batch", runtime.tool_context, {"layouts": [
         {"slide_id": "slide_01", "layout_type": "hero", "elements": [
-            {"kind": "textbox", "role": "title", "text": "LLM 新首页", "x": 0.8, "y": 1.2, "w": 5.0, "h": 1.2},
+            {"kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "LLM 新首页", "x": 0.8, "y": 1.2, "w": 5.0, "h": 1.2},
+            {"kind": "textbox", "role": "body", "content_ref": "body",
+             "text": "a", "x": 0.8, "y": 2.6, "w": 5.0, "h": 0.8},
+            {"kind": "textbox", "role": "purpose", "content_ref": "purpose",
+             "text": "p", "x": 0.8, "y": 3.6, "w": 5.0, "h": 0.8},
         ]},
         {"slide_id": "slide_02", "layout_type": "bad", "elements": [
             {"kind": "textbox", "role": "title", "text": "越权", "x": 0.8, "y": 1.2, "w": 5.0, "h": 1.2},
@@ -370,7 +488,10 @@ async def test_real_provider_layout_is_recomputed_as_executable_geometry(client,
 
     assert provider.calls == 1
     assert decision.output["slides"][0]["slide_id"] == "slide_01"
-    assert len(decision.output["slides"][0]["elements"]) == 2
+    elements = decision.output["slides"][0]["elements"]
+    semantic_elements = [item for item in elements if item.get("content_ref")]
+    assert {item["content_ref"] for item in semantic_elements} == {"title", "body", "purpose"}
+    assert all(float(item["x"]) >= 2.2 for item in semantic_elements)
 
 
 @pytest.mark.asyncio

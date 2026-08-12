@@ -38,6 +38,7 @@ class SlideContentAgent(Agent):
             "每条≤25字、正文与内容块合计≤120字，严格遵守 ppt_design_knowledge 密度上限。\n"
             "内容块只能使用这些结构：lead/bullets/steps/compare/quote/visual/note，"
             "不要发明其他结构类型（如 cards）。\n"
+            "steps 块必须写成 {kind:'steps',steps:[{title,detail}]}，步骤说明字段只能用 detail。\n"
             "正文与内容块条目不要加装饰符号（🔹/•/-/* 等），每条含任何符号在内不超过25字。"
             if is_revision else ""
         )

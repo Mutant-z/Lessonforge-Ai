@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.agent.runtime import PPTAgentRuntime
-from app.agent.slide_rendering import semantic_content_hash
+from app.agent.slide_rendering import semantic_content_hash, semantic_visual_hash
 from app.models.entities import AgentChatSession, AgentMessage, Artifact, GenerationEvent, GenerationRun, PipelineRun, PPTAgentInstruction
 from app.agent.tools.asset_tools import _resolve_image_config
 from app.renderers.presentation_builder import PresentationBuilder
@@ -142,33 +142,59 @@ async def test_run_centric_api_and_slide_revisions(client, auth_headers):
 
     created = await client.post("/api/v1/ppt-agent/runs", headers=auth_headers, json={
         "course_id": course_id,
-        "instruction": "润色一下当前页",
-        "selected_slide_ids": [artifact["content_json"]["slides"][1]["id"]],
+        "instruction": "将当前页的标题和正文字号放大一点",
+        "target_slide_ids": [artifact["content_json"]["slides"][1]["id"]],
+        "active_slide_id": artifact["content_json"]["slides"][1]["id"],
+        "modality": "layout",
     })
     assert created.status_code == 202, created.text
     assert created.json()["message_id"]
-    updated = await wait_for(
-        client, auth_headers, f"/api/v1/courses/{course_id}/project",
-        lambda item: next(t for t in item["tasks"] if t["task_type"] == "ppt")["current_artifact"]["version"] == artifact["version"] + 1,
-    )
+    terminal = None
+    for _ in range(600):
+        response = await client.get(
+            f"/api/v1/ppt-agent/runs/{created.json()['run_id']}", headers=auth_headers,
+        )
+        if response.status_code == 200:
+            terminal = response.json()
+            if terminal["status"] in {"completed", "failed", "cancelled"}:
+                break
+        else:
+            assert response.status_code == 404, response.text
+        await asyncio.sleep(0.02)
+    assert terminal is not None
+    assert terminal["status"] == "completed", terminal
+    updated = (await client.get(
+        f"/api/v1/courses/{course_id}/project", headers=auth_headers,
+    )).json()
     v2 = next(t for t in updated["tasks"] if t["task_type"] == "ppt")["current_artifact"]
     before = artifact["content_json"]["slides"]
     after = v2["content_json"]["slides"]
-    assert after[1]["title"].endswith("（润色版）")
-    assert [(item["id"], item["title"], item.get("body")) for item in after[2:]] == [
-        (item["id"], item["title"], item.get("body")) for item in before[2:]
-    ]
+    result_status = terminal["plan"]["result_status"]
+    assert result_status in {"applied", "partial", "no_change"}
+    if result_status == "no_change":
+        # A dense page may have no safe 10% enlargement.  This is a successful
+        # no-op and must not create an empty version.
+        assert v2["id"] == artifact["id"]
+        assert v2["version"] == artifact["version"]
+    else:
+        assert v2["version"] == artifact["version"] + 1
+        assert semantic_content_hash(after[1]) == semantic_content_hash(before[1])
+        assert semantic_visual_hash(after[1]) != semantic_visual_hash(before[1])
+        assert [item for index, item in enumerate(after) if index != 1] == [
+            item for index, item in enumerate(before) if index != 1
+        ]
     async with SessionLocal() as db:
         patches = list(await db.scalars(select(GenerationEvent).where(
             GenerationEvent.run_id == created.json()["run_id"],
             GenerationEvent.event_type == "artifact_patch",
         ).order_by(GenerationEvent.id)))
-    assert len(patches) >= 2, "目标页应至少产生内容和布局两次增量 patch"
-    assert {item["path"] for event in patches for item in event.data_json["patch"]} == {"/slides/1"}
+    if result_status != "no_change":
+        assert patches, "目标页应产生布局增量 patch"
+        assert {item["path"] for event in patches for item in event.data_json["patch"]} == {"/slides/1"}
     v2_slides = (await client.get(f"/api/v1/ppt-agent/artifacts/{v2['id']}/slides", headers=auth_headers)).json()["slides"]
     history = await client.get(f"/api/v1/ppt-agent/slides/{v2_slides[0]['id']}/revisions", headers=auth_headers)
     assert history.status_code == 200
-    assert len(history.json()["revisions"]) >= 2
+    assert len(history.json()["revisions"]) >= (2 if result_status != "no_change" else 1)
 
 
 @pytest.mark.asyncio
@@ -356,7 +382,7 @@ async def test_strict_image_runtime_records_real_asset_and_add_image_evidence(cl
 
 @pytest.mark.asyncio
 async def test_create_run_accepts_modality(client, auth_headers):
-    """POST /ppt-agent/runs 带 modality=layout → 202 且消息内容带 [范围:布局] 前缀。"""
+    """Structured scope is persisted without polluting the visible message."""
     course_id = await ready_course(client, auth_headers, model_name="Modality Scope Mock")
     project = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
     ppt_task = next(item for item in project["tasks"] if item["task_type"] == "ppt")
@@ -368,9 +394,13 @@ async def test_create_run_accepts_modality(client, auth_headers):
         "instruction": "让这一页更整齐",
         "selected_slide_ids": [slide_id],
         "modality": "layout",
+        "active_slide_id": slide_id,
     })
     assert created.status_code == 202, created.text
     async with SessionLocal() as db:
         message = await db.scalar(select(AgentMessage).where(AgentMessage.id == created.json()["message_id"]))
     assert message is not None
-    assert "[范围:布局]" in message.content
+    assert message.content == "让这一页更整齐"
+    assert message.metadata_json["modality"] == "layout"
+    assert message.metadata_json["target_slide_ids"] == [slide_id]
+    assert message.metadata_json["active_slide_id"] == slide_id

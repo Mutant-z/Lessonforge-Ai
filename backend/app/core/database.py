@@ -81,6 +81,7 @@ async def create_schema() -> None:
                     "task_id": "VARCHAR(36)",
                     "run_id": "VARCHAR(36)",
                     "status": "VARCHAR(20) NOT NULL DEFAULT 'completed'",
+                    "metadata_json": "JSON NOT NULL DEFAULT '{}'",
                 },
                 "course_tasks": {
                     "current_agent_profile_id": "VARCHAR(36)",

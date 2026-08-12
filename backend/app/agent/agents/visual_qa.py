@@ -35,13 +35,21 @@ class VisualQaAgent(Agent):
         data = live_qa or (qa or {}).get("data", {})
         issues = data.get("issues") or []
         severity = data.get("severity_counts") or {}
+        qa_level = str(data.get("qa_level") or "geometry")
+        qa_label = {"geometry": "几何 QA", "raster": "真实渲染 QA", "vision": "视觉 QA"}.get(qa_level, "QA")
         target_agents = sorted({issue.get("target_agent", "ppt_editor") for issue in issues if issue.get("severity") in {"critical", "major"}})
         return AgentDecision(
             completed=True,
             output=None,
             completed_artifact_id=(qa or {}).get("id"),
-            summary=f"QA 评分 {data.get('score', 0)}：{severity.get('critical', 0)} 严重 / {severity.get('major', 0)} 主要问题",
-            message=f"视觉 QA 完成，评分 {data.get('score', 0)}",
+            summary=(
+                f"{qa_label}：几何 {data.get('geometry_score', data.get('score', 0))}，"
+                f"{severity.get('critical', 0)} 严重 / {severity.get('major', 0)} 主要问题"
+            ),
+            message=(
+                f"{qa_label} 完成"
+                + ("（视觉能力已降级）" if data.get("degraded") else "")
+            ),
         )
 
 

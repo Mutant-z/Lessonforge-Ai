@@ -31,6 +31,7 @@ const EVENT_TYPES = new Set([
   'slide.layout.updated', 'slide.asset.updated', 'slide.rendering', 'slide.rendered', 'slide.qa',
   'slide.completed', 'slide.failed', 'qa.started', 'qa.issue', 'repair.started', 'repair.completed',
   'human.required', 'run.instruction.queued', 'run.instruction.merged', 'run.failed', 'run.cancelled',
+  'layout.compile.result', 'polish.result',
   'task_paused', 'task_resumed', 'run.paused', 'run.resumed',
 ]);
 

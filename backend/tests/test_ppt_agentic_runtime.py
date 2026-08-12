@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.runtime import INTENT_AGENTS, PPTAgentRuntime, infer_content_policy, infer_intent, normalize_agent_plan
+from app.agent.runtime import (
+    INTENT_AGENTS, PPTAgentRuntime, deterministic_layout_engine_params,
+    infer_content_policy, infer_intent, invalidate_revision_evidence,
+    normalize_agent_plan, _resolved_command_runtime,
+)
 from app.agent.schemas import AgentDecision, PPTAgentError, ToolResult
 from app.agent.skills.registry import SkillRegistry
 from app.renderers.presentation_builder import PresentationBuilder
@@ -19,6 +23,107 @@ def test_intent_routes_are_scoped():
     assert infer_intent("message", "请切换模板") == "TEMPLATE_SWITCH"
     assert infer_intent("message", "这页太密", ["S03"]) == "LAYOUT_ONLY"
     assert len(INTENT_AGENTS["VISUAL_QA"]) < len(INTENT_AGENTS["GENERATE"])
+
+
+def test_light_size_request_routes_without_content_agent_and_gets_scale_target():
+    instruction = "可以放大一点"
+    intent = infer_intent("message", instruction)
+    assert intent == "LAYOUT_ONLY"
+    assert infer_content_policy(intent, instruction) == "preserve"
+    assert normalize_agent_plan(intent, ["slide_content", "layout", "media"]) == [
+        "layout", "ppt_editor", "visual_qa",
+    ]
+    assert deterministic_layout_engine_params(intent, instruction) == {
+        "target_dimension": "size", "font_tier": "spacious",
+        "font_scale": 1.10, "size_scale": 1.10,
+    }
+    assert infer_intent("message", "放大图片") == "IMAGE_UPDATE"
+
+
+def test_merged_instruction_invalidates_builder_bound_qa_evidence():
+    from app.agent.context import ContextState
+
+    context = ContextState()
+    context.append_tool_result("call-1", "visual_qa", "run_qa", {"score": 100})
+    context.append_tool_result("call-2", "ppt_editor", "export_presentation", {"path": "x.pptx"})
+    pipeline = SimpleNamespace(
+        context=context, render_coverage={"slide_01": {"missing_refs": []}},
+        blocking_issues=[{"rule_id": "old"}], layout_compile_results=[{"slide_id": "slide_01"}],
+        affected_slide_ids=["slide_01"], mutation_applied=True,
+        mutation_evidence=[{"kind": "layout"}], result_status="partial", publishable=True,
+    )
+
+    invalidate_revision_evidence(pipeline)
+
+    assert context.get_tool_output("run_qa") is None
+    assert context.get_tool_output("export_presentation") == {"path": "x.pptx"}
+    assert pipeline.affected_slide_ids == []
+    assert pipeline.layout_compile_results == []
+    assert pipeline.publishable is False
+
+
+def test_generic_polish_gets_hard_eight_point_quality_gate():
+    from app.agent.polish_command import resolve_polish_command
+
+    command = resolve_polish_command(
+        "润色本页", active_slide_id="slide_03",
+        canonical_ids=["slide_01", "slide_02", "slide_03"],
+    )
+    intent, policy, chain, params = _resolved_command_runtime(command)
+
+    assert intent == "LAYOUT_ONLY"
+    assert policy == "preserve"
+    assert chain == ["layout", "ppt_editor", "visual_qa"]
+    quality = next(item for item in params["objectives"] if item["metric"] == "layout_quality")
+    assert quality["hard_requirement"] is True
+    assert quality["minimum_delta"] == pytest.approx(8.0)
+    assert params["polish_mode"] is True
+
+
+def test_image_geometry_command_routes_without_media_and_sets_deterministic_scale():
+    from app.agent.polish_command import resolve_polish_command
+
+    command = resolve_polish_command(
+        "把本页图片放大一点", active_slide_id="slide_03",
+        canonical_ids=["slide_01", "slide_02", "slide_03"],
+    )
+    intent, policy, chain, params = _resolved_command_runtime(command)
+
+    assert intent == "LAYOUT_ONLY"
+    assert policy == "preserve"
+    assert chain == ["layout", "ppt_editor", "visual_qa"]
+    assert params["image_geometry_only"] is True
+    assert params["image_geometry_action"] == "resize"
+    assert params["image_scale"] == pytest.approx(1.10)
+
+
+def test_current_page_scope_uses_active_slide_and_plain_request_stays_global():
+    from app.services.ppt_pipeline_service import _resolve_message_slide_ids
+
+    slides = [{"id": "slide_01"}, {"id": "slide_02"}]
+    assert _resolve_message_slide_ids(
+        "[活动页面:slide_02] 请把本页放大一点", slides,
+    ) == ["slide_02"]
+    assert _resolve_message_slide_ids("可以放大一点", slides) == []
+
+
+def test_identical_deterministic_qa_issue_is_not_retried_three_times():
+    from app.agent.runtime import qa_issue_fingerprint, should_retry_qa_issues
+
+    issues = [{
+        "slide_id": "slide_03", "rule_id": "layout.incomplete_absolute",
+        "missing_refs": ["body.0", "body.1", "body.2"],
+    }]
+    fingerprint = qa_issue_fingerprint(issues)
+    assert should_retry_qa_issues(
+        issues=issues, repair_round=0, max_rounds=3,
+        fingerprint=fingerprint, previous_fingerprint="", repair_mode="",
+    )
+    assert not should_retry_qa_issues(
+        issues=issues, repair_round=1, max_rounds=3,
+        fingerprint=fingerprint, previous_fingerprint=fingerprint,
+        repair_mode="deterministic",
+    )
 
 
 def test_modify_plan_rejects_revision_as_primary_writer_and_injects_dependencies():
@@ -147,6 +252,75 @@ async def test_content_edit_publish_gate_rejects_blocking_visual_qa():
 
     assert caught.value.code == "layout_incomplete"
     assert pipeline.publishable is False
+
+
+@pytest.mark.asyncio
+async def test_preserved_no_change_is_a_success_even_with_legacy_qa_issue():
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "高密度原页",
+        "purpose": "", "body": ["原正文"], "blocks": [],
+        "speaker_notes": "", "duration_seconds": 30,
+        "render_mode": "absolute", "elements": [{
+            "id": "E01", "kind": "textbox", "role": "body", "content_ref": "body",
+            "text": "原正文", "x": 2.2, "y": 1.7, "w": 8.0, "h": 1.0,
+        }],
+    }
+    pipeline = SimpleNamespace(
+        active_intent="LAYOUT_ONLY", content_policy="preserve",
+        context=SimpleNamespace(get_tool_output=lambda name: {
+            "issues": [{
+                "severity": "major", "slide_id": "slide_01",
+                "rule_id": "layout.blank_region", "message": "原页历史告警",
+            }],
+        } if name == "run_qa" else {}),
+        selected_slide_ids=["slide_01"], affected_slide_ids=[],
+        baseline_slides=[source], builder=PresentationBuilder().from_ppt_content({
+            "theme": "lessonforge_deck_academic", "slides": [source],
+        }),
+        blocking_issues=[], publishable=False, result_status="no_change",
+        layout_compile_results=[{"slide_id": "slide_01", "status": "preserved"}],
+    )
+    final = {}
+
+    await PPTAgentRuntime._assert_publishable(SimpleNamespace(pipeline=pipeline), final)
+
+    assert pipeline.publishable is True
+    assert final["result_status"] == "no_change"
+    assert pipeline.blocking_issues == []
+
+
+@pytest.mark.asyncio
+async def test_identical_text_edit_finishes_no_change_without_empty_version():
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "原标题",
+        "purpose": "", "body": ["原正文"], "blocks": [],
+        "speaker_notes": "原备注", "duration_seconds": 60,
+        "render_mode": "absolute", "elements": [
+            {"id": "T1", "kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "原标题", "x": 1.0, "y": 0.6, "w": 8.0, "h": 0.8},
+            {"id": "B1", "kind": "textbox", "role": "body", "content_ref": "body.0",
+             "text": "原正文", "x": 1.0, "y": 1.8, "w": 8.0, "h": 2.0},
+        ],
+    }
+    pipeline = SimpleNamespace(
+        active_intent="MODIFY", content_policy="edit",
+        context=SimpleNamespace(get_tool_output=lambda _name: {}),
+        selected_slide_ids=["slide_01"], affected_slide_ids=[],
+        baseline_slides=[source], builder=PresentationBuilder().from_ppt_content({
+            "theme": "lessonforge_deck_academic", "slides": [source],
+        }),
+        layout_engine_params={"operations": [{"domain": "text"}]},
+        blocking_issues=[], publishable=False, result_status="no_change",
+        layout_compile_results=[], mutation_applied=False,
+    )
+    final = {}
+
+    await PPTAgentRuntime._assert_publishable(SimpleNamespace(pipeline=pipeline), final)
+
+    assert pipeline.publishable is True
+    assert pipeline.result_status == "no_change"
+    assert pipeline.affected_slide_ids == []
+    assert final["result_status"] == "no_change"
 
 
 @pytest.mark.asyncio
@@ -626,7 +800,7 @@ async def test_extract_polish_intent_falls_back_on_mock():
 
 # ---- Task 10: 收敛性修复（几何类规则确定性收敛 + 单调性门禁） ----
 from app.agent.runtime import DETERMINISTIC_RULES  # noqa: E402
-from app.agent.slide_rendering import semantic_geometry_hash  # noqa: E402
+from app.agent.slide_rendering import semantic_geometry_hash, semantic_visual_hash  # noqa: E402
 
 
 def test_geometry_rules_are_deterministic():
@@ -642,3 +816,20 @@ def test_semantic_geometry_hash_detects_monotony():
     c = {"id": "S1", "elements": [{"kind": "textbox", "content_ref": "body.0", "x": 0.65, "y": 3.0, "w": 5, "h": 1}]}
     assert semantic_geometry_hash(a) == semantic_geometry_hash(b)
     assert semantic_geometry_hash(a) != semantic_geometry_hash(c)
+
+
+def test_semantic_visual_hash_accepts_real_typography_change():
+    original = {"elements": [{
+        "kind": "textbox", "role": "body", "content_ref": "body.0",
+        "x": 2.45, "y": 1.7, "w": 5, "h": 1,
+        "style": {"size": 14, "color": "muted"}, "text": "原文",
+    }]}
+    typography_changed = {"elements": [{
+        **original["elements"][0], "style": {"size": 18, "color": "text"},
+        "text": "不应由哈希判定的文案",
+    }]}
+    copy_only_changed = {"elements": [{**original["elements"][0], "text": "另一段文案"}]}
+
+    assert semantic_geometry_hash(original) == semantic_geometry_hash(typography_changed)
+    assert semantic_visual_hash(original) != semantic_visual_hash(typography_changed)
+    assert semantic_visual_hash(original) == semantic_visual_hash(copy_only_changed)

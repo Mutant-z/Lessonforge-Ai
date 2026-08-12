@@ -1449,9 +1449,29 @@ onMounted(() => {
 .tab-pane {
   flex: 1;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
+  padding-right: 4px;
+  padding-bottom: 12px;
+}
+
+.tab-pane::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.tab-pane::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.tab-pane::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.tab-pane::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* Tab 1: 空状态与卡片 */
@@ -1546,6 +1566,13 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 14px;
+  padding: 2px 2px 8px 2px;
+}
+
+@media (max-width: 900px) {
+  .model-cards-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .config-card {

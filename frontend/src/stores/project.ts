@@ -61,6 +61,7 @@ const TASK_EVENTS = [
   'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
   'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed',
   'qa.started', 'qa.issue', 'qa.completed', 'repair.started', 'repair.completed',
+  'layout.compile.result', 'polish.result',
   'human.required', 'run.instruction.queued', 'run.instruction.merged',
 ];
 
@@ -79,6 +80,7 @@ const PIPELINE_EVENT_TYPES = new Set([
   'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
   'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed', 'qa.started', 'qa.issue',
   'repair.started', 'repair.completed', 'human.required', 'run.instruction.queued', 'run.instruction.merged',
+  'layout.compile.result', 'polish.result',
 ]);
 
 function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessage[] {
@@ -338,6 +340,7 @@ export const useProjectStore = defineStore('project', {
       selectedSlideIds: string[] = [],
       resumeIfPaused = false,
       modality: PPTPolishModality = 'auto',
+      activeSlideId?: string,
     ) {
       const local: ProjectAgentMessage = {
         id: `local-${crypto.randomUUID()}`,
@@ -349,7 +352,7 @@ export const useProjectStore = defineStore('project', {
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
       try {
-        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds, resumeIfPaused, modality);
+        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds, resumeIfPaused, modality, activeSlideId);
         Object.assign(local, data.message, { status: 'completed' as const });
         if (this.currentTask) {
           this.currentTask.messages = deduplicateMessages([...(this.currentTask.messages || [])]);
@@ -363,7 +366,13 @@ export const useProjectStore = defineStore('project', {
         throw cause;
       }
     },
-    async createPPTRun(courseId: string, content: string, selectedSlideIds: string[] = [], modality: PPTPolishModality = 'auto') {
+    async createPPTRun(
+      courseId: string,
+      content: string,
+      selectedSlideIds: string[] = [],
+      modality: PPTPolishModality = 'auto',
+      activeSlideId?: string,
+    ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousTaskStatus = this.currentTask?.status;
       const previousPipelineEvents = this.pipelineEvents;
@@ -384,7 +393,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds, modality);
+        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds, modality, activeSlideId);
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {

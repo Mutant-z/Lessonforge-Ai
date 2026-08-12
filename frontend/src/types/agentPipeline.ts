@@ -3,6 +3,62 @@
 export type PipelineStatus =
   | 'queued' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
+export type PPTPolishResultStatus = 'applied' | 'partial' | 'no_change' | 'needs_confirmation';
+
+export interface PPTPolishObjectiveResult {
+  metric?: string;
+  direction?: string;
+  passed?: boolean;
+  met?: boolean;
+  achieved?: boolean;
+  baseline?: number;
+  final?: number;
+  delta?: number;
+  required_delta?: number;
+  message?: string;
+}
+
+export interface PPTLayoutCandidateRanking {
+  rank?: number;
+  candidate_id: string;
+  layout_type?: string;
+  style?: Record<string, unknown>;
+  quality_score?: number;
+  quality_delta?: number;
+  rank_score?: number;
+  objective_results?: PPTPolishObjectiveResult[];
+  preview_url?: string;
+  render_path?: string;
+  candidate_png?: string;
+}
+
+export interface PPTPolishPageResult {
+  slide_id: string;
+  status?: 'applied' | 'fallback' | 'preserved';
+  compile_status?: 'applied' | 'fallback' | 'preserved';
+  selected_candidate_id?: string | null;
+  requested_layout?: string;
+  effective_layout?: string;
+  baseline_metrics?: Record<string, number>;
+  final_metrics?: Record<string, number>;
+  quality_delta?: number;
+  qa_level?: 'geometry' | 'raster' | 'vision';
+  degraded?: boolean;
+  warnings?: string[];
+  objective_results?: PPTPolishObjectiveResult[];
+  candidate_rankings?: PPTLayoutCandidateRanking[];
+  candidate_score_gap?: number | null;
+  requires_candidate_confirmation?: boolean;
+}
+
+export interface PPTPolishResult {
+  result_status: PPTPolishResultStatus;
+  page_results: PPTPolishPageResult[];
+  applied_slide_ids?: string[];
+  preserved_slide_ids?: string[];
+  warnings?: string[];
+}
+
 export interface PipelineRunInfo {
   id: string;
   generation_run_id: string;
@@ -12,7 +68,7 @@ export interface PipelineRunInfo {
   current_step_index: number;
   revision_round: number;
   max_revision_rounds: number;
-  plan: Record<string, unknown>;
+  plan: Record<string, unknown> & Partial<PPTPolishResult>;
   checkpoint: Record<string, unknown>;
   token_usage: Record<string, unknown>;
   error: { code?: string; message?: string } | null;

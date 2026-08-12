@@ -3,7 +3,7 @@ from typing import Any, Literal, TypedDict
 
 
 PPTIntent = Literal[
-    "GENERATE", "MODIFY", "LOCAL_REGENERATE", "GLOBAL_OPTIMIZE",
+    "GENERATE", "MODIFY", "LOCAL_REGENERATE", "LAYOUT_ONLY", "GLOBAL_OPTIMIZE",
     "STYLE_CHANGE", "TEMPLATE_SWITCH", "CONTENT_UPDATE", "IMAGE_UPDATE",
     "VISUAL_QA", "EXPORT",
 ]
@@ -44,6 +44,10 @@ class PPTAgentState(TypedDict, total=False):
     rendered_slides: dict[str, str]
     qa_results: list[dict[str, Any]]
     repair_round: int
+    repair_mode: str
+    repair_issue_fingerprint: str
+    layout_compile_results: list[dict[str, Any]]
+    result_status: str
     current_slide: str | None
     current_agent: str
     planned_agents: list[str]

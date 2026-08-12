@@ -9,6 +9,7 @@ import { usePipelineStore } from '../../../stores/pipeline';
 import { useModelConfigStore } from '../../../stores/modelConfigs';
 import type { PPTContent, PPTTemplate } from '../../../types';
 import type { PPTPolishModality } from '../../../types/project';
+import type { PPTPolishPageResult, PPTPolishResult } from '../../../types/agentPipeline';
 import { PIPELINE_STATUS_LABELS } from '../../../types/agentPipeline';
 import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
@@ -41,6 +42,83 @@ const pausing = computed(() => status.value === 'pausing');
 const isRunning = computed(() => ['queued', 'running', 'pausing'].includes(status.value));
 const imageModelCandidates = computed(() => imageGenerationModels(modelConfigStore.configs));
 const bindingImageModel = ref(false);
+const humanResponsePending = ref('');
+
+function polishResultFrom(value: unknown): PPTPolishResult | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, any>;
+  const resultStatus = String(record.result_status || '');
+  if (!['applied', 'partial', 'no_change', 'needs_confirmation'].includes(resultStatus)) return null;
+  return {
+    result_status: resultStatus as PPTPolishResult['result_status'],
+    page_results: Array.isArray(record.page_results) ? record.page_results : [],
+    applied_slide_ids: Array.isArray(record.applied_slide_ids) ? record.applied_slide_ids : undefined,
+    preserved_slide_ids: Array.isArray(record.preserved_slide_ids) ? record.preserved_slide_ids : undefined,
+    warnings: Array.isArray(record.warnings) ? record.warnings : undefined,
+  };
+}
+
+const latestPolishResult = computed<PPTPolishResult | null>(() => {
+  const runId = String(pipelineStore.run?.generation_run_id || task.value?.active_run_id || '');
+  for (let index = pipelineStore.timeline.length - 1; index >= 0; index -= 1) {
+    const event = pipelineStore.timeline[index];
+    if (event.type !== 'polish.result') continue;
+    if (runId && event.data?.run_id && String(event.data.run_id) !== runId) continue;
+    const parsed = polishResultFrom(event.data?.payload || event.data);
+    if (parsed) return parsed;
+  }
+  return polishResultFrom(pipelineStore.run?.plan);
+});
+
+const latestQa = computed<Record<string, any> | null>(() => {
+  const runId = String(pipelineStore.run?.generation_run_id || task.value?.active_run_id || '');
+  for (let index = pipelineStore.timeline.length - 1; index >= 0; index -= 1) {
+    const event = pipelineStore.timeline[index];
+    if (!['qa_completed', 'qa.completed'].includes(event.type)) continue;
+    if (runId && event.data?.run_id && String(event.data.run_id) !== runId) continue;
+    return { ...(event.data || {}), ...((event.data?.payload as Record<string, any>) || {}) };
+  }
+  return null;
+});
+
+const polishSummary = computed(() => {
+  const result = latestPolishResult.value;
+  if (!result) return null;
+  const pages = result.page_results || [];
+  const applied = result.applied_slide_ids?.length
+    ?? pages.filter(page => !['preserved'].includes(String(page.status || page.compile_status))).length;
+  const preserved = result.preserved_slide_ids?.length
+    ?? pages.filter(page => String(page.status || page.compile_status) === 'preserved').length;
+  const qaLevel = String(latestQa.value?.qa_level || '');
+  const degraded = Boolean(latestQa.value?.degraded)
+    || qaLevel === 'geometry'
+    || pages.some(page => page.degraded || page.qa_level === 'geometry');
+  const labels: Record<PPTPolishResult['result_status'], string> = {
+    applied: applied ? `已安全润色 ${applied} 页` : '页面润色已完成',
+    partial: `已润色 ${applied} 页，${preserved} 页保留原状`,
+    no_change: '未发现可验证的安全改善，原版本保持不变',
+    needs_confirmation: '修改目标需要确认，本轮未创建新版本',
+  };
+  return {
+    status: result.result_status,
+    label: labels[result.result_status],
+    degraded,
+    qaLabel: qaLevel === 'vision' ? '视觉 QA' : qaLevel === 'raster' ? '真实渲染 QA' : degraded ? '几何 QA（降级）' : '',
+    pages,
+  };
+});
+
+function metricNumber(page: PPTPolishPageResult, key: string, side: 'baseline' | 'final'): number | null {
+  const metrics = side === 'baseline' ? page.baseline_metrics : page.final_metrics;
+  const value = metrics?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function formatMetric(value: number | null, percent = false): string {
+  if (value == null) return '—';
+  if (!percent) return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  return `${Math.round((Math.abs(value) <= 1 ? value * 100 : value))}%`;
+}
 
 async function ensureImageModelBinding() {
   if (!task.value || task.value.image_model_config_id || bindingImageModel.value) return;
@@ -156,8 +234,9 @@ async function loadTemplates() {
 
 async function send(content: string, modality: PPTPolishModality = 'auto') {
   const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
+  const activeSlideId = String(previewContent.value?.slides?.[activeSlideIndex.value]?.id || '');
   if (paused.value && runId) {
-    const result = await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, true, modality);
+    const result = await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, true, modality, activeSlideId);
     if (result.status === 'resumed' && pipelineStore.detail?.run) {
       pipelineStore.detail.run.status = 'queued';
     }
@@ -165,12 +244,12 @@ async function send(content: string, modality: PPTPolishModality = 'auto') {
     startPolling();
   }
   else if (isRunning.value && runId) {
-    await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, false, modality);
+    await projectStore.enqueuePPTInstruction(runId, content, selectedSlideIds.value, false, modality, activeSlideId);
     await loadDetail();
   }
   else {
     pipelineStore.beginRun();
-    await projectStore.createPPTRun(props.courseId, content, selectedSlideIds.value, modality);
+    await projectStore.createPPTRun(props.courseId, content, selectedSlideIds.value, modality, activeSlideId);
     await loadDetail();
   }
   targetSlideContext.value = null;
@@ -189,11 +268,25 @@ async function resume() {
   await loadDetail();
 }
 
-async function handleHumanResponse(requestId: string, choice: string) {
+async function handleHumanResponse(requestId: string, choice: string, data: Record<string, unknown> = {}) {
   const runId = pipelineStore.run?.generation_run_id;
-  if (!runId || !requestId) return;
-  await pipelineApi.humanResponse(runId, requestId, choice);
-  await loadDetail();
+  if (!runId || !requestId || humanResponsePending.value) return;
+  humanResponsePending.value = requestId;
+  try {
+    const result = await pipelineApi.humanResponse(runId, requestId, choice, data);
+    if (result.continuation_run_id) {
+      ElMessage.success('已确认方案，正在继续生成');
+      pipelineStore.beginRun();
+      await projectStore.refreshCurrentTask();
+      await loadDetail();
+      startPolling();
+    } else {
+      ElMessage.info(result.result_status === 'no_change' ? '已保留原版本' : '已记录你的选择');
+      await loadDetail();
+    }
+  } finally {
+    humanResponsePending.value = '';
+  }
 }
 
 function setModel(modelId: string) {
@@ -216,9 +309,14 @@ function requireImageModel() {
 function handleSelectSlide(index: number, additive = false) {
   const safeIndex = normalizeSlideIndex(index, previewContent.value?.slides?.length || 0);
   activeSlideIndex.value = safeIndex;
-  const next = updateSlideSelection(selectedSlideIndexes.value, safeIndex, additive);
-  selectedSlideIndexes.value = next;
-  targetSlideContext.value = next.size === 1 ? [...next][0] : null;
+  // Ordinary navigation changes only the browsed page. Cmd/Ctrl additive
+  // selection is an explicit targeting gesture; "修改本页" is the primary
+  // single-page targeting action.
+  if (additive) {
+    const next = updateSlideSelection(selectedSlideIndexes.value, safeIndex, true);
+    selectedSlideIndexes.value = next;
+    targetSlideContext.value = next.size === 1 ? [...next][0] : null;
+  }
   mobilePane.value = 'preview';
 }
 
@@ -234,6 +332,11 @@ function handleShowRepairDetail(index: number) {
   handleSelectSlide(index, false);
   // 胶片徽标点击 → 定位到该页并切到 Agent 侧（桌面两侧同屏时即时间线上下文）。
   mobilePane.value = 'agent';
+}
+
+function clearTargetSlides() {
+  targetSlideContext.value = null;
+  selectedSlideIndexes.value = new Set();
 }
 
 async function handleApplyTemplate(templateId: string) {
@@ -397,6 +500,39 @@ watch(
         </div>
       </header>
 
+      <section
+        v-if="polishSummary"
+        class="polish-result-summary"
+        :class="[`status-${polishSummary.status}`, { degraded: polishSummary.degraded }]"
+        aria-live="polite"
+      >
+        <div class="polish-result-head">
+          <span class="polish-result-dot" aria-hidden="true" />
+          <strong>{{ polishSummary.label }}</strong>
+          <span v-if="polishSummary.qaLabel" class="polish-qa-level">{{ polishSummary.qaLabel }}</span>
+        </div>
+        <div v-if="polishSummary.degraded" class="polish-degraded-note">
+          视觉 QA 已降级；结果未被当作视觉满分。
+        </div>
+        <div v-if="polishSummary.pages.length" class="polish-page-metrics">
+          <div v-for="page in polishSummary.pages.slice(0, 3)" :key="page.slide_id" class="polish-page-row">
+            <span class="polish-page-id">{{ page.slide_id }}</span>
+            <span v-if="metricNumber(page, 'quality_score', 'baseline') != null || metricNumber(page, 'quality_score', 'final') != null">
+              质量 {{ formatMetric(metricNumber(page, 'quality_score', 'baseline')) }} → {{ formatMetric(metricNumber(page, 'quality_score', 'final')) }}
+            </span>
+            <span v-if="metricNumber(page, 'vertical_utilization', 'baseline') != null || metricNumber(page, 'vertical_utilization', 'final') != null">
+              纵向利用 {{ formatMetric(metricNumber(page, 'vertical_utilization', 'baseline'), true) }} → {{ formatMetric(metricNumber(page, 'vertical_utilization', 'final'), true) }}
+            </span>
+            <span v-if="page.quality_delta != null" :class="page.quality_delta > 0 ? 'metric-positive' : 'metric-neutral'">
+              {{ page.quality_delta > 0 ? '+' : '' }}{{ page.quality_delta.toFixed(1) }}
+            </span>
+          </div>
+          <div v-if="polishSummary.pages.length > 3" class="polish-page-more">
+            另有 {{ polishSummary.pages.length - 3 }} 页结果可在执行明细中查看
+          </div>
+        </div>
+      </section>
+
       <AgentExecutionTimeline
         :items="pipelineStore.timeline"
         :task="task"
@@ -404,6 +540,7 @@ watch(
         :is-running="isRunning"
         :agent-thoughts="pipelineStore.agentThoughts"
         :agent-status-texts="pipelineStore.agentStatusTexts"
+        :human-response-pending="humanResponsePending"
         @select-slide="handleSelectSlide"
         @human-response="handleHumanResponse"
       />
@@ -418,7 +555,7 @@ watch(
         :image-model-available-count="imageModelCandidates.length"
         @send="send"
         @pause="pause"
-        @clear-target-slide="targetSlideContext = null"
+        @clear-target-slide="clearTargetSlides"
         @change-model="setModel"
         @change-image-model="setImageModel"
         @image-model-required="requireImageModel"
@@ -542,6 +679,90 @@ watch(
   align-items: center;
   gap: 8px;
 }
+
+.polish-result-summary {
+  flex-shrink: 0;
+  margin: 9px 12px 0;
+  padding: 9px 11px;
+  border: 1px solid #bbf7d0;
+  border-radius: 10px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 11px;
+}
+
+.polish-result-summary.status-partial,
+.polish-result-summary.degraded {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.polish-result-summary.status-no_change {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.polish-result-summary.status-needs_confirmation {
+  border-color: #c4b5fd;
+  background: #f5f3ff;
+  color: #5b21b6;
+}
+
+.polish-result-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.polish-result-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.polish-qa-level {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.polish-degraded-note {
+  margin: 4px 0 0 13px;
+  color: #b45309;
+}
+
+.polish-page-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(100, 116, 139, 0.18);
+}
+
+.polish-page-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 9px;
+  color: #64748b;
+}
+
+.polish-page-id {
+  color: #334155;
+  font-weight: 800;
+}
+
+.metric-positive { color: #15803d; font-weight: 800; }
+.metric-neutral { color: #64748b; font-weight: 700; }
+.polish-page-more { color: #94a3b8; }
 
 .pane-resizer {
   width: 7px;

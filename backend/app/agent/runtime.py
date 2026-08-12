@@ -5,7 +5,10 @@ honours explicit handoffs, and returns to the orchestrator before the next actio
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,11 +24,12 @@ from app.agent.schemas import OrchestratorActionDecision, OrchestratorPlanDecisi
 from app.agent.skills import SkillRegistry, get_skill_registry
 from app.agent.state import PPTAgentState, PPTIntent
 from app.agent.slide_rendering import (
-    render_coverage,
+    canonical_slide_id, render_coverage,
     runtime_baseline_slides,
     semantic_content_changed,
     semantic_content_hash,
-    semantic_geometry_hash,
+    semantic_visual_hash,
+    objective_result_passed,
 )
 from app.providers.llm.mock import MockProvider
 
@@ -76,8 +80,20 @@ EDIT_MARKERS = (
 LAYOUT_MARKERS = (
     "布局", "排版", "页面分布", "分布", "版式", "间距", "间隔", "留白", "空白",
     "太挤", "太密", "拥挤", "松散", "居中", "对齐", "字距", "行距", "挤成一团",
-    "挤在一起", "堆积", "空着", "太空",
+    "挤在一起", "堆积", "空着", "太空", "放大", "缩小", "字号", "字体大小",
+    "卡片大小", "元素大小", "大一点", "小一点",
 )
+
+POLISH_ACTION_INTENTS: dict[str, PPTIntent] = {
+    "layout_only": "LAYOUT_ONLY",
+    "text_polish": "MODIFY",
+    "image_only": "IMAGE_UPDATE",
+    "template_switch": "TEMPLATE_SWITCH",
+    "full_regenerate": "MODIFY",
+    "restore": "MODIFY",
+    "visual_qa": "VISUAL_QA",
+    "export": "EXPORT",
+}
 
 # 前端单页范围选择：消息前缀 [范围:布局/文字/图片] 显式限定模态（modality）。
 _MODALITY_PREFIXES = {
@@ -102,7 +118,31 @@ DETERMINISTIC_RULES = frozenset({
     "geometry.font_too_small", "geometry.min_margin", "geometry.min_gap",
     "geometry.title_in_rail", "layout.vertical_underuse", "layout.cluster_cramming",
     "layout.column_balance", "layout.blank_region", "layout.monotony",
+    "layout.incomplete_absolute", "content.not_rendered",
 })
+
+
+def qa_issue_fingerprint(issues: list[dict[str, Any]]) -> str:
+    """Stable identity for detecting a repair round that made no progress."""
+    return json.dumps(sorted(
+        (
+            str(item.get("slide_id") or ""),
+            str(item.get("rule_id") or ""),
+            tuple(str(ref) for ref in (item.get("missing_refs") or [])),
+        )
+        for item in issues
+    ), ensure_ascii=False)
+
+
+def should_retry_qa_issues(
+    *, issues: list[dict[str, Any]], repair_round: int, max_rounds: int,
+    fingerprint: str, previous_fingerprint: str, repair_mode: str,
+) -> bool:
+    """Allow one deterministic fallback, then stop an identical repair loop."""
+    if not issues or repair_round >= max_rounds:
+        return False
+    repeated = bool(fingerprint and fingerprint == previous_fingerprint)
+    return not (repeated and repair_mode == "deterministic")
 
 
 def _is_restore_request(text: str) -> bool:
@@ -184,6 +224,149 @@ def infer_content_policy(intent: str, instruction: str = "") -> str:
     return "edit"
 
 
+def deterministic_layout_engine_params(intent: str, instruction: str) -> dict[str, Any]:
+    """Fallback semantics for size requests when structured extraction is unavailable."""
+    if intent != "LAYOUT_ONLY":
+        return {}
+    if any(marker in instruction for marker in ("放大", "大一点", "字号", "字体大小", "卡片大小", "元素大小")):
+        return {
+            "target_dimension": "size", "font_tier": "spacious",
+            "font_scale": 1.10, "size_scale": 1.10,
+        }
+    if any(marker in instruction for marker in ("缩小", "小一点")):
+        return {
+            "target_dimension": "size", "font_tier": "compact",
+            "font_scale": 0.90, "size_scale": 0.90,
+        }
+    return {}
+
+
+def _resolved_command_runtime(command: Any) -> tuple[PPTIntent, str, list[str], dict[str, Any]]:
+    """Translate the canonical V2 command into one minimal executable chain."""
+    domains = {str(item.domain) for item in command.operations}
+    if "restore" in domains:
+        intent: PPTIntent = "MODIFY"
+        policy = "restore"
+        chain = ["layout", "ppt_editor", "visual_qa"]
+    elif "template" in domains:
+        intent = "TEMPLATE_SWITCH"
+        policy = "preserve"
+        chain = ["template_analysis", "layout", "ppt_editor", "visual_qa"]
+    elif "image_asset" in domains:
+        intent = "IMAGE_UPDATE"
+        policy = "preserve"
+        chain = ["visual_plan", "layout", "media", "ppt_editor", "visual_qa"]
+    elif domains & {"image_geometry"}:
+        # Existing images are repositioned through a visual_region-aware layout
+        # directive; the media generator must never run for geometry-only work.
+        intent = "LAYOUT_ONLY"
+        policy = "preserve"
+        chain = ["layout", "ppt_editor", "visual_qa"]
+    elif "text" in domains:
+        intent = "MODIFY"
+        policy = "edit"
+        chain = ["slide_content"]
+        if domains & {"layout", "typography", "style"}:
+            chain.append("layout")
+        chain.extend(["ppt_editor", "visual_qa"])
+    elif domains & {"layout", "typography", "style"}:
+        intent = "LAYOUT_ONLY"
+        policy = "preserve"
+        chain = ["layout", "ppt_editor", "visual_qa"]
+    elif "qa" in domains:
+        intent = "VISUAL_QA"
+        policy = "preserve"
+        chain = ["visual_qa"]
+    elif "export" in domains:
+        intent = "EXPORT"
+        policy = "preserve"
+        chain = ["ppt_editor", "visual_qa"]
+    else:
+        intent = "LAYOUT_ONLY"
+        policy = "preserve"
+        chain = ["layout", "ppt_editor", "visual_qa"]
+
+    objectives = [item.model_dump() for item in command.objectives]
+    operations = [item.model_dump() for item in command.operations]
+    params: dict[str, Any] = {
+        "quality_mode": "polish_v2",
+        "objectives": objectives,
+        "operations": operations,
+        "strength": next((item.strength for item in command.operations), "moderate"),
+        "minimum_quality_delta": 8.0,
+    }
+    # A generic aesthetic polish has no single user metric, but it still must
+    # prove a meaningful deterministic improvement.  The command resolver
+    # intentionally keeps its inferred whitespace/alignment objectives soft;
+    # add the global quality objective only to the executable directive.
+    layout_domains = domains & {"layout", "typography", "style"}
+    if layout_domains and not any(bool(item.get("hard_requirement", True)) for item in objectives):
+        params["objectives"] = [
+            *objectives,
+            {
+                "metric": "layout_quality", "direction": "increase",
+                "minimum_delta": 8.0, "priority": 100,
+                "hard_requirement": True, "source": "runtime_gate",
+            },
+        ]
+        params["polish_mode"] = True
+    font = next((item for item in command.objectives if item.metric == "font_size"), None)
+    if font is not None:
+        delta = max(float(font.minimum_delta or 0.05), 0.10 if params["strength"] == "subtle" else 0.05)
+        params.update({
+            "target_dimension": "size",
+            "font_scale": 1.0 - delta if font.direction == "decrease" else 1.0 + delta,
+            "size_scale": 1.0 - delta if font.direction == "decrease" else 1.0 + delta,
+            "font_tier": "compact" if font.direction == "decrease" else "spacious",
+        })
+    spacing = next((item for item in command.objectives if item.metric == "spacing"), None)
+    if spacing is not None:
+        params["gap_scale"] = 0.9 if spacing.direction == "decrease" else 1.2
+    if any(item.metric in {"vertical_utilization", "horizontal_utilization", "whitespace_balance"} for item in command.objectives):
+        params["prefer_columns"] = True
+        params.setdefault("target_dimension", "overall")
+    if "style" in domains or any(item.metric == "contrast" for item in command.objectives):
+        params["highlight"] = True
+    if "image_geometry" in domains:
+        image_operation = next(
+            (item for item in command.operations if item.domain == "image_geometry"), None,
+        )
+        image_objective = next(
+            (item for item in command.objectives if item.metric == "image_scale"), None,
+        )
+        direction = str(getattr(image_objective, "direction", "optimize"))
+        delta = max(float(getattr(image_objective, "minimum_delta", 0.10) or 0.10), 0.02)
+        params.update({
+            "image_geometry_only": True,
+            "image_geometry_action": str(getattr(image_operation, "action", "polish")),
+            "target_dimension": "image_scale" if image_objective is not None else "image_geometry",
+            "image_scale": (
+                1.0 - delta if direction == "decrease"
+                else 1.0 + delta if direction == "increase"
+                else 1.08
+            ),
+        })
+    return intent, policy, chain, params
+
+
+def invalidate_revision_evidence(pipeline: Any) -> None:
+    """Invalidate builder-bound evidence before executing a merged command."""
+    pipeline.context.tool_results = [
+        block for block in pipeline.context.tool_results
+        if block.tool_name not in {
+            "render_preview", "run_qa", "run_content_qa", "get_qa_report",
+        }
+    ]
+    pipeline.render_coverage = {}
+    pipeline.blocking_issues = []
+    pipeline.layout_compile_results = []
+    pipeline.affected_slide_ids = []
+    pipeline.mutation_applied = False
+    pipeline.mutation_evidence = []
+    pipeline.result_status = "applied"
+    pipeline.publishable = False
+
+
 @dataclass
 class PPTAgentRuntime:
     pipeline: PipelineRuntime
@@ -218,6 +401,7 @@ class PPTAgentRuntime:
             selected_skills=[], loaded_skills={}, tool_results=[], assets=[], qa_results=[],
             planned_agents=[], remaining_agents=[], completed_agents=[],
             token_usage=dict(self.pipeline.token_usage), repair_round=0,
+            repair_mode="", repair_issue_fingerprint="",
             current_agent="", next_agent=None, status="running", error=None,
         )
 
@@ -319,6 +503,8 @@ class PPTAgentRuntime:
             selected_slide_ids = list(state.get("selected_slide_ids") or [])
             effective_intent = state.get("intent", "GENERATE")
             queued_received = False
+            queued_confirmation = None
+            queued_analysis_refresh = False
             from sqlalchemy import select
             from app.core.database import SessionLocal
             from app.models.entities import PPTAgentInstruction, PipelineRun
@@ -329,39 +515,206 @@ class PPTAgentRuntime:
                 ).order_by(PPTAgentInstruction.created_at)))
                 queued_received = bool(queued)
                 for instruction in queued:
+                    instruction_metadata = dict(
+                        (instruction.result_json or {}).get("request_metadata") or {}
+                    )
+                    if instruction_metadata:
+                        self.pipeline.request_metadata = instruction_metadata
                     urgent = any(word in instruction.content for word in ("立即", "先停止", "优先处理"))
                     instruction.disposition = "interrupted" if urgent else "merged"
                     self.pipeline.context.user_instruction = "\n".join(filter(None, [self.pipeline.context.user_instruction, instruction.content]))
-                    selected_slide_ids = list(dict.fromkeys([*selected_slide_ids, *instruction.selected_slide_ids_json]))
+                    instruction_scope = list(instruction.selected_slide_ids_json or [])
+                    if instruction_scope:
+                        canonical = [
+                            str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+                        ]
+                        # During initial generation the canonical deck does not
+                        # exist yet.  Keep the queued scope for the later page
+                        # agents; strict alias validation starts as soon as a
+                        # source PPT is present for a revision run.
+                        if canonical:
+                            normalized = [canonical_slide_id(value, canonical) for value in instruction_scope]
+                            if any(value is None for value in normalized):
+                                raise PPTAgentError(
+                                    "invalid_slide_scope", "追加指令包含不属于当前 PPT 的页面范围。",
+                                    retryable=False, details={"requested_slide_ids": instruction_scope},
+                                )
+                            instruction_scope = [str(value) for value in normalized if value]
+                    if not instruction_scope and any(
+                        marker in instruction.content for marker in ("本页", "当前页", "这一页", "该页")
+                    ):
+                        active_id = str(instruction_metadata.get("active_slide_id") or "")
+                        if not active_id:  # compatibility for historical rows
+                            active_match = re.search(r"\[活动页面:([^\]]+)\]", instruction.content)
+                            active_id = active_match.group(1).strip() if active_match else ""
+                        canonical = {str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)}
+                        if active_id in canonical:
+                            instruction_scope = [active_id]
                     messages.append({"role": "user", "content": instruction.content, "instruction_id": instruction.id})
                     await self.pipeline.emitter.emit_domain(
                         "run.instruction.interrupted" if urgent else "run.instruction.merged",
                         message="新指令已合并到当前计划" if not urgent else "新指令将在当前 Agent 边界优先执行",
                         payload={"instruction_id": instruction.id, "selected_slide_ids": instruction.selected_slide_ids_json},
                     )
-                    effective_intent = infer_intent("message", instruction.content, selected_slide_ids)
-                    self.pipeline.active_intent = effective_intent
-                    self.pipeline.content_policy = infer_content_policy(effective_intent, instruction.content)
-                    instruction_agents = normalize_agent_plan(
-                        effective_intent,
-                        [key for key in INTENT_AGENTS[effective_intent] if key in AGENT_BY_KEY],
-                        self.pipeline.content_policy,
-                    )
+                    canonical = [
+                        str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+                    ]
+                    if canonical:
+                        # New runs and queued follow-ups share the same V2
+                        # resolver.  Structured scope/modality is authoritative;
+                        # the visible message remains untouched.
+                        from app.agent.intents import (
+                            resolve_polish_command, resolved_command_to_polish_intent,
+                        )
+                        from app.agent.polish_command import apply_polish_options
+                        previous = (
+                            self.pipeline.resolved_polish_command
+                            or await self._previous_resolved_command()
+                        )
+                        command = resolve_polish_command(
+                            instruction.content,
+                            target_slide_ids=(
+                                instruction_metadata.get("target_slide_ids")
+                                or instruction_metadata.get("selected_slide_ids")
+                                or instruction_scope
+                            ),
+                            active_slide_id=(
+                                str(instruction_metadata.get("active_slide_id") or "") or None
+                            ),
+                            modality=str(instruction_metadata.get("modality") or "auto"),
+                            canonical_ids=canonical,
+                            previous_command=previous,
+                        )
+                        command = apply_polish_options(
+                            command,
+                            instruction_metadata.get("polish_options") or {},
+                            canonical_ids=canonical,
+                        )
+                        self.pipeline.resolved_polish_command = command.model_dump()
+                        self.pipeline.polish_intent = resolved_command_to_polish_intent(command)
+                        instruction_scope = list(command.scope.target_slide_ids)
+                        selected_slide_ids = list(instruction_scope)
+                        self.pipeline.selected_slide_ids = list(selected_slide_ids)
+                        self.pipeline.baseline_content_hashes = {
+                            str(item.get("id") or ""): semantic_content_hash(item)
+                            for item in runtime_baseline_slides(self.pipeline)
+                            if not selected_slide_ids
+                            or str(item.get("id") or "") in set(selected_slide_ids)
+                        }
+                        (
+                            effective_intent,
+                            self.pipeline.content_policy,
+                            self.pipeline.operation_agent_chain,
+                            self.pipeline.layout_engine_params,
+                        ) = _resolved_command_runtime(command)
+                        self.pipeline.active_intent = effective_intent
+                        self.pipeline.context.add_note(command.summary)
+                        instruction_agents = list(self.pipeline.operation_agent_chain)
+                        queued_analysis_refresh = True
+                        if command.needs_confirmation:
+                            queued_confirmation = command
+                    else:
+                        # Initial generation has no authoritative slide IDs yet;
+                        # retain the compatible router until the deck exists.
+                        selected_slide_ids = list(dict.fromkeys([
+                            *selected_slide_ids, *instruction_scope,
+                        ]))
+                        self.pipeline.selected_slide_ids = list(selected_slide_ids)
+                        instruction_modality = str(instruction_metadata.get("modality") or "auto")
+                        effective_intent = {
+                            "layout": "LAYOUT_ONLY", "text": "MODIFY", "image": "IMAGE_UPDATE",
+                        }.get(
+                            instruction_modality,
+                            infer_intent("message", instruction.content, selected_slide_ids),
+                        )
+                        self.pipeline.active_intent = effective_intent
+                        self.pipeline.content_policy = infer_content_policy(
+                            effective_intent, instruction.content,
+                        )
+                        queued_params = deterministic_layout_engine_params(
+                            effective_intent, instruction.content,
+                        )
+                        if queued_params:
+                            self.pipeline.layout_engine_params = queued_params
+                        instruction_agents = normalize_agent_plan(
+                            effective_intent,
+                            [key for key in INTENT_AGENTS[effective_intent] if key in AGENT_BY_KEY],
+                            self.pipeline.content_policy,
+                        )
                     # 新指令必须重新运行受影响 Agent；不能因它们在旧计划中 completed 而直接结束。
                     completed = [key for key in completed if key not in instruction_agents]
-                    remaining = list(dict.fromkeys(
-                        [*instruction_agents, *remaining] if urgent else [*remaining, *instruction_agents]
-                    ))
+                    if canonical:
+                        # Do not let an older plan re-introduce content/media
+                        # agents outside the resolved operation domains.
+                        planned = list(instruction_agents)
+                        remaining = list(instruction_agents)
+                    else:
+                        remaining = list(dict.fromkeys(
+                            [*instruction_agents, *remaining] if urgent else [*remaining, *instruction_agents]
+                        ))
                 if queued:
+                    # Tool results are valid only for the builder revision that
+                    # produced them.  A merged instruction changes scope and/or
+                    # objectives, so reusing an older run_qa would bypass the
+                    # new page's render gate entirely.
+                    invalidate_revision_evidence(self.pipeline)
                     row = await db.get(PipelineRun, self.pipeline.pipeline_run.id)
                     if row:
                         row.checkpoint_json = {**(row.checkpoint_json or {}), "queued_instruction_ids": [item.id for item in queued]}
+                        if self.pipeline.resolved_polish_command:
+                            row.plan_json = {
+                                **(row.plan_json or {}),
+                                "resolved_polish_command": self.pipeline.resolved_polish_command,
+                                "effective_scope": list(selected_slide_ids),
+                                "content_policy": self.pipeline.content_policy,
+                            }
                     await db.commit()
+            if queued_analysis_refresh and queued_confirmation is None:
+                await self._prepare_target_slide_analysis()
+            if queued_confirmation is not None:
+                await self._request_intent_confirmation(queued_confirmation)
+                self.pipeline.result_status = "needs_confirmation"
+                self.pipeline.publishable = True
+                return {
+                    "planned_agents": planned, "remaining_agents": [],
+                    "completed_agents": completed, "selected_skills": selected,
+                    "loaded_skills": loaded, "next_agent": None,
+                    "status": "completed", "intent": effective_intent,
+                    "messages": messages, "selected_slide_ids": selected_slide_ids,
+                    "publishable": True, "result_status": "needs_confirmation",
+                }
+            if getattr(self.pipeline, "result_status", "applied") == "needs_confirmation":
+                return {
+                    "planned_agents": planned, "remaining_agents": [],
+                    "completed_agents": completed, "selected_skills": selected,
+                    "loaded_skills": loaded, "next_agent": None,
+                    "status": "completed", "intent": effective_intent,
+                    "messages": messages, "selected_slide_ids": selected_slide_ids,
+                    "publishable": True, "result_status": "needs_confirmation",
+                }
+            if getattr(self.pipeline, "result_status", "applied") == "no_change":
+                self.pipeline.publishable = True
+                return {
+                    "planned_agents": planned, "remaining_agents": [],
+                    "completed_agents": completed, "selected_skills": selected,
+                    "loaded_skills": loaded, "next_agent": None,
+                    "status": "completed", "intent": effective_intent,
+                    "messages": messages, "selected_slide_ids": selected_slide_ids,
+                    "publishable": True, "result_status": "no_change",
+                }
             if not planned:
-                fallback_agents = [key for key in INTENT_AGENTS.get(effective_intent, INTENT_AGENTS["GENERATE"]) if key in AGENT_BY_KEY]
+                fallback_agents = [
+                    key for key in (
+                        self.pipeline.operation_agent_chain
+                        or INTENT_AGENTS.get(effective_intent, INTENT_AGENTS["GENERATE"])
+                    ) if key in AGENT_BY_KEY
+                ]
                 capabilities = INTENT_CAPABILITIES.get(effective_intent, [])
                 plan_summary = "已根据任务意图创建执行计划"
-                if not isinstance(self.pipeline.provider, MockProvider):
+                if self.pipeline.operation_agent_chain:
+                    planned = fallback_agents
+                    plan_summary = "已按结构化润色操作生成最小 Agent 链"
+                elif not isinstance(self.pipeline.provider, MockProvider):
                     try:
                         decision = await self.pipeline.provider.structured(
                             "你是 PPT Runtime Orchestrator。只规划必要 Agent 和 Skill capability，不输出隐藏推理。",
@@ -389,13 +742,24 @@ class PPTAgentRuntime:
                 async with SessionLocal() as db:
                     row = await db.get(PipelineRun, self.pipeline.pipeline_run.id)
                     if row:
-                        row.plan_json = {"agents": planned, "skills": selected, "intent": effective_intent}
+                        effective_scope = list(selected_slide_ids) or [
+                            str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+                        ]
+                        row.plan_json = {
+                            **(row.plan_json or {}),
+                            "agents": planned, "skills": selected, "intent": effective_intent,
+                            "effective_scope": effective_scope,
+                            "scope_mode": "selected" if selected_slide_ids else "all",
+                            "content_policy": self.pipeline.content_policy,
+                        }
                         await db.commit()
                 for item in candidates:
                     await self.pipeline.emitter.emit_domain("skill.discovered", message=f"发现 Skill：{item.name}", payload=item.public_dict())
             handoff = self.pipeline.requested_handoff
             self.pipeline.requested_handoff = None
-            strict_order = effective_intent == "IMAGE_UPDATE" and self.pipeline.content_policy != "restore"
+            strict_order = bool(self.pipeline.operation_agent_chain) or (
+                effective_intent == "IMAGE_UPDATE" and self.pipeline.content_policy != "restore"
+            )
             if handoff and not strict_order and handoff in AGENT_BY_KEY and handoff not in completed:
                 remaining = [handoff, *[key for key in remaining if key != handoff]]
                 await self.pipeline.emitter.emit_domain("agent.handoff", agent={"id": state.get("current_agent", "")}, message=f"交接给 {handoff}", payload={"to": handoff})
@@ -487,6 +851,14 @@ class PPTAgentRuntime:
                 "publishable": self.pipeline.publishable,
                 "blocking_issues": list(self.pipeline.blocking_issues),
             }
+            if key == "layout" and await self._request_candidate_confirmation_if_needed():
+                self.pipeline.result_status = "needs_confirmation"
+                self.pipeline.publishable = True
+                update.update({
+                    "remaining_agents": [], "status": "running",
+                    "result_status": "needs_confirmation", "publishable": True,
+                })
+                return update
             if key == "visual_qa" and self.pipeline.artifacts is not None:
                 live_visual = self.pipeline.context.get_tool_output("run_qa") or {}
                 live_content = self.pipeline.context.get_tool_output("run_content_qa") or {}
@@ -503,7 +875,24 @@ class PPTAgentRuntime:
                     )
                 ]
                 repair_round = int(state.get("repair_round") or 0)
-                if issues and repair_round < self.pipeline.pipeline_run.max_revision_rounds:
+                issue_fingerprint = qa_issue_fingerprint(issues)
+                previous_fingerprint = str(state.get("repair_issue_fingerprint") or "")
+                repeated_issue = bool(
+                    issue_fingerprint and issue_fingerprint == previous_fingerprint
+                )
+                repeated_layout_issue = repeated_issue and all(
+                    str(item.get("target_agent") or "layout") == "layout" for item in issues
+                )
+                update["repair_issue_fingerprint"] = issue_fingerprint
+                self.pipeline.repair_issue_fingerprint = issue_fingerprint
+                if should_retry_qa_issues(
+                    issues=issues,
+                    repair_round=repair_round,
+                    max_rounds=self.pipeline.pipeline_run.max_revision_rounds,
+                    fingerprint=issue_fingerprint,
+                    previous_fingerprint=previous_fingerprint,
+                    repair_mode=self.pipeline.repair_mode,
+                ):
                     deterministic = [i for i in issues if i.get("rule_id") in DETERMINISTIC_RULES]
                     aesthetic = [i for i in issues if i.get("rule_id") not in DETERMINISTIC_RULES]
                     targets = (
@@ -514,10 +903,10 @@ class PPTAgentRuntime:
                     if self.pipeline.content_policy in {"preserve", "restore"}:
                         targets = ["layout" if target == "slide_content" else target for target in targets]
                     targets = [target for target in targets if target in AGENT_BY_KEY and target != "visual_qa"]
-                    if deterministic and not aesthetic:
+                    if (deterministic and not aesthetic) or repeated_layout_issue:
                         # 几何类 → 不重调 LLM，直接对受影响页用引擎按规则换参重编译（确定性收敛）。
-                        # repair_mode 同时写入 pipeline 与 state（state 由 LangGraph 忽略未声明键，
-                        # 布局引擎经 runtime 读取确定性分支参数）。
+                        # repair_mode 同时写入 pipeline 与 state，布局引擎经 runtime
+                        # 读取确定性分支参数。
                         self.pipeline.repair_mode = "deterministic"
                         update["repair_mode"] = "deterministic"
                         update["remaining_agents"] = list(dict.fromkeys(["layout", "ppt_editor", "visual_qa"]))
@@ -600,41 +989,548 @@ class PPTAgentRuntime:
         graph.add_edge("agent_executor", "orchestrator")
         return graph.compile(checkpointer=checkpointer)
 
-    async def run(self, *, selected_slide_ids: list[str] | None = None) -> PPTAgentState:
-        self.pipeline.selected_slide_ids = list(selected_slide_ids or [])
-        provisional_intent = infer_intent(
-            self.pipeline.trigger_type, self.pipeline.context.user_instruction, selected_slide_ids,
-        )
-        self.pipeline.active_intent = provisional_intent
-        self.pipeline.content_policy = infer_content_policy(
-            provisional_intent, self.pipeline.context.user_instruction,
-        )
-        await self._prepare_restore_baseline(selected_slide_ids)
-        initial = self.initial_state(selected_slide_ids=selected_slide_ids)
-        self.pipeline.active_intent = initial["intent"]
-        self.pipeline.content_policy = initial["content_policy"]
-        self.pipeline.baseline_content_hashes = dict(initial["baseline_content_hashes"])
-        # Task 7: LLM 结构化意图提取；Mock/失败返回 None，由关键词 infer_intent 兜底。
-        # modality 显式覆盖：前端单页范围选择（[范围:布局/文字/图片]）优先于意图提取。
-        from app.agent.intents import dimension_to_engine_params, extract_polish_intent
+    async def _prepare_target_slide_analysis(self) -> None:
+        from app.agent.slide_analysis import build_slide_analysis
+        from app.renderers.ppt_visual_qa import PPTVisualQARenderer
 
-        self.pipeline.modality = _modality_from_instruction(self.pipeline.context.user_instruction)
-        self.pipeline.polish_intent = await extract_polish_intent(self.pipeline)
-        if self.pipeline.polish_intent is not None:
-            params = dimension_to_engine_params(self.pipeline.polish_intent)
-            if params:
-                self.pipeline.context.add_note(
-                    f"润色意图：{self.pipeline.polish_intent.summary}；引擎参数 {params}"
+        slides = runtime_baseline_slides(self.pipeline)
+        target_ids = set(self.pipeline.selected_slide_ids or [
+            str(slide.get("id") or "") for slide in slides
+        ])
+        reference_ids = set(
+            ((self.pipeline.resolved_polish_command or {}).get("scope") or {}).get("reference_slide_ids") or []
+        )
+        analysis_ids = target_ids | reference_ids
+        png_by_id: dict[str, str] = {}
+        if (
+            self.pipeline.builder is not None
+            and self.pipeline.workspace_root is not None
+            and PPTVisualQARenderer.is_available()
+        ):
+            try:
+                root = Path(self.pipeline.workspace_root) / "analysis" / "baseline-render"
+                pptx = root / "baseline.pptx"
+                await asyncio.to_thread(self.pipeline.builder.render, pptx)
+                images = await asyncio.to_thread(
+                    PPTVisualQARenderer.convert_pptx_to_images, pptx, root / "images", 120,
                 )
-        modality = getattr(self.pipeline, "modality", "auto")
-        if modality in {"layout", "text", "image"}:
-            self.pipeline.active_intent = {
-                "layout": "LAYOUT_ONLY", "text": "MODIFY", "image": "IMAGE_UPDATE",
-            }[modality]
-            self.pipeline.content_policy = "preserve" if modality in {"layout", "image"} else "edit"
+                png_by_id = {
+                    str(slide.get("id") or ""): str(images[index])
+                    for index, slide in enumerate(self.pipeline.builder.slides)
+                    if index < len(images)
+                }
+            except Exception as exc:  # noqa: BLE001
+                self.pipeline.context.add_note(f"baseline PNG 渲染失败，页面分析降级：{str(exc)[:180]}")
+
+        objectives = list((self.pipeline.layout_engine_params or {}).get("objectives") or [])
+        analyses: list[dict[str, Any]] = []
+        for slide in slides:
+            slide_id = str(slide.get("id") or "")
+            if slide_id not in analysis_ids:
+                continue
+            analysis = build_slide_analysis(
+                slide, self.pipeline.preferred_template,
+                objectives=objectives, baseline_png=png_by_id.get(slide_id, ""),
+            )
+            analysis["scope_role"] = "reference" if slide_id in reference_ids else "target"
+            analyses.append(analysis)
+            if self.pipeline.artifacts is not None:
+                await self.pipeline.artifacts.create(
+                    "slide_analysis", slide_id, analysis,
+                    producer_agent="slide_analyzer", producer_tool="deterministic_analysis",
+                )
+        # A whole-deck polish can target many pages.  Persist the complete
+        # artifact for observability, but give the LLM a compact per-page view
+        # so every target remains present instead of truncating the deck after
+        # the first few pages.  Single-page polish keeps the full analysis.
+        if len(analyses) <= 2:
+            prompt_analyses = analyses
+        else:
+            prompt_analyses = [self._compact_slide_analysis(item) for item in analyses]
+        self.pipeline.context.target_slide_analysis = prompt_analyses
+
+    async def _ensure_required_final_qa(self, final: PPTAgentState) -> None:
+        """Guarantee that a mutating run cannot exit the graph before QA.
+
+        LangGraph normally carries ``visual_qa`` as the last remaining agent.
+        A media/editor handoff or a resumed legacy checkpoint can nevertheless
+        exhaust that list after the mutation is committed.  The publication
+        gate must rely on actual QA evidence, so execute the same registered
+        agent once when neither live nor persisted evidence exists.
+        """
+        if getattr(self.pipeline, "result_status", "applied") in {
+            "no_change", "needs_confirmation",
+        }:
+            return
+        requires_qa = (
+            "visual_qa" in (self.pipeline.operation_agent_chain or [])
+            or self.pipeline.active_intent in {
+                "GENERATE", "MODIFY", "LOCAL_REGENERATE", "LAYOUT_ONLY",
+                "GLOBAL_OPTIMIZE", "STYLE_CHANGE", "TEMPLATE_SWITCH",
+                "CONTENT_UPDATE", "IMAGE_UPDATE",
+            }
+        )
+        if not requires_qa or self.pipeline.builder is None or not self.pipeline.builder.slides:
+            return
+        qa_data = self.pipeline.context.get_tool_output("run_qa") or {}
+        if not qa_data and self.pipeline.artifacts is not None:
+            artifact = await self.pipeline.artifacts.latest("visual_qa")
+            qa_data = dict((artifact or {}).get("data") or {})
+        if qa_data:
+            return
+        agent = AGENT_BY_KEY["visual_qa"]
+        await run_agent_loop(
+            self.pipeline,
+            PipelinePlan(agents=[AgentSpec(
+                key="visual_qa", role=agent.role,
+                description=agent.description, max_steps=8,
+            )], revision_rounds=self.pipeline.pipeline_run.max_revision_rounds),
+            start_step=0,
+        )
+        completed = list(final.get("completed_agents") or [])
+        if "visual_qa" not in completed:
+            final["completed_agents"] = [*completed, "visual_qa"]
+
+    @staticmethod
+    def _compact_slide_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
+        """Keep all target pages in context while retaining layout essentials."""
+        content = dict(analysis.get("content") or {})
+        graph = dict(analysis.get("semantic_graph") or {})
+        compact_units = [
+            {
+                "semantic_id": unit.get("semantic_id"),
+                "text": str(unit.get("text") or "")[:220],
+                "role": unit.get("role"),
+                "group_id": unit.get("group_id"),
+                "reading_order": unit.get("reading_order"),
+                "locked": unit.get("locked", True),
+            }
+            for unit in (graph.get("units") or [])
+        ]
+        compact_elements = [
+            {
+                "kind": element.get("kind"),
+                "role": element.get("role"),
+                "content_ref": element.get("content_ref"),
+                "x": element.get("x"), "y": element.get("y"),
+                "w": element.get("w"), "h": element.get("h"),
+                "font_size": (element.get("style") or {}).get("size"),
+            }
+            for element in (analysis.get("elements") or [])
+        ]
+        return {
+            "slide_id": analysis.get("slide_id"),
+            "scope_role": analysis.get("scope_role", "target"),
+            "page_type": analysis.get("page_type"),
+            "teaching_task": analysis.get("teaching_task"),
+            "content": {
+                "title": content.get("title"),
+                "body": [str(value)[:260] for value in (content.get("body") or [])],
+                "block_kinds": [item.get("kind") for item in (content.get("blocks") or [])],
+            },
+            "semantic_graph": {
+                "units": compact_units,
+                "groups": graph.get("groups") or [],
+                "reading_order": graph.get("reading_order") or [],
+                "semantic_alias_groups": graph.get("semantic_alias_groups") or [],
+            },
+            "elements": compact_elements,
+            "template": analysis.get("template") or {},
+            "baseline_png": analysis.get("baseline_png", ""),
+            "baseline_metrics": analysis.get("baseline_metrics") or {},
+            "detected_defects": analysis.get("detected_defects") or [],
+            "objectives": analysis.get("objectives") or [],
+        }
+
+    async def _previous_resolved_command(self) -> dict[str, Any] | None:
+        source = getattr(self.pipeline, "source_artifact", None)
+        if source is None:
+            return None
+        from sqlalchemy import select
+        from app.core.database import SessionLocal
+        from app.models.entities import PipelineRun, PPTRevision
+        async with SessionLocal() as db:
+            revision = await db.scalar(select(PPTRevision).where(
+                PPTRevision.artifact_id == source.id,
+            ).order_by(PPTRevision.version.desc()).limit(1))
+            previous = (
+                await db.get(PipelineRun, revision.pipeline_run_id)
+                if revision and revision.pipeline_run_id else None
+            )
+        return dict(((previous.plan_json if previous else {}) or {}).get("resolved_polish_command") or {}) or None
+
+    async def _validated_confirmed_command(self, metadata: dict[str, Any]) -> Any | None:
+        """Load a server-issued confirmation; never trust a client token alone."""
+        snapshot = metadata.get("confirmed_resolved_command")
+        link = metadata.get("human_confirmation")
+        if not isinstance(snapshot, dict) or not isinstance(link, dict):
+            return None
+        from sqlalchemy import select
+        from app.agent.intents import ResolvedPolishCommandV2
+        from app.core.database import SessionLocal
+        from app.models.entities import PPTHumanRequest, PipelineRun
+
+        request_id = str(link.get("request_id") or "")
+        source_run_id = str(link.get("source_run_id") or "")
+        token = str(link.get("confirmation_token") or "")
+        options_token = str(
+            ((metadata.get("polish_options") or {}).get("confirmation_token") or "")
+        )
+        if not request_id or not source_run_id or not token or token != options_token:
+            raise PPTAgentError(
+                "invalid_confirmation", "人机确认凭证不完整，请重新确认。",
+                retryable=False,
+            )
+        async with SessionLocal() as db:
+            request = await db.get(PPTHumanRequest, request_id)
+            source_pipeline = await db.scalar(select(PipelineRun).where(
+                PipelineRun.generation_run_id == source_run_id,
+            ))
+        response = dict((request.response_json if request else {}) or {})
+        valid = bool(
+            request is not None
+            and request.status == "resolved"
+            and source_pipeline is not None
+            and request.pipeline_run_id == source_pipeline.id
+            and str(response.get("confirmation_token") or "") == token
+            and str(response.get("source_run_id") or "") == source_run_id
+            and str(response.get("continuation_run_id") or "")
+            == str(self.pipeline.generation_run.id)
+            and str(response.get("selected_candidate_id") or "")
+            == str(link.get("selected_candidate_id") or "")
+        )
+        if not valid:
+            raise PPTAgentError(
+                "invalid_confirmation", "人机确认凭证无效或已失配，请重新确认。",
+                retryable=False,
+            )
+        command = ResolvedPolishCommandV2.model_validate(snapshot)
+        selected_candidate_id = str(link.get("selected_candidate_id") or "")
+        if selected_candidate_id:
+            option = next((
+                dict(item) for item in (request.options_json or [])
+                if str((item or {}).get("candidate_id") or "") == selected_candidate_id
+            ), None)
+            if option is None or not isinstance(option.get("candidate"), dict):
+                raise PPTAgentError(
+                    "invalid_candidate_confirmation", "已确认的布局候选不存在，请重新选择。",
+                    retryable=False,
+                )
+            metadata["validated_selected_candidate"] = dict(option["candidate"])
+        return command
+
+    async def _request_intent_confirmation(self, command: Any) -> None:
+        from app.core.database import SessionLocal
+        from app.models.entities import PPTHumanRequest
+        async with SessionLocal() as db:
+            request = PPTHumanRequest(
+                pipeline_run_id=self.pipeline.pipeline_run.id,
+                request_type="polish_intent_confirmation",
+                prompt=command.summary,
+                options_json=[
+                    {"id": "confirm", "label": "按此范围执行"},
+                    {"id": "edit", "label": "重新指定范围或要求"},
+                ],
+                response_json={"resolved_command": command.model_dump()},
+            )
+            db.add(request)
+            await db.commit()
+            await db.refresh(request)
+        await self.pipeline.emitter.emit_domain(
+            "human.required", message=command.summary,
+            payload={
+                "request_id": request.id,
+                "type": "polish_intent_confirmation",
+                "summary": command.summary,
+                "ambiguities": list(command.ambiguities),
+                "options": request.options_json,
+            },
+        )
+
+    async def _render_candidate_preview(
+        self, slide_id: str, candidate: dict[str, Any], option_id: str,
+    ) -> str:
+        """Render one candidate with the real template/assets for confirmation."""
+        from app.renderers.ppt_visual_qa import PPTVisualQARenderer
+        from app.renderers.presentation_builder import PresentationBuilder
+        if self.pipeline.workspace_root is None or not PPTVisualQARenderer.is_available():
+            return ""
+        source = next((
+            deepcopy(item) for item in runtime_baseline_slides(self.pipeline)
+            if str(item.get("id") or "") == slide_id
+        ), None)
+        if source is None:
+            return ""
+
+        def render() -> str:
+            from app.agent.tools.editing_tools import _apply_layout_to_builder
+            root = Path(self.pipeline.workspace_root) / "qa" / "candidate-previews"
+            builder = PresentationBuilder().from_ppt_content({
+                "theme": self.pipeline.preferred_template, "slides": [source],
+            })
+            _apply_layout_to_builder(builder, candidate, preserve_visuals=True)
+            pptx = root / f"{slide_id}-{option_id}.pptx"
+            builder.render(pptx)
+            images = PPTVisualQARenderer.convert_pptx_to_images(
+                pptx, root / f"{slide_id}-{option_id}", dpi=120,
+            )
+            return str(images[0]) if images else ""
+
+        try:
+            return await asyncio.to_thread(render)
+        except Exception as exc:  # noqa: BLE001
+            self.pipeline.context.add_note(
+                f"候选 {option_id} 预览渲染失败：{str(exc)[:180]}"
+            )
+            return ""
+
+    async def _request_candidate_confirmation_if_needed(self) -> bool:
+        """Pause a single-page polish when two safe candidates are too close."""
+        if (self.pipeline.request_metadata or {}).get("selected_candidate_id"):
+            return False
+        pending = [
+            item for item in (self.pipeline.layout_compile_results or [])
+            if item.get("requires_candidate_confirmation")
+            and item.get("status") != "preserved"
+        ]
+        # Multi-page candidate combinations need a dedicated batch chooser;
+        # never silently narrow a whole-deck run to one page here.
+        if len(pending) != 1 or len(self.pipeline.selected_slide_ids) != 1:
+            return False
+        record = pending[0]
+        rankings = [
+            dict(item) for item in (record.get("candidate_rankings") or [])
+            if item.get("elements")
+            and all(
+                objective_result_passed(result)
+                for result in (item.get("objective_results") or [])
+                if bool(result.get("hard_requirement", True))
+            )
+        ][:2]
+        if len(rankings) < 2:
+            return False
+        slide_id = str(record.get("slide_id") or "")
+        layout_artifact = (
+            await self.pipeline.artifacts.latest("slide_layout")
+            if self.pipeline.artifacts is not None else None
+        )
+        artifact_page = next((
+            dict(item) for item in ((layout_artifact or {}).get("data", {}).get("slides") or [])
+            if str(item.get("slide_id") or "") == slide_id
+        ), {})
+        options: list[dict[str, Any]] = []
+        for index, ranking in enumerate(rankings):
+            option_id = f"candidate-{chr(ord('a') + index)}"
+            candidate_id = str(ranking.get("candidate_id") or option_id)
+            candidate = {
+                "slide_id": slide_id,
+                "layout_type": str(ranking.get("layout_type") or artifact_page.get("layout_type") or "bullet_flow"),
+                "designRationale": f"教师候选 {index + 1}：{ranking.get('layout_type') or ''}",
+                "elements": list(ranking.get("elements") or []),
+                "visual_region": artifact_page.get("visual_region"),
+                "visual_type": artifact_page.get("visual_type"),
+                "render_mode": "absolute", "compile_status": "applied",
+                "requested_style": dict(record.get("requested_style") or {}),
+                "effective_style": dict(ranking.get("style") or {}),
+                "warnings": [],
+                "content_allocation": dict(artifact_page.get("content_allocation") or {}),
+                "compile_attempts": [],
+                "baseline_metrics": dict(record.get("baseline_metrics") or {}),
+                "final_metrics": {
+                    **dict(record.get("final_metrics") or {}),
+                    "quality_score": ranking.get("quality_score"),
+                },
+                "quality_delta": float(ranking.get("quality_delta") or 0),
+                "objective_results": list(ranking.get("objective_results") or []),
+                "requested_objectives": list(record.get("requested_objectives") or []),
+                "candidate_rankings": [], "material_change": True,
+                "selected_candidate_id": candidate_id,
+                "candidate_score_gap": None,
+                "requires_candidate_confirmation": False,
+            }
+            preview_path = await self._render_candidate_preview(slide_id, candidate, option_id)
+            options.append({
+                "id": option_id, "candidate_id": candidate_id,
+                "label": f"方案 {chr(ord('A') + index)} · {candidate['layout_type']}",
+                "slide_id": slide_id,
+                "score": ranking.get("quality_score"),
+                "quality_delta": ranking.get("quality_delta"),
+                "style": ranking.get("style") or {},
+                "objective_results": ranking.get("objective_results") or [],
+                "render_path": preview_path,
+                "candidate": candidate,
+            })
+        options.append({"id": "reject", "label": "保留原版", "action": "no_change"})
+
+        from app.core.database import SessionLocal
+        from app.models.entities import PPTHumanRequest, PipelineRun
+        async with SessionLocal() as db:
+            request = PPTHumanRequest(
+                pipeline_run_id=self.pipeline.pipeline_run.id,
+                request_type="layout_candidate_selection",
+                prompt=f"第 {slide_id} 页有两个质量接近的安全候选，请选择。",
+                # Assign the final JSON only after ``request.id`` exists and
+                # the authenticated preview URLs can be constructed.  Mutating
+                # a plain JSON list in place is not tracked by SQLAlchemy.
+                options_json=[],
+                response_json={
+                    "resolved_command": dict(self.pipeline.resolved_polish_command or {}),
+                    "target_slide_ids": [slide_id],
+                },
+            )
+            db.add(request)
+            await db.flush()
+            for option in options:
+                if option.get("render_path"):
+                    option["preview_url"] = (
+                        f"/api/v1/ppt-agent/runs/{self.pipeline.generation_run.id}"
+                        f"/candidate-previews/{request.id}/{option['id']}"
+                    )
+            request.options_json = deepcopy(options)
+            row = await db.get(PipelineRun, self.pipeline.pipeline_run.id)
+            if row is not None:
+                row.plan_json = {
+                    **(row.plan_json or {}), "result_status": "needs_confirmation",
+                    "candidate_request_id": request.id,
+                }
+            await db.commit()
+            await db.refresh(request)
+        public_options = [
+            {key: value for key, value in option.items() if key != "candidate"}
+            for option in (request.options_json or [])
+        ]
+        self.pipeline.candidate_request_id = request.id
+        self.pipeline.candidate_options = deepcopy(public_options)
+        await self.pipeline.emitter.emit_domain(
+            "human.required",
+            message="两个布局候选质量接近，请选择后再发布",
+            payload={
+                "request_id": request.id, "type": "layout_candidate_selection",
+                "slide_id": slide_id, "options": public_options,
+                "candidate_rankings": public_options[:2],
+            },
+        )
+        return True
+
+    async def run(self, *, selected_slide_ids: list[str] | None = None) -> PPTAgentState:
+        instruction = self.pipeline.context.user_instruction
+        self.pipeline.selected_slide_ids = list(selected_slide_ids or [])
+        self.pipeline.layout_engine_params = {}
+        self.pipeline.operation_agent_chain = []
+
+        if self.pipeline.trigger_type == "message":
+            from app.agent.intents import resolve_polish_command, resolved_command_to_polish_intent
+            from app.agent.polish_command import apply_polish_options
+            metadata = dict(getattr(self.pipeline, "request_metadata", None) or {})
+            canonical_ids = [
+                str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+            ]
+            command = await self._validated_confirmed_command(metadata)
+            if command is None:
+                command = resolve_polish_command(
+                    instruction,
+                    target_slide_ids=(
+                        metadata.get("target_slide_ids")
+                        or metadata.get("selected_slide_ids")
+                        or selected_slide_ids
+                        or []
+                    ),
+                    active_slide_id=str(metadata.get("active_slide_id") or "") or None,
+                    modality=str(metadata.get("modality") or "auto"),
+                    canonical_ids=canonical_ids,
+                    previous_command=await self._previous_resolved_command(),
+                )
+                command = apply_polish_options(
+                    command, metadata.get("polish_options") or {}, canonical_ids=canonical_ids,
+                )
+            self.pipeline.resolved_polish_command = command.model_dump()
+            self.pipeline.polish_intent = resolved_command_to_polish_intent(command)
+            self.pipeline.selected_slide_ids = list(command.scope.target_slide_ids)
+            selected_slide_ids = list(self.pipeline.selected_slide_ids)
+            (
+                self.pipeline.active_intent,
+                self.pipeline.content_policy,
+                self.pipeline.operation_agent_chain,
+                self.pipeline.layout_engine_params,
+            ) = _resolved_command_runtime(command)
+            if isinstance(metadata.get("validated_selected_candidate"), dict):
+                candidate = dict(metadata["validated_selected_candidate"])
+                self.pipeline.layout_engine_params.update({
+                    "confirmed_candidate": candidate,
+                    "confirmed_candidate_id": str(
+                        candidate.get("selected_candidate_id")
+                        or metadata.get("selected_candidate_id")
+                        or ""
+                    ),
+                })
+            self.pipeline.context.add_note(command.summary)
+            self.pipeline.context.add_note(
+                "结构化润色命令：" + json.dumps(command.model_dump(), ensure_ascii=False)
+            )
+            from app.core.database import SessionLocal
+            from app.models.entities import PipelineRun
+            async with SessionLocal() as db:
+                row = await db.get(PipelineRun, self.pipeline.pipeline_run.id)
+                if row:
+                    row.plan_json = {
+                        **(row.plan_json or {}),
+                        "resolved_polish_command": command.model_dump(),
+                        "effective_scope": list(command.scope.target_slide_ids),
+                        "scope_mode": command.scope.source,
+                        "content_policy": self.pipeline.content_policy,
+                    }
+                    await db.commit()
+        else:
+            provisional_intent = infer_intent(
+                self.pipeline.trigger_type, instruction, selected_slide_ids,
+            )
+            self.pipeline.active_intent = provisional_intent
+            self.pipeline.content_policy = infer_content_policy(provisional_intent, instruction)
+            self.pipeline.layout_engine_params = deterministic_layout_engine_params(
+                provisional_intent, instruction,
+            )
+
+        await self._prepare_restore_baseline(self.pipeline.selected_slide_ids)
+        initial = self.initial_state(selected_slide_ids=self.pipeline.selected_slide_ids)
+        self.pipeline.baseline_content_hashes = dict(initial["baseline_content_hashes"])
+        initial["intent"] = self.pipeline.active_intent
+        initial["content_policy"] = self.pipeline.content_policy
+        initial["selected_slide_ids"] = list(self.pipeline.selected_slide_ids)
+
+        command_data = getattr(self.pipeline, "resolved_polish_command", None) or {}
+        if command_data.get("needs_confirmation"):
+            from app.agent.intents import ResolvedPolishCommandV2
+            command = ResolvedPolishCommandV2.model_validate(command_data)
+            await self._request_intent_confirmation(command)
+            self.pipeline.result_status = "needs_confirmation"
+            self.pipeline.publishable = True
+            initial.update({
+                "status": "completed", "publishable": True,
+                "result_status": "needs_confirmation",
+            })
+            return initial
+
+        if self.pipeline.trigger_type == "message" and self.pipeline.operation_agent_chain:
+            await self._prepare_target_slide_analysis()
+
+        if self.pipeline.content_policy == "restore" and initial.get("content_policy") != "restore":
+            await self._prepare_restore_baseline(self.pipeline.selected_slide_ids)
+            target_ids = set(self.pipeline.selected_slide_ids or [
+                str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+            ])
+            self.pipeline.baseline_content_hashes = {
+                str(item.get("id") or ""): semantic_content_hash(item)
+                for item in runtime_baseline_slides(self.pipeline)
+                if str(item.get("id") or "") in target_ids
+            }
+            initial["baseline_content_hashes"] = dict(self.pipeline.baseline_content_hashes)
+        initial["intent"] = self.pipeline.active_intent
+        initial["content_policy"] = self.pipeline.content_policy
+        initial["selected_slide_ids"] = list(self.pipeline.selected_slide_ids)
         config = {"configurable": {"thread_id": self.pipeline.generation_run.id}, "recursion_limit": 100}
         if not self.persistent_checkpoints:
             final = await self._build_graph(MemorySaver()).ainvoke(initial, config)
+            await self._ensure_required_final_qa(final)
             await self._assert_publishable(final)
             for name in final.get("selected_skills", []):
                 await self.pipeline.emitter.skill_completed(name)
@@ -645,6 +1541,7 @@ class PPTAgentRuntime:
             graph = self._build_graph(saver)
             existing = await saver.aget_tuple(config)
             final = await graph.ainvoke(None if existing else initial, config)
+            await self._ensure_required_final_qa(final)
             await self._assert_publishable(final)
             for name in final.get("selected_skills", []):
                 await self.pipeline.emitter.skill_completed(name)
@@ -652,19 +1549,35 @@ class PPTAgentRuntime:
 
     async def _assert_publishable(self, final: PPTAgentState) -> None:
         """Apply the strict publish gate before the domain Artifact can be saved."""
+        if getattr(self.pipeline, "result_status", "applied") == "needs_confirmation":
+            self.pipeline.publishable = True
+            final["publishable"] = True
+            final["result_status"] = "needs_confirmation"
+            return
         if self.pipeline.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}:
             self._assert_template_switch_integrity(final)
             return
         if self.pipeline.active_intent != "IMAGE_UPDATE":
             qa_data = self.pipeline.context.get_tool_output("run_qa") or {}
+            artifacts = getattr(self.pipeline, "artifacts", None)
+            if not qa_data and artifacts is not None:
+                qa_artifact = await artifacts.latest("visual_qa")
+                qa_data = dict((qa_artifact or {}).get("data") or {})
+            qa_scope = set(
+                getattr(self.pipeline, "affected_slide_ids", [])
+                if hasattr(self.pipeline, "affected_slide_ids")
+                else (getattr(self.pipeline, "selected_slide_ids", None) or [])
+            )
             blocking = [
                 item for item in qa_data.get("issues", [])
                 if item.get("severity") in {"critical", "major"}
                 and (
-                    not self.pipeline.selected_slide_ids
-                    or str(item.get("slide_id") or "") in set(self.pipeline.selected_slide_ids)
+                    not qa_scope
+                    or str(item.get("slide_id") or "") in qa_scope
                 )
             ]
+            if getattr(self.pipeline, "result_status", None) == "no_change" and not qa_scope:
+                blocking = []
             self.pipeline.blocking_issues = blocking
             if blocking:
                 rules = {str(item.get("rule_id") or "") for item in blocking}
@@ -682,18 +1595,29 @@ class PPTAgentRuntime:
                     error_message = "页面未通过发布前质量检查，已保留原 PPT 版本。"
                 raise PPTAgentError(
                     error_code, error_message,
-                    retryable=True, details={"issues": blocking[:20]},
+                    retryable=False, details={"issues": blocking[:20]},
+                )
+            source_slide_list = runtime_baseline_slides(self.pipeline)
+            current_slide_list = list(
+                ((self.pipeline.builder.to_ppt_content() if self.pipeline.builder is not None else {}).get("slides") or [])
+            )
+            source_slides = {
+                str(item.get("id") or ""): item for item in source_slide_list
+            }
+            current_slides = {
+                str(item.get("id") or ""): item for item in current_slide_list
+            }
+            target_ids = set(self.pipeline.selected_slide_ids or source_slides)
+            operation_domains = {
+                str(item.get("domain") or "")
+                for item in ((getattr(self.pipeline, "layout_engine_params", None) or {}).get("operations") or [])
+                if isinstance(item, dict)
+            }
+            if self.pipeline.active_intent != "GENERATE" and source_slide_list:
+                PPTAgentRuntime._assert_revision_scope_integrity(
+                    source_slide_list, current_slide_list, target_ids,
                 )
             if self.pipeline.content_policy in {"preserve", "restore"}:
-                source_slides = {
-                    str(item.get("id") or ""): item
-                    for item in runtime_baseline_slides(self.pipeline)
-                }
-                current_slides = {
-                    str(item.get("id") or ""): item
-                    for item in ((self.pipeline.builder.to_ppt_content() if self.pipeline.builder is not None else {}).get("slides") or [])
-                }
-                target_ids = set(self.pipeline.selected_slide_ids or source_slides)
                 changed = [
                     slide_id for slide_id in target_ids
                     if slide_id not in source_slides or slide_id not in current_slides
@@ -702,11 +1626,73 @@ class PPTAgentRuntime:
                 if changed:
                     raise PPTAgentError(
                         "content_accidentally_removed", "视觉或恢复任务意外修改了页面文字，已保留原 PPT 版本。",
-                        retryable=True, details={"slides": sorted(changed)},
+                        retryable=False, details={"slides": sorted(changed)},
                     )
+                if "image_geometry" in operation_domains:
+                    non_media_changes = [
+                        slide_id for slide_id in target_ids
+                        if slide_id in source_slides and slide_id in current_slides
+                        and [
+                            item for item in (source_slides[slide_id].get("elements") or [])
+                            if item.get("kind") not in {"image", "chart"}
+                        ] != [
+                            item for item in (current_slides[slide_id].get("elements") or [])
+                            if item.get("kind") not in {"image", "chart"}
+                        ]
+                    ]
+                    if non_media_changes:
+                        raise PPTAgentError(
+                            "image_geometry_scope_changed",
+                            "图片几何任务意外修改了文字或页面装饰，已保留原 PPT 版本。",
+                            retryable=False, details={"slides": sorted(non_media_changes)},
+                        )
+                changed_visual = {
+                    slide_id for slide_id in target_ids
+                    if slide_id in source_slides and slide_id in current_slides
+                    and semantic_visual_hash(source_slides[slide_id]) != semantic_visual_hash(current_slides[slide_id])
+                }
+                compile_by_id = {
+                    str(item.get("slide_id") or ""): item
+                    for item in (getattr(self.pipeline, "layout_compile_results", None) or [])
+                }
+                weak_changes = {
+                    slide_id for slide_id in changed_visual
+                    if slide_id in compile_by_id and (
+                        compile_by_id[slide_id].get("material_change") is False
+                        or any(
+                            not objective_result_passed(result)
+                            and bool(result.get("hard_requirement", True))
+                            for result in (compile_by_id[slide_id].get("objective_results") or [])
+                        )
+                    )
+                }
+                if weak_changes and self.pipeline.builder is not None:
+                    # Last-resort monotonicity guard. Staging normally rejects
+                    # these pages; if a legacy editor path bypasses staging,
+                    # restore them here before final content is serialized.
+                    for index, slide in enumerate(self.pipeline.builder.slides):
+                        slide_id = str(slide.get("id") or "")
+                        if slide_id in weak_changes:
+                            self.pipeline.builder.slides[index] = deepcopy(source_slides[slide_id])
+                    self.pipeline.affected_slide_ids = [
+                        value for value in self.pipeline.affected_slide_ids
+                        if value not in weak_changes
+                    ]
+                    for slide_id in weak_changes:
+                        item = compile_by_id[slide_id]
+                        item["status"] = "preserved"
+                        item["warnings"] = list(dict.fromkeys([
+                            *(item.get("warnings") or []),
+                            "未达到显式目标或可感知改善阈值，已保留原布局",
+                        ]))
+                    current_slides = {
+                        str(item.get("id") or ""): item
+                        for item in self.pipeline.builder.to_ppt_content().get("slides", [])
+                    }
+                    changed_visual -= weak_changes
                 coverage = {
                     slide_id: render_coverage(current_slides[slide_id], baseline=source_slides[slide_id])
-                    for slide_id in target_ids if slide_id in source_slides and slide_id in current_slides
+                    for slide_id in changed_visual if slide_id in source_slides and slide_id in current_slides
                 }
                 self.pipeline.render_coverage = coverage
                 missing = {slide_id: item["missing_refs"] for slide_id, item in coverage.items() if item["missing_refs"]}
@@ -716,25 +1702,58 @@ class PPTAgentRuntime:
                         "layout_incomplete" if incomplete_absolute else "content_not_rendered",
                         "绝对布局没有覆盖页面全部必要文字，已保留原 PPT 版本。" if incomplete_absolute
                         else "页面文字没有完整进入最终版式，已保留原 PPT 版本。",
-                        retryable=True, details={"missing": missing},
+                        retryable=False, details={"missing": missing},
                     )
-                # 单调性门禁：preserve/restore 必须产生实际几何变化，否则视为修复收敛到空转。
-                unchanged = [
+                # 单调性门禁：preserve/restore 必须产生实际可见变化。
+                # 字号、颜色等样式调整也是合法的排版结果，不能只比较几何。
+                unchanged = sorted(target_ids - changed_visual)
+                if not changed_visual:
+                    self.pipeline.result_status = "no_change"
+                elif unchanged:
+                    self.pipeline.result_status = "partial"
+                else:
+                    self.pipeline.result_status = "applied"
+            elif self.pipeline.content_policy == "edit" and source_slides:
+                semantic_changes = {
                     slide_id for slide_id in target_ids
                     if slide_id in source_slides and slide_id in current_slides
-                    and semantic_geometry_hash(source_slides[slide_id]) == semantic_geometry_hash(current_slides[slide_id])
-                ]
-                if unchanged:
-                    self.pipeline.blocking_issues.append({
-                        "severity": "major", "slide_id": unchanged[0], "rule_id": "layout.monotony",
-                        "message": "润色后页面布局没有实际变化", "target_agent": "layout",
-                    })
-                    raise PPTAgentError(
-                        "layout_monotony", "润色后页面布局没有实际变化，已保留原 PPT 版本。",
-                        retryable=True, details={"slides": sorted(unchanged)},
+                    and semantic_content_changed(source_slides[slide_id], current_slides[slide_id])
+                }
+                visual_changes = {
+                    slide_id for slide_id in target_ids
+                    if slide_id in source_slides and slide_id in current_slides
+                    and semantic_visual_hash(source_slides[slide_id]) != semantic_visual_hash(current_slides[slide_id])
+                }
+                text_only = bool(operation_domains) and operation_domains <= {"text", "qa", "export"}
+                if text_only:
+                    from app.agent.slide_rendering import semantic_geometry_hash
+                    geometry_changes = sorted(
+                        slide_id for slide_id in target_ids
+                        if slide_id in source_slides and slide_id in current_slides
+                        and semantic_geometry_hash(source_slides[slide_id])
+                        != semantic_geometry_hash(current_slides[slide_id])
                     )
+                    if geometry_changes:
+                        raise PPTAgentError(
+                            "content_geometry_changed",
+                            "只改文字的任务意外调整了页面几何，已保留原 PPT 版本。",
+                            retryable=False, details={"slides": geometry_changes},
+                        )
+                changed_ids = semantic_changes | visual_changes
+                if not changed_ids:
+                    self.pipeline.result_status = "no_change"
+                    self.pipeline.affected_slide_ids = []
+                    self.pipeline.mutation_applied = True
+                elif target_ids - changed_ids:
+                    self.pipeline.result_status = "partial"
+                else:
+                    self.pipeline.result_status = "applied"
             self.pipeline.publishable = True
             final["publishable"] = True
+            final["result_status"] = getattr(self.pipeline, "result_status", "applied")
+            final["layout_compile_results"] = list(
+                getattr(self.pipeline, "layout_compile_results", None) or []
+            )
             return
         expected = list(self.pipeline.expected_visual_requests)
         expected_slides = {str(item.get("slide_id") or "") for item in expected if item.get("slide_id")}
@@ -779,7 +1798,7 @@ class PPTAgentRuntime:
         if changed_content:
             raise PPTAgentError(
                 "content_accidentally_removed", "图片润色意外修改了页面文字，已保留原 PPT 版本。",
-                retryable=True, details={"slides": sorted(changed_content)},
+                retryable=False, details={"slides": sorted(changed_content)},
             )
         coverage = {
             slide_id: render_coverage(current_slides[slide_id], baseline=source_slides[slide_id])
@@ -793,13 +1812,26 @@ class PPTAgentRuntime:
                 "layout_incomplete" if incomplete_absolute else "content_not_rendered",
                 "图片布局没有覆盖页面全部必要文字，已保留原 PPT 版本。" if incomplete_absolute
                 else "图片已生成，但页面文字没有完整进入最终版式，已保留原 PPT 版本。",
-                retryable=True, details={"missing": missing_content},
+                retryable=False, details={"missing": missing_content},
             )
         qa_data = self.pipeline.context.get_tool_output("run_qa") or {}
+        artifacts = getattr(self.pipeline, "artifacts", None)
+        if not qa_data and artifacts is not None:
+            # Tool context is intentionally bounded and may evict ``run_qa``
+            # after a media-heavy run.  The persisted visual_qa Artifact is
+            # the durable evidence source and must remain publishable.
+            qa_artifact = await artifacts.latest("visual_qa")
+            qa_data = dict((qa_artifact or {}).get("data") or {})
         if not qa_data or "score" not in qa_data or "issues" not in qa_data:
             raise PPTAgentError(
                 "qa_unavailable", "目标页面没有获得本轮有效质量检查，已保留原 PPT 版本。",
-                retryable=True,
+                retryable=True, details={
+                    "available_tool_results": [
+                        str(getattr(item, "tool_name", ""))
+                        for item in getattr(self.pipeline.context, "tool_results", [])
+                    ],
+                    "has_visual_qa_artifact": bool(qa_data),
+                },
             )
         blocking = [item for item in qa_data.get("issues", []) if item.get("severity") in {"critical", "major"}]
         self.pipeline.blocking_issues = blocking
@@ -811,6 +1843,64 @@ class PPTAgentRuntime:
         self.pipeline.publishable = True
         final["publishable"] = True
         final["blocking_issues"] = []
+
+    @staticmethod
+    def _media_preservation_signature(slide: dict[str, Any]) -> str:
+        """Hash image/chart identity, crop and logical slot, but not geometry."""
+        media: list[dict[str, Any]] = []
+        for element in slide.get("elements") or []:
+            if element.get("kind") not in {"image", "chart"}:
+                continue
+            # Geometry may be adjusted by layout/image_geometry, but every
+            # other property belongs to the protected asset/editability layer.
+            record = {
+                str(key): value for key, value in element.items()
+                if key not in {"x", "y", "w", "h", "z"}
+            }
+            media.append(record)
+        media.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+        return json.dumps(media, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+    @classmethod
+    def _assert_revision_scope_integrity(
+        cls,
+        source_slides: list[dict[str, Any]],
+        current_slides: list[dict[str, Any]],
+        target_ids: set[str],
+    ) -> None:
+        """Revision runs cannot change page identity or pages outside scope."""
+        source_ids = [str(item.get("id") or "") for item in source_slides]
+        current_ids = [str(item.get("id") or "") for item in current_slides]
+        if source_ids != current_ids:
+            raise PPTAgentError(
+                "revision_structure_changed",
+                "润色任务改变了页面数量或顺序，已保留原 PPT 版本。",
+                retryable=False,
+                details={"source_slide_ids": source_ids, "current_slide_ids": current_ids},
+            )
+        current_by_id = {str(item.get("id") or ""): item for item in current_slides}
+        changed_non_targets = [
+            slide_id for slide_id, source in zip(source_ids, source_slides)
+            if slide_id not in target_ids and source != current_by_id[slide_id]
+        ]
+        if changed_non_targets:
+            raise PPTAgentError(
+                "revision_scope_changed",
+                "润色任务修改了目标页之外的页面，已保留原 PPT 版本。",
+                retryable=False, details={"slides": changed_non_targets},
+            )
+        changed_media = [
+            slide_id for slide_id, source in zip(source_ids, source_slides)
+            if slide_id in target_ids
+            and cls._media_preservation_signature(source)
+            != cls._media_preservation_signature(current_by_id[slide_id])
+        ]
+        if changed_media:
+            raise PPTAgentError(
+                "media_preservation_failed",
+                "润色任务改变了受保护的图片资源、裁切或视觉槽位，已保留原 PPT 版本。",
+                retryable=False, details={"slides": changed_media},
+            )
 
     @staticmethod
     def _assert_image_scope_integrity(

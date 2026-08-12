@@ -19,6 +19,7 @@ _TYPE_DIRS: dict[str, str] = {
     "source_snapshot": "content",
     "presentation_narrative": "plans",
     "design_system": "analysis",
+    "slide_analysis": "analysis",
     "slide_content": "plans",
     "slide_layout": "plans",
     "visual_plan": "plans",

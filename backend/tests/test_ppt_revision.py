@@ -46,6 +46,68 @@ def test_validate_and_repair_returns_none_on_schema_failure():
     assert "结构校验失败" in err
 
 
+def test_validate_and_repair_coerces_invented_block_kinds():
+    """模型为"打破单调"发明的非法块结构（如 cards）必须规范化为合法 bullets，
+    而不是在流水线末端 PPTContent 校验时硬失败。"""
+    content = {"theme": "lessonforge_deck_academic", "slides": [
+        {"id": "S01", "page_type": "concept", "title": "浮力成因", "purpose": "p",
+         "body": ["压力差产生浮力"], "layout": "bullet",
+         "visual_suggestion": "左文右图", "speaker_notes": "本页讲解上下表面压力差如何形成浮力。",
+         "duration_seconds": 30,
+         "blocks": [{"kind": "cards", "cards": [
+             {"title": "1. 侧面平衡", "desc": "四周受力对称抵消"},
+             {"title": "2. 上下差值", "desc": "下表面压力更大"},
+         ]}]},
+    ]}
+    repaired, err = _validate_and_repair_ppt(content)
+    assert err == ""
+    block = repaired["slides"][0]["blocks"][0]
+    assert block["kind"] == "bullets"
+    assert [item["text"] for item in block["items"]] == ["1. 侧面平衡", "四周受力对称抵消", "2. 上下差值", "下表面压力更大"]
+
+
+def test_validate_and_repair_clips_dense_block_bullets():
+    """blocks 的 bullets 条目超 25 字（含装饰前缀）必须被确定性收敛，
+    不能继续阻断 QA 门禁/最终校验。"""
+    from app.services.ppt_knowledge_service import check_ppt_against_knowledge
+
+    content = {"theme": "lessonforge_deck_academic", "slides": [
+        {"id": "S01", "page_type": "concept", "title": "浮力成因", "purpose": "p",
+         "body": ["压力差产生浮力"], "layout": "bullet",
+         "visual_suggestion": "左文右图", "speaker_notes": "本页讲解上下表面压力差如何形成浮力。",
+         "duration_seconds": 30,
+         "blocks": [{"kind": "bullets", "items": [
+             {"text": "🔹 本质公式：上下表面压力差形成浮力 F浮=F下-F上"},
+         ]}]},
+    ]}
+    repaired, err = _validate_and_repair_ppt(content)
+    assert err == ""
+    item = repaired["slides"][0]["blocks"][0]["items"][0]
+    assert len(item["text"]) <= 25
+    assert not item["text"].startswith("🔹")
+    assert not check_ppt_against_knowledge(repaired)
+
+
+def test_validate_and_repair_clips_long_unit_without_ellipsis_overflow():
+    """截断不得产生 26 字（25 字 + 省略号）：无尾随标点时也必须 ≤25 字，
+    否则修复轮永远无法收敛（第 1 个文本单元 26 字 > 25 字）。"""
+    from app.services.ppt_knowledge_service import check_ppt_against_knowledge
+
+    content = {"theme": "lessonforge_deck_academic", "slides": [
+        {"id": "S01", "page_type": "concept", "title": "浮力成因", "purpose": "p",
+         "body": ["压力差产生浮力"], "layout": "bullet",
+         "visual_suggestion": "左文右图", "speaker_notes": "本页讲解上下表面压力差如何形成浮力。",
+         "duration_seconds": 30,
+         "blocks": [{"kind": "quote", "text": "深度增加使水压显著增大，但完全浸没后浮力为什么保持不变？",
+                     "citation": "预习难点剖析"}]},
+    ]}
+    repaired, err = _validate_and_repair_ppt(content)
+    assert err == ""
+    text = repaired["slides"][0]["blocks"][0]["text"]
+    assert len(text) <= 25
+    assert not check_ppt_against_knowledge(repaired)
+
+
 def test_restore_locked_paths_preserves_locked_values():
     source = _content()
     ai = _content()

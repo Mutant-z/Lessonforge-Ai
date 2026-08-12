@@ -22,9 +22,11 @@ from app.agent.pipeline import (
     run_revision_loop,
 )
 from app.agent.registry import ToolContext
+from app.agent.slide_rendering import canonical_slide_id, runtime_baseline_slides
+from app.agent.schemas import PPTAgentError
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import AgentMessage, Artifact, ArtifactLock, GenerationRun, PipelineRun
+from app.models.entities import AgentMessage, Artifact, ArtifactLock, GenerationRun, PipelineRun, PPTRevision
 from app.providers.llm.mock import MockProvider
 from app.renderers.presentation_builder import PresentationBuilder, design_system_for
 from app.schemas.artifact import AgentArtifactRevisionPayload, PPTContent
@@ -58,14 +60,30 @@ def _page_number(value: str) -> int | None:
     return None
 
 
-def _resolve_message_slide_ids(content: str, source_slides: list[dict]) -> list[str]:
+def _resolve_message_slide_ids(
+    content: str, source_slides: list[dict], metadata: dict | None = None,
+) -> list[str]:
     """把教师自然语言中的页面范围转换为稳定 slide ID。"""
+    metadata = dict(metadata or {})
+    structured_targets = list(
+        metadata.get("target_slide_ids") or metadata.get("selected_slide_ids") or []
+    )
+    if structured_targets:
+        return [str(value) for value in structured_targets if str(value)]
     selected: list[str] = []
     if content.startswith("[目标页面:"):
         scope = content.split("]", 1)[0].removeprefix("[目标页面:")
         selected = [item.strip() for item in scope.split(",") if item.strip()]
     if selected:
         return selected
+
+    active_slide_id = str(metadata.get("active_slide_id") or "")
+    if not active_slide_id:  # compatibility for historical prefixed messages
+        active_match = re.search(r"\[活动页面:([^\]]+)\]", content)
+        active_slide_id = active_match.group(1).strip() if active_match else ""
+    if active_slide_id and any(token in content for token in ("本页", "当前页", "这一页", "该页")):
+        if active_slide_id in {str(item.get("id") or "") for item in source_slides}:
+            return [active_slide_id]
 
     page_number = 1 if any(token in content for token in ("首页", "封面", "首张")) else None
     if page_number is None:
@@ -75,6 +93,21 @@ def _resolve_message_slide_ids(content: str, source_slides: list[dict]) -> list[
     if page_number and 1 <= page_number <= len(source_slides):
         return [str(source_slides[page_number - 1].get("id") or f"S{page_number:02d}")]
     return []
+
+
+async def _inherited_message_scope(runtime: PipelineRuntime) -> list[str]:
+    """Reuse the previous revision scope for elliptical follow-ups."""
+    source = runtime.source_artifact
+    if source is None:
+        return []
+    async with SessionLocal() as db:
+        revision = await db.scalar(select(PPTRevision).where(
+            PPTRevision.artifact_id == source.id,
+        ).order_by(PPTRevision.version.desc()).limit(1))
+        previous = await db.get(PipelineRun, revision.pipeline_run_id) if revision and revision.pipeline_run_id else None
+    scope = list(((previous.plan_json if previous else {}) or {}).get("effective_scope") or [])
+    canonical = {str(item.get("id") or "") for item in runtime_baseline_slides(runtime)}
+    return [slide_id for slide_id in scope if slide_id in canonical]
 
 
 @dataclass
@@ -91,6 +124,7 @@ class PipelineRunResult:
     source_versions: dict = field(default_factory=dict)
     change_summary: str = "首次生成"
     runtime: PipelineRuntime | None = None
+    skip_publish: bool = False
 
 
 async def _latest_artifact(db, course_id: str, kind: str) -> Artifact | None:
@@ -156,6 +190,7 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         preferred_template=preferred_template, trigger_type=generation_run.trigger_type,
         context=context, builder=builder, artifacts=artifacts, emitter=emitter,
         workspace_root=workspace, pause_event=PAUSE_EVENTS.setdefault(generation_run.id, asyncio.Event()),
+        request_metadata=dict(getattr(user_message, "metadata_json", None) or {}),
     )
     await emitter.pipeline_started(generation_run.trigger_type or "")
     # Codex 式消息语义：执行状态只进入 trace，assistant 正文只承载最终答复。
@@ -183,6 +218,11 @@ async def _finish_pipeline(
             row.status = status
             row.token_usage_json = runtime.token_usage
             row.error_json = {"message": error} if error else None
+            row.plan_json = {
+                **(row.plan_json or {}),
+                "result_status": getattr(runtime, "result_status", "applied"),
+                "page_results": list(getattr(runtime, "layout_compile_results", None) or []),
+            }
             if status in {"completed", "failed", "cancelled"}:
                 from app.models.entities import now
                 row.finished_at = now()
@@ -264,19 +304,66 @@ async def _run_pipeline_message_agentic(runtime: PipelineRuntime, message: Agent
             runtime.context.template = design_system_for(candidate)
             break
     source_slides = list((getattr(runtime.source_artifact, "content_json", {}) or {}).get("slides") or [])
-    selected_slide_ids = _resolve_message_slide_ids(message.content, source_slides)
+    selected_slide_ids = _resolve_message_slide_ids(
+        message.content, source_slides, getattr(message, "metadata_json", None),
+    )
+    if selected_slide_ids:
+        canonical_ids = [str(item.get("id") or "") for item in source_slides]
+        normalized = [canonical_slide_id(value, canonical_ids) for value in selected_slide_ids]
+        if any(value is None for value in normalized):
+            raise PPTAgentError(
+                "invalid_slide_scope", "页面范围不属于当前 PPT，未执行润色。",
+                retryable=False, details={"requested_slide_ids": selected_slide_ids},
+            )
+        selected_slide_ids = list(dict.fromkeys(str(value) for value in normalized if value))
+    if not selected_slide_ids and any(token in message.content for token in (
+        "再大一点", "再小一点", "再放大", "再缩小", "继续调整",
+    )):
+        selected_slide_ids = await _inherited_message_scope(runtime)
     await emitter.agent_status_delta("orchestrator", "正在理解修改范围并创建动态执行计划。\n")
     await emitter.revision_started(1, runtime.pipeline_run.max_revision_rounds, reason=message.content[:200], target_agents=["orchestrator"])
     await emitter.emit_domain("repair.started", message="已开始创建 PPT 新修订版本", payload={"revision": version, "selected_slide_ids": selected_slide_ids})
     await PPTAgentRuntime(runtime).run(selected_slide_ids=selected_slide_ids)
     await _pause_at_safe_boundary(runtime, "revision")
     content = finalize_content(runtime)
-    await _write_final_pptx(runtime, content, version=version)
-    assistant_reply = f"已根据你的要求创建 PPT V{version}；原版本和页面级修改记录可在版本历史中恢复。"
+    results = list(runtime.layout_compile_results)
+    preserved = [item["slide_id"] for item in results if item.get("status") == "preserved"]
+    applied = [item["slide_id"] for item in results if item.get("status") != "preserved"]
+    if runtime.result_status in {"no_change", "needs_confirmation"}:
+        content = dict(getattr(runtime.source_artifact, "content_json", {}) or content)
+        assistant_reply = (
+            "修改范围或目标存在歧义，请确认解析摘要后再执行；本轮未创建新版本。"
+            if runtime.result_status == "needs_confirmation"
+            else "当前页面没有获得可验证的安全改善，本轮未创建空转版本；原 PPT 保持不变。"
+        )
+    else:
+        await _write_final_pptx(runtime, content, version=version)
+        if runtime.result_status == "partial":
+            assistant_reply = (
+                f"已根据要求创建 PPT V{version}，安全更新 {len(applied)} 页；"
+                f"{len(preserved)} 页因内容密度较高保留原布局。"
+            )
+        else:
+            assistant_reply = f"已根据你的要求创建 PPT V{version}；原版本和页面级修改记录可在版本历史中恢复。"
     runtime.dialogue_summary = assistant_reply
     revision_payload = AgentArtifactRevisionPayload(content_json=content, assistant_reply=assistant_reply)
     await emitter.revision_completed(1, applied_changes=[f"教师指令：{message.content[:60]}"])
     await emitter.emit_domain("repair.completed", message="PPT 修订已完成", payload={"revision": version})
+    await emitter.emit_domain(
+        "polish.result",
+        message=assistant_reply,
+        payload={
+            "result_status": runtime.result_status,
+            "page_results": results,
+            "applied_slide_ids": applied,
+            "preserved_slide_ids": preserved,
+            "warnings": [warning for item in results for warning in (item.get("warnings") or [])],
+            **({
+                "request_id": runtime.candidate_request_id,
+                "options": list(runtime.candidate_options),
+            } if runtime.candidate_request_id else {}),
+        },
+    )
     await runtime.emitter.agent_message_append(assistant_reply)
     return content, revision_payload
 
@@ -423,7 +510,7 @@ async def run_ppt_pipeline(db, course, task, run: GenerationRun, blueprint) -> P
             content=content, revision=revision_payload, user_message=user_message,
             model_name=model_name, profile=profile, provider=provider, locks=locks,
             source_versions=source_versions, change_summary=f"Agent 对话修改：{user_message.content[:80]}",
-            runtime=runtime,
+            runtime=runtime, skip_publish=runtime.result_status in {"no_change", "needs_confirmation"},
         )
     if run.trigger_type == "sync_context":
         if not source:

@@ -50,6 +50,19 @@ class PPTStep(BaseModel):
     title: str
     detail: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_text_detail(cls, value):
+        """Normalize the field name older/model-authored patches used.
+
+        ``detail`` remains the canonical wire/storage field.  Accepting
+        ``text`` here prevents otherwise valid step copy from being silently
+        discarded by Pydantic's default extra-field handling.
+        """
+        if isinstance(value, dict) and "detail" not in value and "text" in value:
+            value = {**value, "detail": value.get("text")}
+        return value
+
 
 class PPTStepsBlock(BaseModel):
     """递进步骤卡片：编号 + 标题 + 细节。"""

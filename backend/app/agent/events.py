@@ -206,10 +206,15 @@ class PipelineEventEmitter:
                                degraded_reason=degraded_reason[:300])
 
     async def qa_completed(self, score: float, issues_count: int, severity_counts: dict[str, int],
-                           round_: int = 0, degraded: bool = False, issues: list[dict[str, Any]] | None = None):
+                           round_: int = 0, degraded: bool = False, issues: list[dict[str, Any]] | None = None,
+                           *, qa_level: str = "geometry", geometry_score: float | None = None,
+                           visual_quality_score: float | None = None, improvement_delta: float = 0.0):
         return await self.emit("qa_completed", score=score, issues_count=issues_count,
                                severity_counts=severity_counts, round=round_, degraded=degraded,
-                               issues=(issues or [])[:12])
+                               issues=(issues or [])[:12], qa_level=qa_level,
+                               geometry_score=geometry_score,
+                               visual_quality_score=visual_quality_score,
+                               improvement_delta=improvement_delta)
 
     async def revision_started(self, round_: int, max_rounds: int, reason: str = "", target_agents: list[str] | None = None):
         return await self.emit("revision_started", round=round_, max_rounds=max_rounds, reason=reason[:500],

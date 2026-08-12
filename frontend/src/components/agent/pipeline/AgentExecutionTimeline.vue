@@ -4,7 +4,9 @@ import { buildAgentTurns } from '../../../composables/useAgentStream';
 import type { AgentStreamNode } from '../../../composables/useAgentStream';
 import type { PipelineTimelineItem } from '../../../stores/pipeline';
 import type { CourseTask } from '../../../types';
+import type { PPTLayoutCandidateRanking, PPTPolishObjectiveResult, PPTPolishPageResult } from '../../../types/agentPipeline';
 import MarkdownRenderer from '../../content-renderers/MarkdownRenderer.vue';
+import AuthenticatedPreviewImage from './AuthenticatedPreviewImage.vue';
 
 const props = defineProps<{
   items: PipelineTimelineItem[];
@@ -13,11 +15,12 @@ const props = defineProps<{
   isRunning?: boolean;
   agentThoughts?: Record<string, string>;
   agentStatusTexts?: Record<string, string>;
+  humanResponsePending?: string;
 }>();
 
 const emit = defineEmits<{
   (e: 'select-slide', slideIndex: number): void;
-  (e: 'human-response', requestId: string, choice: string): void;
+  (e: 'human-response', requestId: string, choice: string, data?: Record<string, unknown>): void;
 }>();
 
 const scrollRef = ref<HTMLElement | null>(null);
@@ -117,6 +120,290 @@ function eventIssues(node: Extract<AgentStreamNode, { kind: 'event' }>): IssueDe
     .filter(detail => detail.message || detail.rule_id);
 }
 
+function eventPayload(node: Extract<AgentStreamNode, { kind: 'event' }>): Record<string, any> {
+  const payload = node.data?.payload;
+  return {
+    ...(node.data || {}),
+    ...(payload && typeof payload === 'object' ? payload : {}),
+  };
+}
+
+interface HumanOption {
+  id: string;
+  label: string;
+  candidate_id?: string;
+  preview_url?: string;
+  render_path?: string;
+  quality_score?: number;
+  quality_delta?: number;
+  [key: string]: unknown;
+}
+
+interface CandidateView {
+  candidateId: string;
+  choiceId: string;
+  label: string;
+  layoutType: string;
+  qualityScore: number | null;
+  qualityDelta: number | null;
+  previewUrl: string;
+  style: Record<string, unknown>;
+  objectives: PPTPolishObjectiveResult[];
+  slideId: string;
+  rank: number;
+}
+
+function humanOptions(node: Extract<AgentStreamNode, { kind: 'event' }>): HumanOption[] {
+  const options = eventPayload(node).options;
+  if (!Array.isArray(options)) return [];
+  return options
+    .filter((option): option is Record<string, any> => Boolean(option) && typeof option === 'object')
+    .map(option => ({
+      ...option,
+      id: String(option.id || option.choice || ''),
+      label: String(option.label || option.title || option.id || '确认'),
+      candidate_id: option.candidate_id ? String(option.candidate_id) : undefined,
+    }))
+    .filter(option => Boolean(option.id));
+}
+
+function asCandidateRanking(value: unknown): PPTLayoutCandidateRanking | null {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Record<string, any>;
+  const candidateId = String(item.candidate_id || item.id || '');
+  if (!candidateId) return null;
+  return {
+    ...item,
+    candidate_id: candidateId,
+    objective_results: Array.isArray(item.objective_results) ? item.objective_results : [],
+  };
+}
+
+function pageResults(node: Extract<AgentStreamNode, { kind: 'event' }>): PPTPolishPageResult[] {
+  const values = eventPayload(node).page_results;
+  return Array.isArray(values)
+    ? values.filter(value => Boolean(value) && typeof value === 'object') as PPTPolishPageResult[]
+    : [];
+}
+
+function candidateViews(node: Extract<AgentStreamNode, { kind: 'event' }>): CandidateView[] {
+  const payload = eventPayload(node);
+  const options = humanOptions(node);
+  const sources: Array<{ candidate: PPTLayoutCandidateRanking; slideId: string }> = [];
+  const addValues = (values: unknown, slideId = '') => {
+    if (!Array.isArray(values)) return;
+    for (const value of values) {
+      const candidate = asCandidateRanking(value);
+      if (candidate) sources.push({ candidate, slideId });
+    }
+  };
+  addValues(payload.candidates, String(payload.slide_id || ''));
+  addValues(payload.candidate_rankings, String(payload.slide_id || ''));
+  for (const page of pageResults(node)) {
+    if (page.requires_candidate_confirmation || node.type === 'polish.result') {
+      addValues(page.candidate_rankings, String(page.slide_id || ''));
+    }
+  }
+  // Some backends put the complete candidate directly into each human option.
+  addValues(options.filter(option => option.candidate_id), String(payload.slide_id || ''));
+
+  const previews = payload.preview_urls && typeof payload.preview_urls === 'object'
+    ? payload.preview_urls as Record<string, string>
+    : {};
+  const seen = new Set<string>();
+  const result: CandidateView[] = [];
+  for (const { candidate, slideId } of sources) {
+    if (seen.has(candidate.candidate_id)) continue;
+    seen.add(candidate.candidate_id);
+    const option = options.find(value => value.candidate_id === candidate.candidate_id || value.id === candidate.candidate_id);
+    const raw = candidate as Record<string, any>;
+    const preview = String(
+      option?.preview_url || option?.render_path
+      || raw.preview_url || raw.candidate_png || raw.render_path
+      || previews[candidate.candidate_id] || '',
+    );
+    result.push({
+      candidateId: candidate.candidate_id,
+      choiceId: option?.id || candidate.candidate_id,
+      label: option?.label || `方案 ${result.length + 1}`,
+      layoutType: String(candidate.layout_type || raw.recipe || '候选布局'),
+      qualityScore: typeof candidate.quality_score === 'number' ? candidate.quality_score : null,
+      qualityDelta: typeof candidate.quality_delta === 'number' ? candidate.quality_delta : null,
+      previewUrl: preview,
+      style: candidate.style && typeof candidate.style === 'object' ? candidate.style : {},
+      objectives: Array.isArray(candidate.objective_results) ? candidate.objective_results : [],
+      slideId,
+      rank: typeof candidate.rank === 'number' ? candidate.rank : result.length + 1,
+    });
+  }
+  return result.sort((a, b) => a.rank - b.rank).slice(0, 2);
+}
+
+function shouldShowCandidateComparison(node: Extract<AgentStreamNode, { kind: 'event' }>): boolean {
+  if (!candidateViews(node).length) return false;
+  const payload = eventPayload(node);
+  return node.type === 'human.required'
+    || Boolean(payload.requires_candidate_confirmation)
+    || pageResults(node).some(page => page.requires_candidate_confirmation);
+}
+
+function humanRequestId(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  return String(eventPayload(node).request_id || '');
+}
+
+function objectivePassed(objective: PPTPolishObjectiveResult): boolean | null {
+  if (typeof objective.passed === 'boolean') return objective.passed;
+  if (typeof objective.met === 'boolean') return objective.met;
+  if (typeof objective.achieved === 'boolean') return objective.achieved;
+  return null;
+}
+
+function objectiveStatusLabel(objective: PPTPolishObjectiveResult): string {
+  const passed = objectivePassed(objective);
+  return passed === true ? '达标' : passed === false ? '未达标' : '目标';
+}
+
+const OBJECTIVE_LABELS: Record<string, string> = {
+  font_size: '字号', vertical_utilization: '纵向利用', horizontal_utilization: '横向利用',
+  whitespace_balance: '留白平衡', spacing: '间距', alignment: '对齐', density: '密度',
+  image_scale: '图片尺寸', contrast: '对比度', layout_quality: '综合质量',
+};
+
+function objectiveLabel(objective: PPTPolishObjectiveResult): string {
+  const label = OBJECTIVE_LABELS[String(objective.metric || '')] || String(objective.metric || '目标');
+  const final = typeof objective.final === 'number' ? ` ${formatCandidateNumber(objective.final)}` : '';
+  return `${label}${final}`;
+}
+
+function formatCandidateNumber(value: number): string {
+  if (Math.abs(value) <= 1) return `${Math.round(value * 100)}%`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function candidateStyleLabel(candidate: CandidateView): string {
+  const tier = String(candidate.style.font_tier || '');
+  const scale = typeof candidate.style.font_scale === 'number' ? Number(candidate.style.font_scale) : null;
+  const parts = [tier === 'spacious' ? '舒展字号' : tier === 'compact' ? '紧凑字号' : tier ? '标准字号' : ''];
+  if (scale && scale !== 1) parts.push(`×${scale.toFixed(2)}`);
+  return parts.filter(Boolean).join(' · ');
+}
+
+function isBrowserPreview(url: string): boolean {
+  return /^(?:https?:|data:image\/|blob:|\/api\/|\/static\/|\/uploads\/)/.test(url);
+}
+
+function turnCandidateEventId(turn: { trace: AgentStreamNode[] }): string {
+  const events = turn.trace.filter(
+    (node): node is Extract<AgentStreamNode, { kind: 'event' }> => node.kind === 'event',
+  );
+  // Candidate rankings are also retained in compile diagnostics.  They are
+  // not a selectable preview by themselves: after a teacher chooses one, the
+  // continuation run used to render a second, URL-less comparison card from
+  // those diagnostics.  Only show the comparison when this turn owns a real
+  // confirmation request with candidate options.
+  const hasCandidateRequest = events.some(event => (
+    Boolean(humanRequestId(event))
+    && humanOptions(event).some(option => Boolean(option.candidate_id))
+  ));
+  if (!hasCandidateRequest) return '';
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (shouldShowCandidateComparison(events[index])) return events[index].id;
+  }
+  return '';
+}
+
+function confirmationEventForTurn(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+): Extract<AgentStreamNode, { kind: 'event' }> {
+  if (humanRequestId(node)) return node;
+  const slideId = String(eventPayload(node).slide_id || candidateViews(node)[0]?.slideId || '');
+  const events = turn.trace.filter(
+    (candidate): candidate is Extract<AgentStreamNode, { kind: 'event' }> => candidate.kind === 'event',
+  );
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const candidate = events[index];
+    if (candidate.type !== 'human.required' || !humanRequestId(candidate)) continue;
+    const candidateSlideId = String(eventPayload(candidate).slide_id || candidateViews(candidate)[0]?.slideId || '');
+    if (!slideId || !candidateSlideId || candidateSlideId === slideId) return candidate;
+  }
+  return node;
+}
+
+function mergedCandidateViews(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+): CandidateView[] {
+  const confirmation = confirmationEventForTurn(turn, node);
+  const confirmedOptions = humanOptions(confirmation);
+  const requestId = humanRequestId(confirmation);
+  const byId = new Map(candidateViews(confirmation).map(candidate => [candidate.candidateId, candidate]));
+  for (const candidate of candidateViews(node)) {
+    const existing = byId.get(candidate.candidateId);
+    const option = confirmedOptions.find(value => (
+      value.candidate_id === candidate.candidateId || value.id === candidate.choiceId
+    ));
+    const fallback = requestId && option?.id
+      ? `/api/v1/ppt-agent/runs/${node.runId}/candidate-previews/${requestId}/${option.id}`
+      : '';
+    byId.set(candidate.candidateId, {
+      ...(existing || candidate),
+      ...candidate,
+      choiceId: option?.id || existing?.choiceId || candidate.choiceId,
+      label: option?.label || existing?.label || candidate.label,
+      previewUrl: option?.preview_url || existing?.previewUrl || candidate.previewUrl || fallback,
+    });
+  }
+  return [...byId.values()].sort((a, b) => a.rank - b.rank).slice(0, 2);
+}
+
+function turnHumanRequestId(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+): string {
+  return humanRequestId(confirmationEventForTurn(turn, node));
+}
+
+function turnHumanOptions(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+): HumanOption[] {
+  return humanOptions(confirmationEventForTurn(turn, node));
+}
+
+function submitTurnCandidate(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+  candidate: CandidateView,
+) {
+  submitCandidate(confirmationEventForTurn(turn, node), candidate);
+}
+
+function submitTurnHumanOption(
+  turn: { trace: AgentStreamNode[] },
+  node: Extract<AgentStreamNode, { kind: 'event' }>,
+  option: HumanOption,
+) {
+  submitHumanOption(confirmationEventForTurn(turn, node), option);
+}
+
+function submitCandidate(node: Extract<AgentStreamNode, { kind: 'event' }>, candidate: CandidateView) {
+  const requestId = humanRequestId(node);
+  if (!requestId) return;
+  emit('human-response', requestId, candidate.choiceId, { candidate_id: candidate.candidateId });
+}
+
+function submitHumanOption(node: Extract<AgentStreamNode, { kind: 'event' }>, option: HumanOption) {
+  const requestId = humanRequestId(node);
+  if (!requestId) return;
+  emit(
+    'human-response',
+    requestId,
+    option.id,
+    option.candidate_id ? { candidate_id: option.candidate_id } : {},
+  );
+}
+
 function toggleEvent(node: Extract<AgentStreamNode, { kind: 'event' }>) {
   const next = new Set(expandedEvents.value);
   if (next.has(node.id)) next.delete(node.id);
@@ -147,6 +434,8 @@ function eventIcon(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
     case 'asset_generated': return '🖼';
     case 'qa_completed': case 'qa_issue_found': case 'qa.issue': case 'qa.completed': return '🧪';
     case 'revision_started': case 'revision_completed': case 'repair.started': case 'repair.completed': return '🔄';
+    case 'layout.compile.result': return '📐';
+    case 'polish.result': return '✅';
     case 'skill.discovered': case 'skill.loaded': case 'skill.completed': return '🧩';
     case 'agent.handoff': return '↪';
     case 'human.required': return '🙋';
@@ -171,7 +460,10 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
         : `已生成视觉素材 ${d.file_path || ''}`;
     case 'qa_completed': case 'qa.completed': {
       const sev = d.severity_counts || d.payload?.severity_counts || {};
-      return d.message || `视觉 QA 评分 ${d.score ?? d.payload?.score ?? '-'} · 严重${sev.critical || 0}/主要${sev.major || 0}/次要${sev.minor || 0}`;
+      const level = d.qa_level || d.payload?.qa_level || 'geometry';
+      const label = level === 'vision' ? '视觉 QA' : level === 'raster' ? '真实渲染 QA' : '几何 QA（降级）';
+      const geometry = d.geometry_score ?? d.payload?.geometry_score ?? d.score ?? d.payload?.score ?? '-';
+      return d.message || `${label} · 几何 ${geometry} · 严重${sev.critical || 0}/主要${sev.major || 0}/次要${sev.minor || 0}`;
     }
     case 'qa_issue_found': case 'qa.issue':
       return `发现 QA 问题：${d.issue?.message || d.payload?.issue?.message || ''}`;
@@ -179,6 +471,18 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
       return d.message || `自动修订（第 ${d.round ?? d.payload?.round ?? 1}/${d.max_rounds ?? d.payload?.max_rounds ?? '?'} 轮）${d.reason || ''}`;
     case 'revision_completed': case 'repair.completed':
       return d.message || `修订完成（第 ${d.round ?? d.payload?.round ?? ''} 轮）`;
+    case 'layout.compile.result':
+      return d.message || `${d.slide?.slide_id || d.payload?.slide_id || '页面'} 布局编译完成`;
+    case 'polish.result': {
+      const status = d.payload?.result_status;
+      const applied = d.payload?.applied_slide_ids?.length || 0;
+      const preserved = d.payload?.preserved_slide_ids?.length || 0;
+      if (d.message) return d.message;
+      if (status === 'partial') return `已安全更新 ${applied} 页，${preserved} 页保留原布局`;
+      if (status === 'no_change') return '当前页面已达到安全排版上限，原版本保持不变';
+      if (status === 'needs_confirmation') return '修改范围或目标存在歧义，请确认后再执行';
+      return `已完成 ${applied} 页润色`;
+    }
     case 'plan.created': return d.message || '已创建动态执行计划';
     case 'skill.discovered': return `发现 Skill：${d.payload?.name || ''}`;
     case 'skill.loaded': return `已加载 Skill：${d.payload?.name || ''}`;
@@ -322,13 +626,87 @@ watch(traceSignature, () => {
             <span v-if="isIssueEvent(node.type) && eventIssues(node).length" class="expand-caret" aria-hidden="true">
               {{ expandedEvents.has(node.id) ? '▾' : '▸' }}
             </span>
-            <span v-if="node.type === 'human.required'" class="human-options">
-              <button v-for="option in node.data.payload?.options || []" :key="option.id" type="button"
-                      @click.stop="emit('human-response', node.data.payload?.request_id, option.id)">
+            <span v-if="node.type === 'human.required' && !shouldShowCandidateComparison(node)" class="human-options">
+              <button
+                v-for="option in humanOptions(node)"
+                :key="option.id"
+                type="button"
+                :disabled="humanResponsePending === humanRequestId(node)"
+                @click.stop="submitHumanOption(node, option)"
+              >
                 {{ option.label }}
               </button>
             </span>
           </div>
+          <section
+            v-if="node.kind === 'event' && node.id === turnCandidateEventId(turn)"
+            class="candidate-comparison"
+            @click.stop
+          >
+            <div class="candidate-comparison-head">
+              <div>
+                <strong>两个方案评分接近</strong>
+                <span>请选择更符合课堂表达的版式</span>
+              </div>
+              <span v-if="mergedCandidateViews(turn, node)[0]?.slideId" class="candidate-slide">{{ mergedCandidateViews(turn, node)[0].slideId }}</span>
+            </div>
+            <div class="candidate-grid">
+              <article v-for="candidate in mergedCandidateViews(turn, node)" :key="candidate.candidateId" class="candidate-card">
+                <div v-if="isBrowserPreview(candidate.previewUrl)" class="candidate-preview">
+                  <AuthenticatedPreviewImage :src="candidate.previewUrl" :alt="`${candidate.label}预览`" />
+                </div>
+                <div v-else class="candidate-preview candidate-preview-empty">
+                  <span>暂无渲染缩略图</span>
+                  <small>仍可依据评分与目标结果选择</small>
+                </div>
+                <div class="candidate-copy">
+                  <div class="candidate-title">
+                    <strong>{{ candidate.label }}</strong>
+                    <span>#{{ candidate.rank }}</span>
+                  </div>
+                  <div class="candidate-recipe">{{ candidate.layoutType }}<span v-if="candidateStyleLabel(candidate)"> · {{ candidateStyleLabel(candidate) }}</span></div>
+                  <div class="candidate-scores">
+                    <span>质量 <b>{{ candidate.qualityScore == null ? '—' : candidate.qualityScore.toFixed(1) }}</b></span>
+                    <span :class="(candidate.qualityDelta || 0) > 0 ? 'score-up' : 'score-flat'">
+                      较原页 {{ candidate.qualityDelta == null ? '—' : `${candidate.qualityDelta > 0 ? '+' : ''}${candidate.qualityDelta.toFixed(1)}` }}
+                    </span>
+                  </div>
+                  <div v-if="candidate.objectives.length" class="candidate-objectives">
+                    <span
+                      v-for="(objective, objectiveIndex) in candidate.objectives.slice(0, 3)"
+                      :key="`${candidate.candidateId}-${objective.metric}-${objectiveIndex}`"
+                      :class="{ pass: objectivePassed(objective) === true, fail: objectivePassed(objective) === false }"
+                    >
+                      {{ objectiveStatusLabel(objective) }} · {{ objectiveLabel(objective) }}
+                    </span>
+                  </div>
+                  <button
+                    v-if="turnHumanRequestId(turn, node)"
+                    type="button"
+                    class="candidate-select"
+                    :disabled="humanResponsePending === turnHumanRequestId(turn, node)"
+                    @click="submitTurnCandidate(turn, node, candidate)"
+                  >
+                    {{ humanResponsePending === turnHumanRequestId(turn, node) ? '提交中…' : `选择${candidate.label}` }}
+                  </button>
+                </div>
+              </article>
+            </div>
+            <div v-if="!turnHumanRequestId(turn, node)" class="candidate-readonly-note">
+              候选仅供比较；等待确认请求生成后即可选择。
+            </div>
+            <div v-else-if="turnHumanOptions(turn, node).some(option => !option.candidate_id)" class="candidate-secondary-actions">
+              <button
+                v-for="option in turnHumanOptions(turn, node).filter(option => !option.candidate_id)"
+                :key="option.id"
+                type="button"
+                :disabled="humanResponsePending === turnHumanRequestId(turn, node)"
+                @click="submitTurnHumanOption(turn, node, option)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </section>
           <div
             v-if="node.kind === 'event' && isIssueEvent(node.type) && expandedEvents.has(node.id)"
             class="event-issue-detail"
@@ -700,6 +1078,205 @@ watch(traceSignature, () => {
   font-weight: 700;
   margin-left: auto;
   flex-shrink: 0;
+}
+
+.human-options {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.human-options button,
+.candidate-secondary-actions button {
+  border: 1px solid #c4b5fd;
+  border-radius: 7px;
+  padding: 3px 8px;
+  background: #ffffff;
+  color: #5b21b6;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.human-options button:hover,
+.candidate-secondary-actions button:hover {
+  border-color: #7c3aed;
+  background: #f5f3ff;
+}
+
+.human-options button:disabled,
+.candidate-secondary-actions button:disabled,
+.candidate-select:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.candidate-comparison {
+  margin: 6px 0 8px 24px;
+  padding: 10px;
+  border: 1px solid #c4b5fd;
+  border-radius: 11px;
+  background: linear-gradient(180deg, #faf8ff, #ffffff);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.candidate-comparison-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.candidate-comparison-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.candidate-comparison-head strong {
+  color: #312e81;
+  font-size: 12px;
+}
+
+.candidate-comparison-head span {
+  color: #7c3aed;
+  font-size: 10px;
+}
+
+.candidate-slide {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #ede9fe;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.candidate-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #ffffff;
+  box-shadow: 0 2px 5px rgba(15, 23, 42, 0.04);
+}
+
+.candidate-preview {
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #eef2ff;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.candidate-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.candidate-preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: #64748b;
+  background:
+    linear-gradient(135deg, rgba(99, 102, 241, 0.07) 25%, transparent 25%) 0 0 / 12px 12px,
+    #f8fafc;
+}
+
+.candidate-preview-empty span { font-size: 10px; font-weight: 800; }
+.candidate-preview-empty small { font-size: 9px; color: #94a3b8; text-align: center; }
+
+.candidate-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+}
+
+.candidate-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #1e293b;
+}
+
+.candidate-title strong { font-size: 11px; }
+.candidate-title span { color: #94a3b8; font-size: 9px; font-weight: 800; }
+.candidate-recipe { color: #64748b; font-size: 9px; overflow-wrap: anywhere; }
+
+.candidate-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 9px;
+  color: #475569;
+}
+
+.candidate-scores b { color: #312e81; font-size: 11px; }
+.score-up { color: #15803d; font-weight: 800; }
+.score-flat { color: #64748b; }
+
+.candidate-objectives {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.candidate-objectives span {
+  width: fit-content;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 9px;
+}
+
+.candidate-objectives span.pass { color: #166534; background: #dcfce7; }
+.candidate-objectives span.fail { color: #b91c1c; background: #fee2e2; }
+
+.candidate-select {
+  width: 100%;
+  margin-top: 2px;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #4f46e5;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+.candidate-select:hover { background: #4338ca; }
+
+.candidate-readonly-note {
+  margin-top: 7px;
+  color: #7c3aed;
+  font-size: 9px;
+}
+
+.candidate-secondary-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+@media (max-width: 560px) {
+  .candidate-grid { grid-template-columns: 1fr; }
 }
 
 /* —— QA / 修复事件明细 —— */

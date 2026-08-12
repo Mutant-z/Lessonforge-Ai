@@ -155,6 +155,35 @@ def test_normalize_layout_params_bounds():
     assert normalize_layout_params({})["font_tier"] == "default"
 
 
+def test_failed_run_agenda_layout_falls_back_on_canvas_with_spacious_typography():
+    """Regression for fe88007e: nine agenda refs must not extend below 7.5in."""
+    slide = _slide(
+        page_type="objectives",
+        body=[
+            "解析受力本质：看清上下表面压力差",
+            "澄清深度误区：理解完全浸没后浮力不变",
+            "推导物理规律：通过溢水实验归纳阿基米德原理",
+        ],
+        blocks=[{"kind": "steps", "steps": [
+            {"title": "任务一：看清物理本质", "detail": "分析立方体受力，推导 F浮 = F下 - F上"},
+            {"title": "任务二：破解深度错觉", "detail": "辨析潜水艇下潜，明确浸没后浮力不变"},
+            {"title": "任务三：推导核心原理", "detail": "观察四步溢水实验，归纳 F浮 = G排"},
+        ]}],
+    )
+
+    out = compile_layout("lessonforge_deck_smart_ai", slide, {
+        "slide_id": "slide_03", "layout_type": "agenda_list",
+        "style": {"font_tier": "spacious", "gap_scale": 1.25},
+    })
+
+    assert out["layout_type"] == "split_two_column"
+    assert max(item["y"] + item["h"] for item in out["elements"]) <= 7.0 + 1e-6
+    assert {
+        item["style"].get("size") for item in out["elements"]
+        if item.get("content_ref") != "title"
+    } == {20}
+
+
 # ---------- Task 6: LayoutDirective schema + 引擎编译为可执行坐标 ----------
 
 from app.agent.schemas import LayoutDirectiveArtifact, SlideLayoutArtifact
@@ -171,6 +200,154 @@ def test_compile_layout_output_is_page_layout_spec_compatible():
     out = compile_layout("lessonforge_deck_academic", _slide(), {"slide_id": "S01", "layout_type": "bullet_flow"})
     spec = SlideLayoutArtifact.model_validate({"slides": [out]})
     assert spec.slides[0].elements
+
+
+def test_steps_layout_covers_body_and_legacy_step_text_from_failed_run():
+    """Regression for run 9263fbc8: body and step copy must both be visible."""
+    from app.agent.schemas import SlideContentPatch
+    from app.agent.slide_rendering import render_coverage
+
+    patch = SlideContentPatch.model_validate({"slides": [{
+        "id": "slide_03", "changed_fields": ["title", "body", "blocks"],
+        "title": "预习目标：三步解锁浮力奥秘",
+        "body": [
+            "理解浮力成因：推导上下表面压力差",
+            "澄清深度误区：完全浸没后浮力不变",
+            "掌握推导逻辑：溢水实验得出阿基米德原理",
+        ],
+        "blocks": [{"kind": "steps", "steps": [
+            {"title": "看本质", "text": "分析立方体水下受力，得出压力差公式"},
+            {"title": "破误区", "text": "剖析潜水艇下潜轨迹，说明浮力与深度无关"},
+            {"title": "推原理", "text": "观察溢水实验四步法，推导阿基米德原理"},
+        ]}],
+    }]}).slides[0].model_dump(exclude_none=True)
+    slide = {
+        **patch, "page_type": "objectives", "purpose": "", "layout": "bullet",
+        "visual_suggestion": "", "speaker_notes": "", "duration_seconds": 45,
+    }
+
+    out = compile_layout(
+        "lessonforge_deck_smart_ai", slide,
+        {"slide_id": "slide_03", "layout_type": "steps_horizontal"},
+    )
+
+    assert out["layout_type"] == "steps_horizontal"
+    assert slide["blocks"][0]["steps"][0]["detail"].startswith("分析立方体")
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
+    assert {f"body.{index}" for index in range(3)} <= {
+        item.get("content_ref") for item in out["elements"]
+    }
+
+
+def test_steps_layout_keeps_body_items_beyond_four_step_cards():
+    """Regression for run 56c065d4: slide_04 lost body.4/body.5."""
+    from app.agent.slide_rendering import render_coverage
+
+    slide = {
+        "id": "slide_04", "page_type": "concept",
+        "title": "阿基米德原理推导：四步溢水实验法", "purpose": "",
+        "body": [
+            "步骤1：用弹簧测力计测出物体重力 G物",
+            "步骤2：将物体浸没在装满水的溢水杯中",
+            "算出浮力：F浮 = G物 - F示",
+            "步骤3：收集物体排开的水",
+            "步骤4：测出排开水的重力",
+            "算出排开水重：G排 = G总 - G杯",
+        ],
+        "blocks": [{"kind": "steps", "steps": [
+            {"title": "步骤一：测物重", "detail": "记录物体在空气中的重力"},
+            {"title": "步骤二：浸没物体", "detail": "记录浸没后的弹簧测力计示数"},
+            {"title": "步骤三：收集排水", "detail": "用空杯接住全部溢出的水"},
+            {"title": "步骤四：测排水重", "detail": "称量水杯并计算排开水重"},
+        ]}],
+    }
+
+    out = compile_layout(
+        "lessonforge_deck_smart_ai", slide,
+        {"slide_id": "slide_04", "layout_type": "steps_horizontal"},
+    )
+
+    refs = {item.get("content_ref") for item in out["elements"]}
+    assert out["layout_type"] == "steps_horizontal"
+    assert {"body.4", "body.5"} <= refs
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
+    assert max(item["y"] + item["h"] for item in out["elements"]) <= 7.0 + 1e-6
+
+
+def test_analysis_fallback_reports_layout_page_and_missing_copy():
+    from types import SimpleNamespace
+
+    from app.agent.layouts.engine import LayoutCompileError
+    from app.agent.pipeline import _compile_layout_from_analysis
+    from app.agent.schemas import AgentDecision, PPTAgentError
+
+    slide = {
+        "id": "slide_04", "page_type": "concept", "title": "实验推导",
+        "purpose": "", "body": ["必要结论一", "必要结论二"], "blocks": [],
+    }
+    runtime = SimpleNamespace(
+        baseline_slides=[slide], content_policy="preserve", active_intent="GLOBAL_OPTIMIZE",
+        expected_visual_requests=[], preferred_template="lessonforge_deck_smart_ai",
+    )
+
+    class BrokenLayoutAgent:
+        @staticmethod
+        def _layout_slide(_slide, _visual, _template):
+            raise LayoutCompileError([], ["body.1"], True)
+
+    with pytest.raises(PPTAgentError) as raised:
+        _compile_layout_from_analysis(
+            runtime, AgentDecision(completed=True, output={"slides": []}), [slide], BrokenLayoutAgent(),
+        )
+
+    assert raised.value.code == "layout_incomplete"
+    assert "第 4 页" in raised.value.user_message
+    assert raised.value.details["slide_id"] == "slide_04"
+    assert raised.value.details["missing_refs"] == ["body.1"]
+    assert raised.value.details["missing_text"] == [{"ref": "body.1", "text": "必要结论二"}]
+
+
+def test_structured_preset_uses_real_block_index_and_mixed_content_falls_back_safely():
+    from app.agent.slide_rendering import render_coverage
+
+    blocks = [
+        {"kind": "quote", "text": "先提出问题", "citation": "导入"},
+        {"kind": "steps", "steps": [
+            {"title": "第一步", "detail": "观察"},
+            {"title": "第二步", "detail": "归纳"},
+        ]},
+    ]
+    slide = _slide(body=["观察现象", "归纳规律"], blocks=blocks, page_type="process")
+    direct = PRESETS["steps_horizontal"](
+        zones_for("lessonforge_deck_academic", "process"), slide, {},
+    )
+    assert any(
+        str(item.get("content_ref") or "").startswith("blocks.1.steps.")
+        for item in direct
+    )
+
+    out = compile_layout(
+        "lessonforge_deck_academic", slide,
+        {"slide_id": "S01", "layout_type": "steps_horizontal"},
+    )
+    assert out["layout_type"] == "split_two_column"
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
+
+
+def test_more_than_four_steps_falls_back_without_losing_tail_steps():
+    from app.agent.slide_rendering import render_coverage
+
+    blocks = [{"kind": "steps", "steps": [
+        {"title": f"第 {index + 1} 步", "detail": f"步骤说明 {index + 1}"}
+        for index in range(6)
+    ]}]
+    slide = _slide(body=[f"正文 {index + 1}" for index in range(6)], blocks=blocks, page_type="process")
+    out = compile_layout(
+        "lessonforge_deck_academic", slide,
+        {"slide_id": "S01", "layout_type": "steps_horizontal"},
+    )
+    assert out["layout_type"] == "split_two_column"
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
 
 
 async def test_ensure_executable_layout_compiles_directive_via_engine():
@@ -214,3 +391,630 @@ async def test_ensure_executable_layout_compiles_directive_via_engine():
     assert len(body) == 2
     xs = {round(float(el.x), 1) for el in body}
     assert len(xs) == 2, "split_two_column 应生成左右双栏"
+
+
+@pytest.mark.asyncio
+async def test_layout_only_ignores_phantom_visual_region_from_structured_model():
+    """Regression for b2ae2c7b: optional model fields must not invent an image slot."""
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.pipeline import _ensure_executable_layout
+    from app.agent.schemas import AgentDecision
+
+    source = {
+        **_slide(
+            page_type="objectives",
+            body=["目标一", "目标二", "目标三"],
+            blocks=[{"kind": "steps", "steps": [
+                {"title": "任务一", "detail": "说明一"},
+                {"title": "任务二", "detail": "说明二"},
+                {"title": "任务三", "detail": "说明三"},
+            ]}],
+        ),
+        "id": "slide_03",
+    }
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            return None
+
+    runtime = SimpleNamespace(
+        selected_slide_ids=["slide_03"], content_policy="preserve",
+        active_intent="LAYOUT_ONLY", baseline_slides=[source], artifacts=Artifacts(),
+        emitter=None, preferred_template="lessonforge_deck_smart_ai",
+        expected_visual_requests=[], builder=None,
+    )
+    decision = AgentDecision(completed=True, output={"slides": [{
+        "slide_id": "slide_03", "layout_type": "bullet_flow",
+        "style": {"font_tier": "spacious", "gap_scale": 1.3},
+        "visual_region": {"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2},
+        "visual_type": "image",
+    }]})
+
+    normalized = await _ensure_executable_layout(runtime, LAYOUT_AGENT, decision)
+    layout = normalized.output["slides"][0]
+    assert layout["layout_type"] == "split_two_column"
+    assert layout.get("visual_region") is None
+    assert max(element["y"] + element["h"] for element in layout["elements"]) <= 7.0
+
+
+@pytest.mark.asyncio
+async def test_deterministic_repair_does_not_return_to_identical_source_geometry():
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.layouts.engine import compile_layout
+    from app.agent.slide_rendering import semantic_geometry_hash
+
+    source = {
+        **_slide(
+            page_type="objectives",
+            body=["目标一", "目标二", "目标三"],
+            blocks=[{"kind": "steps", "steps": [
+                {"title": "任务一", "detail": "说明一"},
+                {"title": "任务二", "detail": "说明二"},
+                {"title": "任务三", "detail": "说明三"},
+            ]}],
+        ),
+        "id": "slide_03",
+    }
+    original = compile_layout("lessonforge_deck_smart_ai", source, {
+        "slide_id": "slide_03", "layout_type": "steps_horizontal",
+    })
+    source = {**source, "render_mode": "absolute", "elements": original["elements"]}
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            return None
+
+    tc = SimpleNamespace(
+        ctx=SimpleNamespace(has_tool_result=lambda _name: True, template={}),
+        artifacts=Artifacts(),
+        runtime=SimpleNamespace(
+            selected_slide_ids=["slide_03"], baseline_slides=[source],
+            active_intent="LAYOUT_ONLY", content_policy="preserve",
+            repair_mode="deterministic", preferred_template="lessonforge_deck_smart_ai",
+        ),
+    )
+
+    decision = await LAYOUT_AGENT.decide(tc)
+    repaired = decision.output["slides"][0]
+    assert repaired["layout_type"] == "split_two_column"
+    assert semantic_geometry_hash(source) != semantic_geometry_hash({"elements": repaired["elements"]})
+
+
+def test_v60_slide_02_quote_compare_spacious_is_complete_and_safe():
+    """Regression for e957210c: V60 slide_02 lost five body refs and quote copy."""
+    from app.agent.slide_rendering import render_coverage
+
+    slide = {
+        "id": "slide_02", "page_type": "scenario",
+        "title": "潜水艇下潜之谜：水压变大，浮力也变大吗？",
+        "purpose": "创设下潜情境，引发水压与浮力的认知冲突",
+        "body": [
+            "直觉误区：潜水艇从10m下潜到30m",
+            "根据 p=ρgh 水压增大，易误认为浮力变大",
+            "理性疑问：完全浸没后浮力真的变大吗？",
+            "压强增大是否等同于浮力增大？",
+            "浮力产生的物理本质究竟是什么？",
+        ],
+        "blocks": [
+            {"kind": "quote", "text": "潜水艇越往下潜，受到的浮力就越大？", "citation": "直觉思维误区"},
+            {"kind": "compare",
+             "left": {"heading": "直觉误区与现象", "items": [
+                 "潜水艇从10m下潜至30m", "根据p=ρgh，水压显著增大", "容易误以为浮力随水压变大",
+             ]},
+             "right": {"heading": "理性疑问与思考", "items": [
+                 "完全浸没后浮力真的变大吗？", "水压增大是否等于浮力增大？", "浮力产生的物理本质是什么？",
+             ]}},
+        ],
+    }
+
+    out = compile_layout("lessonforge_deck_smart_ai", slide, {
+        "slide_id": "slide_02", "layout_type": "compare_columns",
+        "style": {"font_tier": "spacious", "font_scale": 1.10, "gap_scale": 1.20},
+    })
+
+    assert out["layout_type"] == "quote_compare"
+    assert out["compile_status"] == "fallback"
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
+    assert max(item["y"] + item["h"] for item in out["elements"]) <= 7.01
+    first_compare = next(item for item in out["compile_attempts"] if item["layout_type"] == "compare_columns")
+    assert {
+        "body.0", "body.1", "body.2", "body.3", "body.4",
+        "blocks.0.text", "blocks.0.citation",
+    } <= set(first_compare["missing_refs"])
+    assert first_compare["geometry_safe"] is True
+    assert out["compile_attempts"][-1]["missing_refs"] == []
+    assert out["compile_attempts"][-1]["geometry_failures"] == []
+
+
+def test_v60_analysis_fallback_injects_size_target_instead_of_preserving_page():
+    """The provider-compatible prose-analysis branch must also receive the 1.10 goal."""
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.pipeline import _average_text_size, _compile_layout_from_analysis
+    from app.agent.schemas import AgentDecision
+
+    slide = {
+        "id": "slide_02", "page_type": "scenario", "title": "潜水艇下潜之谜",
+        "purpose": "", "body": [f"正文 {index}" for index in range(5)],
+        "blocks": [
+            {"kind": "quote", "text": "越深浮力越大？", "citation": "直觉误区"},
+            {"kind": "compare",
+             "left": {"heading": "直觉", "items": ["现象一", "现象二", "现象三"]},
+             "right": {"heading": "疑问", "items": ["疑问一", "疑问二", "疑问三"]}},
+        ],
+        # Legacy V60 elements had no canonical refs, so in-place enlargement
+        # cannot prove coverage and must fall through to the compound preset.
+        "render_mode": "absolute", "elements": [
+            {"kind": "textbox", "text": "潜水艇下潜之谜", "x": 2.2, "y": 0.6, "w": 9, "h": .8, "style": {"size": 22}},
+            {"kind": "textbox", "text": "越深浮力越大？", "x": 2.2, "y": 1.5, "w": 9, "h": .6, "style": {"size": 15}},
+            *[
+                {"kind": "textbox", "text": f"旧框 {index}", "x": 2.2 + (index % 2) * 5.2,
+                 "y": 2.4 + (index // 2) * .8, "w": 4.7, "h": .7,
+                 "style": {"size": 18 if index < 2 else 14}}
+                for index in range(8)
+            ],
+        ],
+    }
+    runtime = SimpleNamespace(
+        baseline_slides=[slide], content_policy="preserve", active_intent="LAYOUT_ONLY",
+        expected_visual_requests=[], preferred_template="lessonforge_deck_smart_ai",
+        layout_engine_params={
+            "target_dimension": "size", "font_tier": "spacious",
+            "font_scale": 1.10, "size_scale": 1.10,
+        },
+        layout_compile_results=[],
+    )
+
+    compiled = _compile_layout_from_analysis(
+        runtime,
+        AgentDecision(completed=True, output={"slides": [{
+            "slide_id": "slide_02", "layout_type": "compare_columns",
+        }]}),
+        [slide], LAYOUT_AGENT,
+    ).model_dump()["slides"][0]
+
+    assert compiled["layout_type"] == "quote_compare"
+    assert compiled["compile_status"] == "fallback"
+    assert _average_text_size(compiled["elements"]) >= _average_text_size(slide["elements"]) * 1.01
+    assert runtime.layout_compile_results[0]["requested_layout"] == "compare_columns"
+    assert runtime.layout_compile_results[0]["effective_layout"] == "quote_compare"
+
+
+def test_compare_columns_honors_font_and_gap_scale():
+    slide = _slide(body=[], blocks=[{
+        "kind": "compare",
+        "left": {"heading": "原观点", "items": ["观点一", "观点二"]},
+        "right": {"heading": "新观点", "items": ["结论一", "结论二"]},
+    }], page_type="comparison")
+    default = PRESETS["compare_columns"](
+        zones_for("lessonforge_deck_academic", "comparison"), slide,
+        {"font_tier": "default", "font_scale": 1.0, "gap_scale": 1.0},
+    )
+    spacious = PRESETS["compare_columns"](
+        zones_for("lessonforge_deck_academic", "comparison"), slide,
+        {"font_tier": "spacious", "font_scale": 1.1, "gap_scale": 1.2},
+    )
+    default_sizes = [item["style"]["size"] for item in default if item.get("kind") == "textbox"]
+    spacious_sizes = [item["style"]["size"] for item in spacious if item.get("kind") == "textbox"]
+    assert sum(spacious_sizes) / len(spacious_sizes) > sum(default_sizes) / len(default_sizes)
+    default_y = [item["y"] for item in default if ".items." in str(item.get("content_ref"))]
+    spacious_y = [item["y"] for item in spacious if ".items." in str(item.get("content_ref"))]
+    assert max(spacious_y) - min(spacious_y) > max(default_y) - min(default_y)
+
+
+# ---------- V2 candidate scoring / material-change gates ----------
+
+
+def test_layout_analysis_excludes_wide_title_from_body_utilization():
+    """A full-width title must not hide body copy clustered in the top third."""
+    from app.agent.layouts.analysis import analyze_layout
+
+    zones = zones_for("lessonforge_deck_academic", "concept")
+    elements = [
+        {"kind": "textbox", "role": "title", "content_ref": "title", "text": "宽标题",
+         "x": zones.title_rail.x, "y": zones.title_rail.y,
+         "w": zones.title_rail.w, "h": zones.title_rail.h, "style": {"size": 30}},
+        {"kind": "textbox", "role": "body", "content_ref": "body.0", "text": "正文一",
+         "x": zones.body_column.x, "y": 1.7, "w": zones.body_column.w / 3, "h": 0.6,
+         "style": {"size": 16}},
+        {"kind": "textbox", "role": "body", "content_ref": "body.1", "text": "正文二",
+         "x": zones.body_column.x + zones.body_column.w / 3, "y": 1.7,
+         "w": zones.body_column.w / 3, "h": 0.6, "style": {"size": 16}},
+        {"kind": "textbox", "role": "body", "content_ref": "body.2", "text": "正文三",
+         "x": zones.body_column.x + zones.body_column.w * 2 / 3, "y": 1.7,
+         "w": zones.body_column.w / 3, "h": 0.6, "style": {"size": 16}},
+    ]
+
+    metrics = analyze_layout(elements, zones, slide=_slide(), layout_type="split_two_column")
+
+    assert metrics["body_horizontal_utilization"] > 0.95
+    assert metrics["body_vertical_utilization"] < 0.15
+    assert metrics["max_blank_region_ratio"] > 0.75
+
+
+def test_compile_layout_ranks_three_to_five_viable_candidates_before_selecting():
+    out = compile_layout(
+        "lessonforge_deck_academic", _slide(),
+        {"slide_id": "S01", "layout_type": "bullet_flow", "style": {}},
+    )
+    viable = [attempt for attempt in out["compile_attempts"] if attempt.get("viable")]
+
+    assert 3 <= len(viable) <= 5
+    assert out["compile_attempts"][-1]["selected"] is True
+    assert out["selected_candidate_id"] == out["compile_attempts"][-1]["candidate_id"]
+    assert all("metrics" in attempt and "quality_score" in attempt for attempt in viable)
+
+
+def test_underused_baseline_cannot_use_existing_absolute_scaled_shortcut():
+    zones = zones_for("lessonforge_deck_academic", "concept")
+    slide = {
+        **_slide(), "id": "slide_03", "render_mode": "absolute",
+        "elements": [
+            {"kind": "textbox", "role": "title", "content_ref": "title", "text": "核心概念",
+             "x": zones.title_rail.x, "y": zones.title_rail.y, "w": zones.title_rail.w,
+             "h": zones.title_rail.h, "style": {"size": 30}},
+            *[
+                {"kind": "textbox", "role": "body", "content_ref": f"body.{index}", "text": text,
+                 "x": zones.body_column.x + index * zones.body_column.w / 3,
+                 "y": zones.body_column.y, "w": zones.body_column.w / 3 - 0.1,
+                 "h": 0.7, "style": {"size": 16}}
+                for index, text in enumerate(_slide()["body"])
+            ],
+        ],
+    }
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": "slide_03", "layout_type": "bullet_flow",
+        "style": {"font_scale": 1.10}, "target_dimension": "size",
+    })
+
+    assert not any(
+        attempt["layout_type"] == "existing_absolute_scaled"
+        for attempt in out["compile_attempts"]
+    )
+    assert out["final_metrics"]["body_vertical_utilization"] >= 0.60
+
+
+def test_layout_polish_without_eight_point_gain_is_preserved_no_change():
+    semantic = {**_slide(), "id": "slide_03"}
+    baseline = compile_layout(
+        "lessonforge_deck_academic", semantic,
+        {"slide_id": "slide_03", "layout_type": "bullet_flow"},
+    )
+    slide = {**semantic, "render_mode": "absolute", "elements": baseline["elements"]}
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": "slide_03", "layout_type": "bullet_flow",
+        "polish_mode": True,
+    })
+
+    assert out["compile_status"] == "preserved"
+    assert out["layout_type"] == "preserve_original"
+    assert out["quality_delta"] == 0.0
+    assert out["elements"] == baseline["elements"]
+    assert out["objective_results"][0]["metric"] == "layout_quality"
+    assert out["objective_results"][0]["passed"] is False
+
+
+def test_candidate_confirmation_ignores_close_candidate_that_failed_hard_objective(monkeypatch):
+    import app.agent.layouts.engine as engine
+
+    semantic = {**_slide(), "id": "slide_03"}
+    baseline = compile_layout(
+        "lessonforge_deck_academic", semantic,
+        {"slide_id": "slide_03", "layout_type": "bullet_flow"},
+    )
+    slide = {**semantic, "render_mode": "absolute", "elements": baseline["elements"]}
+    calls = {"count": 0}
+
+    def constant_metrics(*_args, **_kwargs):
+        return {"quality_score": 80.0}
+
+    def only_third_candidate_passes(objectives, *_args, **_kwargs):
+        calls["count"] += 1
+        passed = calls["count"] == 3
+        return ([{
+            "metric": objectives[0]["metric"], "direction": "increase",
+            "passed": passed, "hard_requirement": True,
+            "baseline_value": 0.2, "candidate_value": 0.4 if passed else 0.25,
+            "delta": 0.2 if passed else 0.05, "evidence": {},
+            "requirement": "test hard gate",
+        }], passed)
+
+    monkeypatch.setattr(engine, "analyze_layout", constant_metrics)
+    monkeypatch.setattr(engine, "_evaluate_objectives", only_third_candidate_passes)
+    out = engine.compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": "slide_03", "layout_type": "bullet_flow",
+        "objectives": [{
+            "metric": "vertical_utilization", "direction": "increase",
+            "minimum_delta": 0.12, "hard_requirement": True,
+        }],
+    })
+
+    publishable = [
+        candidate for candidate in out["candidate_rankings"]
+        if all(
+            not result.get("hard_requirement") or result.get("passed")
+            for result in candidate["objective_results"]
+        )
+    ]
+    assert len(publishable) == 1
+    assert any(
+        candidate["rank_score"] > publishable[0]["rank_score"]
+        and not candidate["objective_results"][0]["passed"]
+        for candidate in out["candidate_rankings"]
+    )
+    assert out["candidate_score_gap"] is None
+    assert out["requires_candidate_confirmation"] is False
+
+
+def _image_geometry_slide():
+    return {
+        "id": "slide_08",
+        "page_type": "concept",
+        "title": "浮力实验",
+        "purpose": "",
+        "body": ["观察量筒中的排水量并记录实验结果。"],
+        "blocks": [],
+        "render_mode": "absolute",
+        "elements": [
+            {
+                "id": "T01", "kind": "textbox", "role": "title",
+                "content_ref": "title", "text": "浮力实验",
+                "x": 2.2, "y": 0.55, "w": 9.8, "h": 0.8,
+                "style": {"size": 30, "bold": True, "color": "primary"},
+            },
+            {
+                "id": "B01", "kind": "textbox", "role": "body",
+                "content_ref": "body.0", "text": "观察量筒中的排水量并记录实验结果。",
+                "x": 2.2, "y": 1.7, "w": 4.0, "h": 3.5,
+                "style": {"size": 18, "color": "text"},
+            },
+            {
+                "id": "I01", "kind": "image", "role": "visual",
+                "x": 7.5, "y": 1.8, "w": 4.0, "h": 3.0,
+                "asset_id": "asset-buoyancy", "asset_path": "/tmp/buoyancy.png",
+                "visual_slot": "primary_visual",
+                "crop": {"left": 0.05, "right": 0.05, "top": 0.0, "bottom": 0.0},
+                "style": {"radius": 0.12, "shadow": True},
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("direction", "requested_scale", "comparison"),
+    [("increase", 1.10, "increase"), ("decrease", 0.90, "decrease")],
+)
+def test_image_geometry_only_scales_visual_and_keeps_text_and_asset_locked(
+    direction, requested_scale, comparison,
+):
+    slide = _image_geometry_slide()
+    baseline = slide["elements"]
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"],
+        "layout_type": "left_text_right_visual",
+        "image_geometry_only": True,
+        "image_geometry_action": "resize",
+        "image_scale": requested_scale,
+        "objectives": [{
+            "metric": "image_scale", "direction": direction,
+            "minimum_delta": 0.05, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "applied"
+    assert out["layout_type"] == "existing_image_geometry"
+    assert out["material_change"] is True
+    assert out["objective_results"][0]["metric"] == "image_scale"
+    assert out["objective_results"][0]["passed"] is True
+    assert out["elements"][:2] == baseline[:2]
+
+    before_image, after_image = baseline[2], out["elements"][2]
+    before_locked = {key: value for key, value in before_image.items() if key not in {"x", "y", "w", "h"}}
+    after_locked = {key: value for key, value in after_image.items() if key not in {"x", "y", "w", "h"}}
+    assert after_locked == before_locked
+    assert after_image["x"] + after_image["w"] / 2 == pytest.approx(
+        before_image["x"] + before_image["w"] / 2, abs=1e-4,
+    )
+    assert after_image["y"] + after_image["h"] / 2 == pytest.approx(
+        before_image["y"] + before_image["h"] / 2, abs=1e-4,
+    )
+    if comparison == "increase":
+        assert after_image["w"] / before_image["w"] >= 1.05
+    else:
+        assert after_image["w"] / before_image["w"] <= 0.95
+    assert all(attempt["layout_type"] == "existing_image_geometry" for attempt in out["compile_attempts"])
+
+
+def test_image_reposition_only_translates_visual_inside_template_safe_area():
+    slide = _image_geometry_slide()
+    before = slide["elements"][2]
+    before_locked = {
+        key: value for key, value in before.items() if key not in {"x", "y"}
+    }
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"],
+        "image_geometry_only": True,
+        "image_geometry_action": "reposition",
+        # A stale upstream resize objective must be ignored for reposition.
+        "image_scale": 1.20,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.10, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "applied"
+    assert out["material_change"] is True
+    assert out["requested_objectives"] == []
+    after = out["elements"][2]
+    assert (after["x"], after["y"]) != (before["x"], before["y"])
+    assert {key: value for key, value in after.items() if key not in {"x", "y"}} == before_locked
+    zones = zones_for("lessonforge_deck_academic", slide["page_type"])
+    assert after["x"] >= zones.body_column.x
+    assert after["y"] >= zones.body_column.y
+    assert after["x"] + after["w"] <= zones.body_column.right + 1e-4
+    assert after["y"] + after["h"] <= zones.body_column.bottom + 1e-4
+    assert all(
+        attempt["style"]["image_geometry_action"] == "reposition"
+        and "image_scale" not in attempt["style"]
+        for attempt in out["compile_attempts"]
+    )
+
+
+def test_image_crop_without_focus_evidence_is_preserved_and_never_scaled():
+    slide = _image_geometry_slide()
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"],
+        "image_geometry_only": True,
+        "image_geometry_action": "crop",
+        "image_scale": 1.25,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.10, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "preserved"
+    assert out["layout_type"] == "preserve_original"
+    assert out["material_change"] is False
+    assert out["elements"] == slide["elements"]
+    assert out["requested_objectives"] == []
+    assert out["compile_attempts"] == []
+    assert "未自动裁切" in out["warnings"][0]
+
+
+def test_image_polish_retains_scale_behavior_without_claiming_resize_objective():
+    slide = _image_geometry_slide()
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"],
+        "image_geometry_only": True,
+        "image_geometry_action": "polish",
+        "image_scale": 1.08,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.05, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "applied"
+    assert out["elements"][2]["w"] > slide["elements"][2]["w"]
+    assert out["requested_objectives"] == []
+    assert out["effective_style"]["image_geometry_action"] == "polish"
+
+
+def test_image_geometry_only_optimize_is_a_real_safe_visual_change():
+    slide = _image_geometry_slide()
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"],
+        "image_geometry_only": True,
+        "image_scale": 1.08,
+        "objectives": [{
+            "metric": "image_scale", "direction": "optimize",
+            "minimum_delta": 0.03, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "applied"
+    assert abs(out["objective_results"][0]["delta"]) >= 0.03
+    assert out["elements"][:2] == slide["elements"][:2]
+
+
+def test_image_geometry_only_supports_chart_without_mutating_chart_data():
+    slide = _image_geometry_slide()
+    chart = slide["elements"][2]
+    chart.update({
+        "kind": "chart", "chart_type": "bar",
+        "data": {"categories": ["A", "B"], "series": [{"name": "受力", "values": [3, 5]}]},
+    })
+    before_locked = {key: value for key, value in chart.items() if key not in {"x", "y", "w", "h"}}
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"], "image_geometry_only": True,
+        "image_scale": 1.10,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.05, "hard_requirement": True,
+        }],
+    })
+
+    after_chart = out["elements"][2]
+    assert out["compile_status"] == "applied"
+    assert after_chart["w"] > chart["w"]
+    assert {key: value for key, value in after_chart.items() if key not in {"x", "y", "w", "h"}} == before_locked
+    assert out["elements"][:2] == slide["elements"][:2]
+
+
+def test_image_geometry_only_without_visual_is_preserved_no_change():
+    slide = _image_geometry_slide()
+    slide["elements"] = slide["elements"][:2]
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"], "image_geometry_only": True,
+        "objectives": [{"metric": "image_scale", "direction": "increase"}],
+    })
+
+    assert out["compile_status"] == "preserved"
+    assert out["layout_type"] == "preserve_original"
+    assert out["material_change"] is False
+    assert out["elements"] == slide["elements"]
+    assert "没有可调整" in out["warnings"][0]
+
+
+def test_image_geometry_only_unsafe_resize_is_preserved_instead_of_reflowing():
+    slide = {
+        "id": "slide_visual_only", "page_type": "concept", "title": "",
+        "purpose": "", "body": [], "blocks": [], "render_mode": "absolute",
+        "elements": [{
+            "id": "I01", "kind": "image", "role": "visual",
+            "x": 0.49, "y": 0.49, "w": 12.353, "h": 6.52,
+            "asset_id": "asset-full", "asset_path": "/tmp/full.png",
+            "visual_slot": "full_bleed_safe", "crop": {"mode": "cover"},
+        }],
+    }
+
+    out = compile_layout("lessonforge_deck_academic", slide, {
+        "slide_id": slide["id"], "image_geometry_only": True,
+        "image_scale": 1.10,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.02, "hard_requirement": True,
+        }],
+    })
+
+    assert out["compile_status"] == "preserved"
+    assert out["material_change"] is False
+    assert out["elements"] == slide["elements"]
+    assert out["compile_attempts"]
+    assert all(not attempt["geometry_safe"] for attempt in out["compile_attempts"])
+    assert all(attempt["layout_type"] == "existing_image_geometry" for attempt in out["compile_attempts"])
+
+
+def test_steps_cards_and_highlight_have_real_visual_effect():
+    blocks = [{"kind": "steps", "steps": [
+        {"title": "观察", "detail": "记录现象"},
+        {"title": "归纳", "detail": "形成结论"},
+        {"title": "迁移", "detail": "解决问题"},
+    ]}]
+    zones = zones_for("lessonforge_deck_academic", "process")
+    elements = PRESETS["steps_horizontal"](
+        zones, _slide(blocks=blocks, page_type="process"), {"highlight": True},
+    )
+    cards = [item for item in elements if item.get("role") == "step_card"]
+    emphasized = next(item for item in elements if item.get("content_ref") == "blocks.0.steps.0.title")
+
+    assert len(cards) == 3
+    assert min(item["h"] for item in cards) >= zones.body_column.h * 0.80
+    assert cards[0]["line"] == "primary"
+    assert emphasized["style"]["bold"] is True
+    assert any(item.get("role") == "highlight_panel" for item in elements)

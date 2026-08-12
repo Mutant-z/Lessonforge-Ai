@@ -606,6 +606,52 @@ def _set_locked_value(content, path: str, value):
             node[node.index(target)] = value
 
 
+_VALID_PPT_BLOCK_KINDS = {"lead", "bullets", "steps", "compare", "quote", "visual", "note"}
+
+
+def _coerce_unknown_blocks(slides: list[dict]) -> int:
+    """把模型新发明的非法内容块（如 kind='cards'）规范化为合法的 bullets。
+
+    返回被修正/丢弃的块数量。这样非法结构不会在流水线末端 PPTContent
+    校验时硬失败，内容也能以合法结构保留下来。
+    """
+    fixed = 0
+    for slide in slides:
+        blocks = slide.get("blocks") or []
+        if not blocks:
+            continue
+        coerced: list[dict] = []
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("kind") in _VALID_PPT_BLOCK_KINDS:
+                coerced.append(block)
+                continue
+            texts: list[str] = []
+
+            def _collect(value) -> None:
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    if stripped:
+                        texts.append(stripped)
+                elif isinstance(value, dict):
+                    for key, child in value.items():
+                        if key == "kind":
+                            continue
+                        _collect(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        _collect(child)
+
+            _collect(block)
+            texts = list(dict.fromkeys(texts))[:6]
+            if texts:
+                coerced.append({"kind": "bullets", "numbered": False,
+                                "items": [{"text": text} for text in texts]})
+            fixed += 1
+        if coerced != blocks:
+            slide["blocks"] = coerced
+    return fixed
+
+
 def _validate_and_repair_ppt(content: dict):
     """校验 PPT（结构 + 知识规则）并自动修复可确定性修正的问题。
 
@@ -613,6 +659,13 @@ def _validate_and_repair_ppt(content: dict):
     """
     from app.services.ppt_knowledge_service import check_ppt_against_knowledge
 
+    slides = content.get("slides") or []
+    _coerce_unknown_blocks(slides)
+    # blocks 密度与 body 一样需要确定性收敛（逐条 ≤25 字、去装饰前缀、合计 ≤120 字），
+    # 否则结构合法但条目超长的内容仍会在 QA 门禁/最终校验处失败。
+    from app.agent.slide_rendering import sanitize_slide_density
+    for slide in slides:
+        sanitize_slide_density(slide)
     try:
         PPTContent.model_validate(content)
     except Exception as exc:
@@ -1189,6 +1242,7 @@ async def execute_task_run(run_id: str):
                 source_versions = result.source_versions
                 change_summary = result.change_summary
                 pipeline_runtime = result.runtime
+                skip_publish = result.skip_publish
             elif run.trigger_type == "message":
                 if not source:
                     raise RuntimeError("任务文件尚未生成")
@@ -1233,6 +1287,45 @@ async def execute_task_run(run_id: str):
                 "completed",
                 elapsed_ms=generation_elapsed,
             )
+
+            if task.task_type == "ppt" and skip_publish:
+                # A safe no-op is a successful request resolution, not a new
+                # domain version. Keep the official Artifact pointer and close
+                # the run with an explicit no_change terminal result.
+                await db.commit()
+                from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
+                await complete_ppt_pipeline_after_publish(
+                    pipeline_runtime, source.id if source is not None else "",
+                )
+                await db.rollback()
+                run = await db.get(GenerationRun, run_id)
+                task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+                course = await db.get(CourseProject, run.course_id) if run else None
+                if not run or not task or not course:
+                    raise RuntimeError("完成无变更运行时任务上下文不存在")
+                final_status = "review" if task.current_agent_profile_id == profile.id else "stale"
+                task.status = final_status
+                task.progress = 100
+                task.active_run_id = None
+                task.error_json = None
+                task.completed_at = utcnow()
+                run.status = "completed"
+                run.progress = 100
+                run.finished_at = utcnow()
+                stored_user_message = await db.get(AgentMessage, user_message.id) if user_message else None
+                if stored_user_message:
+                    stored_user_message.status = "completed"
+                await _refresh_course_status(db, course)
+                await _emit(
+                    db, run, "task_activity_updated", task,
+                    status=final_status, progress=100, phase="completed",
+                    phase_label=PHASE_LABELS["completed"],
+                    detail="润色检查完成，当前版本无需安全修改。",
+                    phase_status="completed", elapsed_ms=0,
+                )
+                await _emit(db, run, "task_status_changed", task, status=final_status, progress=100)
+                await db.commit()
+                return
 
             current_phase = "validating"
             await _publish_activity(run_id, "validating", 76)

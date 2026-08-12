@@ -16,6 +16,24 @@ SlideRenderMode = Literal["semantic", "hybrid", "absolute"]
 SEMANTIC_FIELDS = ("title", "purpose", "body", "blocks", "speaker_notes", "duration_seconds")
 
 
+def canonical_slide_id(raw_id: Any, canonical_ids: list[str] | set[str]) -> str | None:
+    """Resolve model aliases such as S02 to the unique ID owned by the deck."""
+    raw = str(raw_id or "").strip()
+    ids = [str(value) for value in canonical_ids if str(value)]
+    if raw in ids:
+        return raw
+    match = re.search(r"(\d+)$", raw)
+    if not match:
+        return None
+    number = int(match.group(1))
+    matches = []
+    for candidate in ids:
+        suffix = re.search(r"(\d+)$", candidate)
+        if suffix and int(suffix.group(1)) == number:
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
+
+
 def infer_render_mode(slide: dict[str, Any]) -> SlideRenderMode:
     declared = str(slide.get("render_mode") or "")
     if declared in {"semantic", "hybrid", "absolute"}:
@@ -60,6 +78,16 @@ def semantic_content_hash(slide: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def objective_result_passed(result: dict[str, Any]) -> bool:
+    """Read the canonical V2 objective result with legacy aliases.
+
+    The compiler emits ``passed``.  ``met`` and ``achieved`` remain accepted
+    for historical artifacts, but must never cause a successful V2 objective
+    to be rejected at the editor or final publish gate.
+    """
+    return bool(result.get("passed", result.get("met", result.get("achieved", False))))
+
+
 def semantic_geometry_hash(slide: dict[str, Any]) -> str:
     """把 elements 的 kind/content_ref/x/y/w/h 序列化哈希，忽略文本样式细节。
 
@@ -76,6 +104,40 @@ def semantic_geometry_hash(slide: dict[str, Any]) -> str:
         key=lambda t: t,
     )
     return hashlib.sha256(json.dumps(elements, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def semantic_visual_hash(slide: dict[str, Any]) -> str:
+    """Hash visible layout and styling while ignoring element ids and copy.
+
+    Layout-only requests may legitimately change typography, color or shape
+    treatment without moving boxes.  The old geometry-only publish gate called
+    those successful edits a no-op.  Text is intentionally excluded because
+    preserve/restore runs validate semantic copy independently.
+    """
+    elements = []
+    for element in slide.get("elements") or []:
+        style = element.get("style") or {}
+        elements.append({
+            "kind": str(element.get("kind") or ""),
+            "role": str(element.get("role") or ""),
+            "content_ref": str(element.get("content_ref") or ""),
+            "shape_type": str(element.get("shape_type") or ""),
+            "x": round(float(element.get("x") or 0), 3),
+            "y": round(float(element.get("y") or 0), 3),
+            "w": round(float(element.get("w") or 0), 3),
+            "h": round(float(element.get("h") or 0), 3),
+            "style": {
+                key: style.get(key)
+                for key in ("font", "size", "color", "bold", "align", "valign")
+                if key in style
+            },
+            "fill": element.get("fill"),
+            "line": element.get("line"),
+            "visual_slot": str(element.get("visual_slot") or ""),
+        })
+    elements.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+    payload = json.dumps(elements, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _block_texts(block: dict[str, Any], prefix: str) -> list[tuple[str, str]]:
@@ -124,6 +186,16 @@ def semantic_text_refs(slide: dict[str, Any]) -> list[tuple[str, str]]:
     if purpose and str(slide.get("page_type") or "") == "cover":
         refs.append(("purpose", purpose))
     return refs
+
+
+def semantic_ref_details(slide: dict[str, Any], refs: list[str]) -> list[dict[str, str]]:
+    """Return human-readable evidence for missing semantic references."""
+    wanted = set(refs)
+    return [
+        {"ref": ref, "text": text[:120]}
+        for ref, text in semantic_text_refs(slide)
+        if ref in wanted
+    ]
 
 
 def semantic_body_texts(slide: dict[str, Any]) -> list[str]:

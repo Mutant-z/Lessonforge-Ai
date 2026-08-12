@@ -43,7 +43,8 @@ class ContextBlock:
                 body = json.dumps(self.payload, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
                 body = str(self.payload)
-        return _clip(body, MAX_BLOCK_CHARS)
+        limit = 18_000 if self.kind == "target_slide_analysis" else MAX_BLOCK_CHARS
+        return _clip(body, limit)
 
 
 @dataclass
@@ -63,6 +64,7 @@ class ContextState:
     tool_results: list[ContextBlock] = field(default_factory=list)
     _order: int = 0
     decisions: list[dict[str, Any]] = field(default_factory=list)
+    target_slide_analysis: list[dict[str, Any]] = field(default_factory=list)
 
     def append_tool_result(
         self, tool_call_id: str, agent_key: str, tool_name: str, output: dict[str, Any],
@@ -109,6 +111,12 @@ class ContextState:
             blocks.append(ContextBlock("upstream", f"上游产物 {kind}", value))
         if self.source_artifact is not None:
             blocks.append(ContextBlock("source", "当前 PPT 内容", getattr(self.source_artifact, "content_json", self.source_artifact)))
+        for analysis in self.target_slide_analysis:
+            blocks.append(ContextBlock(
+                "target_slide_analysis",
+                f"目标页专属分析 {analysis.get('slide_id', '')}",
+                analysis,
+            ))
         if self.template:
             blocks.append(ContextBlock("template", "模板设计系统", self.template))
         if self.knowledge:
@@ -123,8 +131,29 @@ class ContextState:
         return blocks
 
     def to_prompt(self, agent_key: str) -> str:
-        """把相关上下文序列化为单段 JSON，超出预算时先丢最旧工具结果。"""
+        """Serialize role-scoped context without starving target-slide analysis.
+
+        Layout/edit/visual-QA agents must reason from the dedicated target-page
+        artifacts, not from the first 6000 characters of the whole deck.  Those
+        artifacts therefore take priority and the redundant whole-deck source is
+        omitted for those agents.  Lower-priority fixed blocks and old tool
+        results are then admitted only while the prompt budget remains.
+        """
         fixed = self._fixed_blocks()
+        analysis_agents = {"layout", "ppt_editor", "visual_qa"}
+        if self.target_slide_analysis and agent_key in analysis_agents:
+            fixed = [block for block in fixed if block.kind != "source"]
+            priority = {
+                "user_instruction": 0,
+                "target_slide_analysis": 1,
+                "locks": 2,
+                "note": 3,
+                "template": 4,
+                "knowledge": 5,
+                "upstream": 6,
+                "blueprint": 7,
+            }
+            fixed.sort(key=lambda block: priority.get(block.kind, 99))
         tool_blocks = list(self.tool_results)
         parts: list[str] = []
         used = 0
@@ -136,14 +165,24 @@ class ContextState:
                 text = _clip(body, MAX_KNOWLEDGE_BLOCK_CHARS)
             else:
                 text = block.serialize()
-            used += len(text)
-            parts.append(f"## {block.kind}: {block.title}\n{text}")
+            header = f"## {block.kind}: {block.title}\n"
+            required = block.kind in {"user_instruction", "target_slide_analysis", "locks", "note"}
+            remaining = MAX_CONTEXT_CHARS - used - len(header)
+            if remaining <= 0:
+                continue
+            if len(text) > remaining:
+                if not required:
+                    continue
+                text = _clip(text, remaining)
+            used += len(header) + len(text)
+            parts.append(header + text)
         for block in reversed(tool_blocks):
             text = block.serialize()
-            if used + len(text) > MAX_CONTEXT_CHARS:
+            header = f"## tool_result (agent={block.agent_key}, tool={block.tool_name})\n"
+            if used + len(header) + len(text) > MAX_CONTEXT_CHARS:
                 continue
-            used += len(text)
-            parts.append(f"## tool_result (agent={block.agent_key}, tool={block.tool_name})\n{text}")
+            used += len(header) + len(text)
+            parts.append(header + text)
         return "\n".join(parts)
 
     def context_hash(self) -> str:
@@ -154,6 +193,7 @@ class ContextState:
             "user_instruction": self.user_instruction,
             "tool_results": [b.model_dump() if hasattr(b, "model_dump") else self._block_dict(b) for b in self.tool_results],
             "extra_notes": self.extra_notes,
+            "target_slide_analysis": self.target_slide_analysis,
         }
 
     @staticmethod
@@ -165,6 +205,7 @@ class ContextState:
             return
         self.user_instruction = data.get("user_instruction") or self.user_instruction
         self.extra_notes = list(data.get("extra_notes") or [])
+        self.target_slide_analysis = list(data.get("target_slide_analysis") or self.target_slide_analysis)
         restored: list[ContextBlock] = []
         for item in data.get("tool_results") or []:
             restored.append(ContextBlock(

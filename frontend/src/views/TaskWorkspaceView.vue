@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
+import { ElMessageBox } from 'element-plus';
 import { ArrowDown, CircleCheck, Clock, Cpu, Edit, Lock, MagicStick, Promotion, RefreshRight, Setting, VideoCamera, VideoPause, Warning } from '@element-plus/icons-vue';
 import { api, errorMessage } from '../api/client';
 import { pptTemplatesApi } from '../api/pptTemplates';
@@ -361,7 +362,13 @@ async function loadVersions() {
 
 function selectVersion(version: Artifact) {
   if (isPpt.value) {
-    store.viewArtifact(version);
+    // PPT 版本历史：点击版本即回退（基于该版本生成新版本）。先确认避免误触，
+    // 不再只是临时预览后关闭即还原。确认后由 restoreVersion 持久化为当前版本。
+    void ElMessageBox.confirm(
+      `确定将当前课件回退为 V${version.version} 吗？将基于该版本生成新版本。`,
+      '回退版本',
+      { type: 'warning', confirmButtonText: '确认回退', cancelButtonText: '取消' },
+    ).then(() => restoreVersion(version)).catch(() => undefined);
     return;
   }
   if (task.value) task.value.current_artifact = version;
@@ -887,23 +894,137 @@ onUnmounted(() => {
           <MarkdownRenderer v-else :content="artifact.content_markdown" />
         </div>
         <div v-else-if="isVideoGeneration && task.status === 'ready_to_generate'" class="video-generation-ready">
-          <div class="ready-index"><span>06</span><el-icon><VideoCamera /></el-icon></div>
-          <div class="ready-copy">
-            <span>上游内容已就绪</span>
-            <h3>生成第一版微课视频</h3>
-            <p>系统将按视频脚本逐分镜生成画面与旁白，并合成带字幕的 MP4。视频生成只在点击后开始。</p>
+          <div class="video-ready-container">
+            <!-- Glassmorphism Main Card -->
+            <div class="video-ready-card">
+              <!-- Top Hero Header -->
+              <div class="ready-hero-banner">
+                <div class="ready-hero-main">
+                  <div class="ready-step-badge">
+                    <span class="step-num">06</span>
+                    <span class="step-label">STAGE</span>
+                  </div>
+                  <div class="ready-title-group">
+                    <div class="ready-pill-tag">
+                      <el-icon><VideoCamera /></el-icon>
+                      <span>AI 微课视频生成 · 准备完成</span>
+                    </div>
+                    <h3>生成第一版微课视频</h3>
+                    <p>系统已将故事线与分镜脚本进行智能化编排。点击“开始生成”后，将自动合成音频旁白、匹配 PPT 画面并渲染硬字幕 MP4。</p>
+                  </div>
+                </div>
+
+                <!-- Upstream Artifact Indicators -->
+                <div class="upstream-resources">
+                  <div class="resource-chip">
+                    <span class="chip-icon">🎨</span>
+                    <div class="chip-text">
+                      <strong>PPT 课件</strong>
+                      <small>视觉画面已就绪</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                  <div class="resource-chip">
+                    <span class="chip-icon">📜</span>
+                    <div class="chip-text">
+                      <strong>分镜脚本</strong>
+                      <small>8 场景音画对齐</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                  <div class="resource-chip">
+                    <span class="chip-icon">🎙️</span>
+                    <div class="chip-text">
+                      <strong>语音旁白</strong>
+                      <small>TTS 多角色配音</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Configuration Matrix -->
+              <div class="ready-config-body">
+                <div class="config-section-header">
+                  <el-icon><Setting /></el-icon>
+                  <span>视频渲染与音质参数配置</span>
+                </div>
+
+                <div class="video-options-grid">
+                  <div class="option-card">
+                    <div class="option-label">
+                      <span class="opt-icon">📺</span>
+                      <span>输出规格</span>
+                    </div>
+                    <el-select v-model="videoResolution" size="large" class="custom-select">
+                      <el-option label="1080p 全高清 (1920x1080)" value="1920x1080" />
+                      <el-option label="720p 高清 (1280x720)" value="1280x720" />
+                      <el-option label="360p 极速预览 (640x360)" value="640x360" />
+                    </el-select>
+                  </div>
+
+                  <div class="option-card">
+                    <div class="option-label">
+                      <span class="opt-icon">🎙️</span>
+                      <span>声音风格</span>
+                    </div>
+                    <el-select v-model="videoVoiceStyle" size="large" class="custom-select">
+                      <el-option label="自然讲解 (推荐)" value="natural" />
+                      <el-option label="沉稳清晰" value="calm" />
+                      <el-option label="亲切活泼" value="friendly" />
+                    </el-select>
+                  </div>
+
+                  <div class="option-card switch-card">
+                    <div class="option-label">
+                      <span class="opt-icon">💬</span>
+                      <span>字幕硬合成</span>
+                    </div>
+                    <div class="switch-wrapper">
+                      <el-switch
+                        v-model="videoSubtitleEnabled"
+                        size="large"
+                        active-text="开启字幕"
+                        inactive-text="关闭字幕"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <!-- AI Models Selection Row -->
+                <div class="model-config-panel">
+                  <div class="config-section-header compact">
+                    <el-icon><Cpu /></el-icon>
+                    <span>媒体生成引擎配置</span>
+                  </div>
+                  <div class="video-model-row">
+                    <ModelSelector :model-value="task.video_model_config_id || null" capability="video_generation" label="视频模型" @change="setVideoModel" />
+                    <ModelSelector :model-value="task.speech_model_config_id || null" capability="speech_generation" label="语音模型" @change="setSpeechModel" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Footer CTA Section -->
+              <div class="ready-action-footer">
+                <el-button
+                  type="primary"
+                  size="large"
+                  class="generate-hero-btn"
+                  :icon="VideoCamera"
+                  @click="runVideo('initial')"
+                >
+                  <span class="btn-main-text">开始生成微课视频</span>
+                  <span class="btn-badge">一键渲染 MP4</span>
+                </el-button>
+
+                <div v-if="!task.video_model_config_id || !task.speech_model_config_id" class="video-settings-alert">
+                  <el-icon><Warning /></el-icon>
+                  <span>未配置私有媒体模型时，系统将自动基于内置 Mock/Fast 引擎合成测试视频。</span>
+                  <RouterLink to="/settings" class="video-settings-link">前往模型设置 ➔</RouterLink>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="video-options-grid">
-            <label><span>输出规格</span><el-select v-model="videoResolution"><el-option label="1080p" value="1920x1080" /><el-option label="720p" value="1280x720" /><el-option label="预览 360p" value="640x360" /></el-select></label>
-            <label><span>声音风格</span><el-select v-model="videoVoiceStyle"><el-option label="自然讲解" value="natural" /><el-option label="沉稳清晰" value="calm" /><el-option label="亲切活泼" value="friendly" /></el-select></label>
-            <label class="subtitle-option"><span>字幕</span><el-switch v-model="videoSubtitleEnabled" active-text="开启" inactive-text="关闭" /></label>
-          </div>
-          <div class="video-model-row">
-            <ModelSelector :model-value="task.video_model_config_id || null" capability="video_generation" label="视频模型" @change="setVideoModel" />
-            <ModelSelector :model-value="task.speech_model_config_id || null" capability="speech_generation" label="语音模型" @change="setSpeechModel" />
-          </div>
-          <el-button type="primary" size="large" :icon="VideoCamera" @click="runVideo('initial')">开始生成视频</el-button>
-          <RouterLink v-if="!task.video_model_config_id || !task.speech_model_config_id" to="/settings" class="video-settings-link">未配置媒体模型时，仅 Mock 环境可生成测试视频；前往模型设置</RouterLink>
         </div>
         <div v-else class="file-empty">
           <span>{{ String(task.display_order).padStart(2, '0') }}</span>
@@ -914,7 +1035,7 @@ onUnmounted(() => {
       </main>
     </div>
     </template>
-    <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration" @select="selectVersion" @restore="restoreVersion" @close="closeVersions" />
+    <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration || isPpt" @select="selectVersion" @restore="restoreVersion" @close="closeVersions" />
     <el-drawer
       v-model="showTemplateDrawer"
       class="ppt-template-drawer"
@@ -998,48 +1119,346 @@ onUnmounted(() => {
   background: transparent;
 }
 
+/* Redesigned Modern Video Generation Ready Workspace */
 .video-generation-ready {
   min-height: 100%;
-  padding: 42px;
+  width: 100%;
   box-sizing: border-box;
-  display: grid;
-  grid-template-columns: 110px minmax(0, 1fr);
-  align-content: center;
-  gap: 24px 30px;
-  color: #111827;
-  background: #f7f7f8;
-  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  padding: 32px 28px;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 40%, #eef2ff 100%);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow-y: auto;
 }
 
-.ready-index {
-  grid-row: 1 / 5;
-  min-height: 260px;
-  padding: 18px 14px;
+.video-ready-container {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+.video-ready-card {
+  background: #ffffff;
+  border-radius: 20px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.07), 0 1px 3px rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+  transition: all 250ms ease;
+}
+
+.ready-hero-banner {
+  padding: 32px 36px 28px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 60%, #312e81 100%);
+  color: #ffffff;
+  position: relative;
+  overflow: hidden;
+}
+
+.ready-hero-banner::after {
+  content: "";
+  position: absolute;
+  top: -50%;
+  right: -10%;
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.25) 0%, rgba(0, 0, 0, 0) 70%);
+  pointer-events: none;
+}
+
+.ready-hero-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.ready-step-badge {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.35);
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-start;
-  color: #fff;
-  background: #002fa7;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
 }
 
-.ready-index span { font-size: 48px; font-weight: 900; line-height: 1; letter-spacing: -.06em; }
-.ready-index .el-icon { font-size: 26px; }
-.ready-copy { max-width: 720px; padding-bottom: 20px; border-bottom: 1px solid #cfd2d9; }
-.ready-copy > span { color: #002fa7; font-size: 11px; font-weight: 800; letter-spacing: .08em; }
-.ready-copy h3 { margin: 8px 0 10px; font-size: 34px; line-height: 1.05; letter-spacing: -.04em; }
-.ready-copy p { max-width: 650px; margin: 0; color: #555d68; font-size: 14px; line-height: 1.7; }
-.video-options-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 720px; border: 1px solid #cfd2d9; background: #fff; }
-.video-options-grid label { min-height: 76px; padding: 13px 15px; box-sizing: border-box; display: grid; gap: 7px; border-right: 1px solid #cfd2d9; }
-.video-options-grid label:last-child { border-right: 0; }.video-options-grid label > span { color: #555d68; font-size: 11px; font-weight: 800; }
-.subtitle-option { align-content: center; }.video-model-row { max-width: 720px; display: flex; flex-wrap: wrap; gap: 14px; }
-.video-generation-ready > .el-button { justify-self: start; border-radius: 0 !important; }.video-settings-link { color: #002fa7; font-size: 12px; text-decoration: underline; }
+.ready-step-badge .step-num {
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.ready-step-badge .step-label {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  opacity: 0.85;
+  margin-top: 2px;
+}
+
+.ready-title-group {
+  flex: 1;
+  min-width: 0;
+}
+
+.ready-pill-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #c7d2fe;
+  font-size: 11.5px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.ready-title-group h3 {
+  margin: 0 0 8px 0;
+  font-size: 26px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.ready-title-group p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.upstream-resources {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.resource-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.chip-icon {
+  font-size: 18px;
+}
+
+.chip-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.chip-text strong {
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chip-text small {
+  color: #94a3b8;
+  font-size: 11px;
+}
+
+.resource-chip .check-icon {
+  color: #34d399;
+  font-size: 16px;
+}
+
+/* Config Section */
+.ready-config-body {
+  padding: 28px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.config-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #1e293b;
+}
+
+.config-section-header .el-icon {
+  color: #4f46e5;
+  font-size: 16px;
+}
+
+.config-section-header.compact {
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.video-options-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.option-card {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 150ms ease;
+}
+
+.option-card:hover {
+  background: #ffffff;
+  border-color: #c7d2fe;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.06);
+}
+
+.option-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.opt-icon {
+  font-size: 14px;
+}
+
+.switch-card {
+  justify-content: space-between;
+}
+
+.switch-wrapper {
+  padding-top: 4px;
+}
+
+.model-config-panel {
+  padding: 16px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+}
+
+.video-model-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+/* Action Footer */
+.ready-action-footer {
+  padding: 24px 36px 32px;
+  background: #ffffff;
+  border-top: 1px solid #f1f5f9;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.generate-hero-btn {
+  height: 52px !important;
+  padding: 0 28px !important;
+  border-radius: 14px !important;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  border: none !important;
+  box-shadow: 0 10px 24px -4px rgba(79, 70, 229, 0.4), 0 4px 6px -2px rgba(79, 70, 229, 0.15) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  transition: all 200ms ease !important;
+}
+
+.generate-hero-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 28px -4px rgba(79, 70, 229, 0.5), 0 6px 10px -2px rgba(79, 70, 229, 0.2) !important;
+  background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%) !important;
+}
+
+.generate-hero-btn:active {
+  transform: translateY(0);
+}
+
+.btn-main-text {
+  font-size: 15.5px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.btn-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+.video-settings-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #fefce8;
+  border: 1px solid #fef08a;
+  color: #854d0e;
+  font-size: 12.5px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.video-settings-alert .el-icon {
+  color: #ca8a04;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.video-settings-link {
+  color: #4f46e5;
+  font-weight: 700;
+  text-decoration: none;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.video-settings-link:hover {
+  text-decoration: underline;
+}
+
 .video-editor-shell { background: #f7f7f8; }
 
-@media (max-width: 760px) {
-  .video-generation-ready { grid-template-columns: 1fr; padding: 24px; }
-  .ready-index { grid-row: auto; min-height: 64px; flex-direction: row; align-items: center; }
-  .video-options-grid { grid-template-columns: 1fr; }.video-options-grid label { border-right: 0; border-bottom: 1px solid #cfd2d9; }.video-options-grid label:last-child { border-bottom: 0; }
+@media (max-width: 768px) {
+  .video-generation-ready { padding: 16px; }
+  .ready-hero-banner { padding: 20px; }
+  .upstream-resources { grid-template-columns: 1fr; }
+  .video-options-grid { grid-template-columns: 1fr; }
+  .ready-config-body { padding: 20px; }
+  .ready-action-footer { padding: 20px; }
+  .generate-hero-btn { width: 100%; justify-content: center; }
+  .video-settings-alert { flex-direction: column; align-items: flex-start; }
+  .video-settings-link { margin-left: 0; }
 }
 
 /* Pane Resizer / Divider */

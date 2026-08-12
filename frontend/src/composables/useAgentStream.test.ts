@@ -71,6 +71,24 @@ describe('buildStreamNodes', () => {
     ]);
   });
 
+  it('keeps V2 layout candidate and polish result events for result and confirmation UI', () => {
+    const nodes = buildStreamNodes([
+      item(1, 'layout.compile.result', {
+        run_id: 'run-v2',
+        payload: { slide_id: 'slide_03', requires_candidate_confirmation: true },
+      }),
+      item(2, 'polish.result', {
+        run_id: 'run-v2',
+        payload: { result_status: 'partial', page_results: [{ slide_id: 'slide_03' }] },
+      }),
+    ], {}, []);
+
+    expect(nodes.filter(node => node.kind === 'event').map(node => node.type)).toEqual([
+      'layout.compile.result',
+      'polish.result',
+    ]);
+  });
+
   it('puts user instruction before the session head and reply at the tail for message runs', () => {
     const nodes = buildStreamNodes(fullRunItems, { 'run-1:narrative': '…' }, [
       { id: 'u1', role: 'user', content: '请把第3页改成对比版式', run_id: 'run-1', status: 'completed' },

@@ -346,7 +346,8 @@ onBeforeUnmount(() => {
 .theme-lessonforge_deck_academic .dec-main { left: 0; top: 0; width: 13px; height: 540px; background: var(--ppt-primary); }
 .theme-lessonforge_deck_academic .dec-accent { left: 13px; top: 0; width: 3px; height: 540px; background: var(--ppt-secondary); }
 .theme-lessonforge_deck_academic .ppt-body { left: 158px; width: 720px; }
-.theme-lessonforge_deck_academic .ppt-folio { left: 150px; }
+/* 页码放在正文栏左侧的安全边距内，避免与标题（content_ref=title，起始 x≈2.2in）重叠 */
+.theme-lessonforge_deck_academic .ppt-folio { left: 27px; }
 .theme-lessonforge_deck_academic .ppt-visual-hint { left: 158px; width: 720px; }
 .theme-lessonforge_deck_academic.is-cover .slide-title { top: 210px; }
 .theme-lessonforge_deck_academic.is-cover .cover-subtitle { top: 320px; }
@@ -422,7 +423,8 @@ onBeforeUnmount(() => {
 .theme-lessonforge_deck_smart_ai .dec-accent { left: 112px; top: 0; width: 4px; height: 540px; background: var(--ppt-secondary); }
 .theme-lessonforge_deck_smart_ai .ppt-body { left: 176px; width: 716px; }
 .theme-lessonforge_deck_smart_ai .ppt-visual-hint { left: 176px; width: 716px; }
-.theme-lessonforge_deck_smart_ai .ppt-folio { left: 176px; }
+/* 页码移到左侧主色栏上（与品牌位置一致），避免与正文栏标题（起始 x=2.45in）重叠 */
+.theme-lessonforge_deck_smart_ai .ppt-folio { left: 34px; color: var(--ppt-on-primary); }
 .theme-lessonforge_deck_smart_ai .slide-bullets-area,
 .theme-lessonforge_deck_smart_ai .block-bullets {
   display: grid; grid-template-columns: 1fr 1fr; gap: 16px 30px; align-content: start;

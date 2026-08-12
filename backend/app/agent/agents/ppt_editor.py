@@ -127,8 +127,15 @@ class PptEditorAgent(Agent):
         visual_regions = _visual_regions((visual_plan or {}).get("data", {}))
         target_ids = set(tc.runtime.selected_slide_ids or [])
         target_slides = [slide for slide in slides if not target_ids or slide.get("id") in target_ids]
-        target_layouts = [layout for layout in layouts if not target_ids or layout.get("slide_id") in target_ids]
-        calls = [] if strict_image else [ToolCall(tool_name="write_slide_batch", input={"slides": target_slides})]
+        target_layouts = [
+            layout for layout in layouts
+            if (not target_ids or layout.get("slide_id") in target_ids)
+            and layout.get("compile_status") != "preserved"
+        ]
+        preserve_content = getattr(tc.runtime, "content_policy", "edit") in {"preserve", "restore"}
+        calls = [] if strict_image or preserve_content else [
+            ToolCall(tool_name="write_slide_batch", input={"slides": target_slides})
+        ]
         # IMAGE_UPDATE 也必须先应用经过内容覆盖校验的完整布局，再写入视觉槽位。
         # 该布局 Patch 在工具层被抑制，直到 add_image 成功后才一次性发送完整页面。
         if target_layouts:
@@ -173,9 +180,21 @@ class PptEditorAgent(Agent):
                 )
             if not calls:
                 raise PPTAgentError("image_not_applied", "没有生成可应用到目标页的图片写入操作。", retryable=True)
-        notes_calls = [] if strict_image else [ToolCall(tool_name="add_notes", input={"slide_id": s.get("id", ""), "notes_text": s.get("speaker_notes", "")})
+        notes_calls = [] if strict_image or preserve_content else [ToolCall(tool_name="add_notes", input={"slide_id": s.get("id", ""), "notes_text": s.get("speaker_notes", "")})
                        for s in target_slides if s.get("speaker_notes")]
         calls.extend(notes_calls)
+        if not calls:
+            tc.runtime.result_status = "no_change"
+            # The orchestrator treats mutation_applied as "the requested
+            # mutation has been resolved".  A safe no-op must not requeue the
+            # editor forever when every page was deliberately preserved.
+            tc.runtime.mutation_applied = True
+            return AgentDecision(
+                completed=True,
+                output={"result_status": "no_change", "warnings": tc.runtime.layout_compile_results},
+                summary="目标页面均已安全保留，没有生成空转版本",
+                message="页面内容密度已达到安全上限，当前版本保持不变",
+            )
         return AgentDecision(
             tool_calls=calls,
             message=f"正在更新 {len(target_slides)} 页 PPT 并应用 LLM 设计的布局与素材",

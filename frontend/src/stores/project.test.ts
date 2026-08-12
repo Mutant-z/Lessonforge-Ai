@@ -161,7 +161,8 @@ describe('project task store', () => {
     await request;
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-1/instructions', {
-      content: '调整当前页配色', selected_slide_ids: ['S02'], resume_if_paused: false, modality: 'auto',
+      content: '调整当前页配色', target_slide_ids: ['S02'], selected_slide_ids: ['S02'],
+      resume_if_paused: false, modality: 'auto', polish_options: {},
     });
     expect(store.currentTask.messages).toEqual([
       expect.objectContaining({ id: 'message-1', content: '调整当前页配色', status: 'completed', run_id: 'run-1' }),
@@ -184,7 +185,8 @@ describe('project task store', () => {
     const result = await store.enqueuePPTInstruction('run-paused', '继续润色首页', ['slide_01'], true);
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-paused/instructions', {
-      content: '继续润色首页', selected_slide_ids: ['slide_01'], resume_if_paused: true, modality: 'auto',
+      content: '继续润色首页', target_slide_ids: ['slide_01'], selected_slide_ids: ['slide_01'],
+      resume_if_paused: true, modality: 'auto', polish_options: {},
     });
     expect(result.status).toBe('resumed');
     expect(store.pipelineStatus).toBe('queued');
@@ -208,7 +210,8 @@ describe('project task store', () => {
     await store.createPPTRun('course-1', '润色一下首页', ['slide_01']);
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs', {
-      course_id: 'course-1', instruction: '润色一下首页', action: 'message', selected_slide_ids: ['slide_01'], modality: 'auto',
+      course_id: 'course-1', instruction: '润色一下首页', action: 'message',
+      target_slide_ids: ['slide_01'], selected_slide_ids: ['slide_01'], modality: 'auto', polish_options: {},
     });
     expect(store.pipelineStatus).toBe('queued');
     expect(store.currentTask.active_run_id).toBe('run-2');
@@ -420,7 +423,7 @@ describe('project task store', () => {
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs', {
       course_id: 'course-1', instruction: '只调整排版', action: 'message',
-      selected_slide_ids: ['slide_01'], modality: 'layout',
+      target_slide_ids: ['slide_01'], selected_slide_ids: ['slide_01'], modality: 'layout', polish_options: {},
     });
 
     vi.mocked(api.post).mockResolvedValue({ data: {
@@ -430,7 +433,8 @@ describe('project task store', () => {
     await store.enqueuePPTInstruction('run-modality', '只改文字', ['slide_01'], false, 'text');
 
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-modality/instructions', {
-      content: '只改文字', selected_slide_ids: ['slide_01'], resume_if_paused: false, modality: 'text',
+      content: '只改文字', target_slide_ids: ['slide_01'], selected_slide_ids: ['slide_01'],
+      resume_if_paused: false, modality: 'text', polish_options: {},
     });
   });
 

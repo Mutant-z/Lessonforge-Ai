@@ -6,8 +6,10 @@
 """
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from uuid import uuid4
+
+from app.schemas.artifact import PPTBlock
 
 
 def _uid() -> str:
@@ -51,6 +53,12 @@ class AgentDecision(BaseModel):
 class LayoutElementSpec(BaseModel):
     """LLM 可执行的页面元素几何；坐标单位为英寸。"""
 
+    # Common geometry remains strongly typed, while renderer-owned metadata
+    # (asset identity, crop, chart data, editability flags) must round-trip.
+    # Dropping those fields is data loss, especially for image_geometry-only
+    # candidates that intentionally reuse the exact existing element.
+    model_config = ConfigDict(extra="allow")
+
     kind: Literal["textbox", "shape", "image", "chart"] = "textbox"
     role: str = ""
     text: str = ""
@@ -77,12 +85,39 @@ class PageLayoutSpec(BaseModel):
     visual_region: dict[str, float] | None = None
     visual_type: str | None = None
     render_mode: Literal["semantic", "hybrid", "absolute"] = "absolute"
+    compile_status: Literal["applied", "fallback", "preserved"] = "applied"
+    requested_style: dict[str, Any] = Field(default_factory=dict)
+    effective_style: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    content_allocation: dict[str, list[str]] = Field(default_factory=dict)
+    compile_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    baseline_metrics: dict[str, Any] = Field(default_factory=dict)
+    final_metrics: dict[str, Any] = Field(default_factory=dict)
+    quality_delta: float = 0.0
+    objective_results: list[dict[str, Any]] = Field(default_factory=list)
+    requested_objectives: list[dict[str, Any]] = Field(default_factory=list)
+    candidate_rankings: list[dict[str, Any]] = Field(default_factory=list)
+    selected_candidate_id: str | None = None
+    material_change: bool = True
+    candidate_score_gap: float | None = None
+    requires_candidate_confirmation: bool = False
 
 
 class SlideLayoutArtifact(BaseModel):
     """布局 Agent 的强类型产物，防止模型只返回自然语言建议。"""
 
     slides: list[PageLayoutSpec] = Field(min_length=1)
+
+
+class LayoutStyle(BaseModel):
+    """Strongly typed layout controls consumed by every deterministic preset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    font_tier: Literal["default", "compact", "spacious"] = "default"
+    font_scale: float = Field(default=1.0, ge=0.8, le=1.25)
+    gap_scale: float = Field(default=1.0, ge=0.8, le=1.5)
+    highlight: bool = False
 
 
 class LayoutDirectiveSlide(BaseModel):
@@ -95,7 +130,7 @@ class LayoutDirectiveSlide(BaseModel):
     slide_id: str = Field(min_length=1)
     layout_type: str = "bullet_flow"
     content_allocation: dict[str, list[str]] = Field(default_factory=dict)
-    style: dict[str, Any] = Field(default_factory=dict)
+    style: LayoutStyle = Field(default_factory=LayoutStyle)
     visual_region: dict[str, float] | None = None
     visual_type: str | None = None
     rationale: str = ""
@@ -159,7 +194,7 @@ class SlideContentPatchItem(BaseModel):
     title: str | None = None
     purpose: str | None = None
     body: list[str] | None = None
-    blocks: list[dict[str, Any]] | None = None
+    blocks: list[PPTBlock] | None = None
     speaker_notes: str | None = None
 
     model_config = {"extra": "allow"}
@@ -282,6 +317,10 @@ class QaCompletedEvent(BaseModel):
     severity_counts: dict[str, int] = Field(default_factory=dict)
     round: int = 0
     degraded: bool = False
+    qa_level: Literal["geometry", "raster", "vision"] = "geometry"
+    geometry_score: float | None = None
+    visual_quality_score: float | None = None
+    improvement_delta: float = 0.0
 
 
 class RevisionStartedEvent(BaseModel):

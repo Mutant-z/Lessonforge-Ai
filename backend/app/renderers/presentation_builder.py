@@ -8,6 +8,7 @@ render() 按元素几何 + 模板装饰程序化生成真实 PPTX。
 坐标系统：英寸，画布 13.333 × 7.5（与 pptx_renderer.SLIDE_WIDTH/HEIGHT 一致）。
 """
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,8 @@ class PresentationBuilder:
         self.design_system = design_system_for(self.template)
         self.slides: list[dict[str, Any]] = []
         self._element_seq = 0
+        self._source_render_modes: dict[str, tuple[bool, Any, str]] = {}
+        self._source_elements_present: dict[str, bool] = {}
 
     # ---------- 幻灯片与元素编辑 ----------
     def create_slide(self, page_type: str = "concept", title: str = "", layout: str = "bullet", purpose: str = "") -> str:
@@ -227,28 +230,46 @@ class PresentationBuilder:
         self.apply_template(content.get("theme") or self.template["id"])
         self.slides = []
         self._element_seq = 0
+        self._source_render_modes = {}
+        self._source_elements_present = {}
         for slide in content.get("slides") or []:
-            elements = [dict(element) for element in (slide.get("elements") or [])]
+            elements = deepcopy(list(slide.get("elements") or []))
             for element in elements:
                 element_id = str(element.get("id") or "")
                 if element_id.startswith("E") and element_id[1:].isdigit():
                     self._element_seq = max(self._element_seq, int(element_id[1:]))
-            self.slides.append({
-                "id": slide.get("id", f"S{len(self.slides) + 1:02d}"),
-                "page_type": slide.get("page_type", "concept"),
-                "title": slide.get("title", ""),
-                "purpose": slide.get("purpose", ""),
-                "body": list(slide.get("body") or []),
-                "layout": slide.get("layout", "bullet"),
-                "visual_suggestion": slide.get("visual_suggestion", ""),
-                "speaker_notes": slide.get("speaker_notes", ""),
-                "duration_seconds": slide.get("duration_seconds", 0),
-                "script_segment_ids": list(slide.get("script_segment_ids") or []),
-                "blocks": list(slide.get("blocks") or []),
-                "background": slide.get("background"),
-                "elements": elements,
-                "render_mode": infer_render_mode(slide),
-            })
+            # Keep the source shape byte-for-byte for untouched slides.  The
+            # strict revision gate compares non-target pages structurally, so
+            # normalising an omitted ``render_mode`` or dropping an empty
+            # ``blocks``/``elements`` field would otherwise look like an
+            # out-of-scope mutation.  Editing methods overwrite only the
+            # fields they actually change.
+            restored = deepcopy(slide)
+            restored.setdefault("id", f"S{len(self.slides) + 1:02d}")
+            restored.setdefault("page_type", "concept")
+            restored.setdefault("title", "")
+            restored.setdefault("purpose", "")
+            restored.setdefault("body", [])
+            restored.setdefault("layout", "bullet")
+            restored.setdefault("visual_suggestion", "")
+            restored.setdefault("speaker_notes", "")
+            restored.setdefault("duration_seconds", 0)
+            restored.setdefault("script_segment_ids", [])
+            if "blocks" in slide:
+                restored["blocks"] = deepcopy(list(slide.get("blocks") or []))
+            # Editor callers have always been able to index ``elements``
+            # directly, even for a legacy semantic-only page.  Track whether
+            # the field existed so serialization can still preserve the exact
+            # untouched source shape.
+            restored["elements"] = elements
+            effective_render_mode = infer_render_mode(slide)
+            restored["render_mode"] = effective_render_mode
+            restored_id = str(restored["id"])
+            self._source_render_modes[restored_id] = (
+                "render_mode" in slide, slide.get("render_mode"), effective_render_mode,
+            )
+            self._source_elements_present[restored_id] = "elements" in slide
+            self.slides.append(restored)
         return self
 
     def to_ppt_content(self) -> dict[str, Any]:
@@ -263,7 +284,8 @@ class PresentationBuilder:
             # for newly-created pages that truly omitted it.
             if blocks and not body:
                 body = semantic_body_texts(slide)
-            out = {
+            out = deepcopy(slide)
+            out.update({
                 "id": slide["id"],
                 "page_type": slide["page_type"],
                 "title": slide.get("title", ""),
@@ -274,12 +296,34 @@ class PresentationBuilder:
                 "speaker_notes": slide.get("speaker_notes", ""),
                 "duration_seconds": int(slide.get("duration_seconds") or 0),
                 "script_segment_ids": list(slide.get("script_segment_ids") or []),
-            }
-            if blocks:
-                out["blocks"] = blocks
-            if slide.get("elements"):
-                out["elements"] = [dict(element) for element in slide["elements"]]
-            out["render_mode"] = infer_render_mode(slide)
+            })
+            if blocks or "blocks" in slide:
+                out["blocks"] = deepcopy(blocks)
+            else:
+                out.pop("blocks", None)
+            source_elements_present = self._source_elements_present.get(
+                str(slide.get("id") or ""), False,
+            )
+            if slide.get("elements") or source_elements_present:
+                out["elements"] = deepcopy(list(slide.get("elements") or []))
+            else:
+                out.pop("elements", None)
+            # Preserve an absent/null legacy value on untouched pages while
+            # retaining an inferred effective mode inside the editor.  Every
+            # geometry mutation explicitly changes render_mode, so edited
+            # pages still serialize their new effective value.
+            original_mode = self._source_render_modes.get(str(slide.get("id") or ""))
+            if original_mode and slide.get("render_mode") == original_mode[2]:
+                if original_mode[0]:
+                    out["render_mode"] = original_mode[1]
+                else:
+                    out.pop("render_mode", None)
+            elif "render_mode" not in slide:
+                out.pop("render_mode", None)
+            # ``background`` is an internal builder concern rather than a
+            # PPTContent schema field (the visual value lives in elements /
+            # theme tokens), so keep the historical serialization contract.
+            out.pop("background", None)
             slides.append(out)
         return {"theme": self.template["id"], "slides": slides}
 
@@ -294,6 +338,12 @@ class PresentationBuilder:
                     "x": element["x"], "y": element["y"], "w": element["w"], "h": element["h"],
                     "text": element.get("text", ""),
                     "style": element.get("style", {}),
+                    # QA must distinguish the title rail from visible teaching
+                    # copy.  Dropping these fields made a wide title textbox
+                    # inflate the page bounding box and hide lower-half
+                    # whitespace (the V60--V62 false-positive success chain).
+                    "role": element.get("role", ""),
+                    "content_ref": element.get("content_ref", ""),
                 })
         return report
 

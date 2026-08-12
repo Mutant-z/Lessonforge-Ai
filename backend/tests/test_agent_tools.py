@@ -1,4 +1,5 @@
 """工具注册表与工具行为单测：入参校验、path-traversal 防护、图表/占位图、几何 QA。"""
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,48 @@ def _tc(tmp_path: Path) -> ToolContext:
     return ToolContext(builder=builder, workspace_root=tmp_path)
 
 
+def test_semantic_body_projection_does_not_repeat_title_from_lead_block():
+    from app.agent.slide_rendering import resolve_content_ref, semantic_body_texts
+
+    slide = {
+        "page_type": "cover",
+        "title": "探秘浮力成因与阿基米德原理",
+        "purpose": "激发探究兴趣",
+        "body": ["八年级物理", "潜水艇下潜时浮力会变大吗？"],
+        "blocks": [
+            {"kind": "lead", "text": "探秘浮力成因与阿基米德原理", "sub": "八年级物理"},
+            {"kind": "bullets", "items": [{"text": "潜水艇下潜时浮力会变大吗？"}]},
+        ],
+    }
+
+    assert semantic_body_texts(slide) == ["八年级物理", "潜水艇下潜时浮力会变大吗？"]
+    assert resolve_content_ref(slide, "body") == "八年级物理\n潜水艇下潜时浮力会变大吗？"
+
+
+def test_revision_content_ids_are_normalized_without_initial_deck_alignment():
+    baseline = [
+        {"id": "slide_01", "page_type": "cover", "title": "旧封面", "purpose": "",
+         "body": ["副标题"], "blocks": [], "speaker_notes": "", "duration_seconds": 30},
+        {"id": "slide_02", "page_type": "concept", "title": "旧正文", "purpose": "",
+         "body": ["正文"], "blocks": [], "speaker_notes": "", "duration_seconds": 30},
+    ]
+    runtime = SimpleNamespace(
+        selected_slide_ids=[], baseline_slides=baseline, active_intent="MODIFY",
+        source_artifact=SimpleNamespace(id="artifact-v60"), content_policy="edit",
+        preferred_template="lessonforge_deck_smart_ai",
+    )
+    decision = AgentDecision(completed=True, output={"slides": [
+        {"id": "S01", "changed_fields": ["title"], "title": "新封面"},
+        {"id": "S02", "changed_fields": ["title"], "title": "新正文"},
+    ]})
+
+    normalized = _ensure_executable_slide_content(runtime, decision)
+
+    assert [item["id"] for item in normalized.output["slides"]] == ["slide_01", "slide_02"]
+    assert len(normalized.output["slides"]) == 2
+    assert normalized.output["slides"][0]["body"] == ["副标题"]
+
+
 def test_smart_ai_absolute_layout_stays_outside_template_rail_and_visual_slot():
     slide = {
         "id": "slide_04", "page_type": "concept", "title": "从液体压强推导浮力",
@@ -35,11 +78,14 @@ def test_smart_ai_absolute_layout_stays_outside_template_rail_and_visual_slot():
     by_role = {element.get("role"): element for element in layout["elements"]}
     assert by_role["title"]["x"] >= 2.45
     assert by_role["body"]["x"] >= 2.45
-    assert by_role["body"]["x"] + by_role["body"]["w"] <= 7.6
+    assert by_role["body"]["x"] + by_role["body"]["w"] <= 7.6 + 1e-6
     assert by_role["title"]["x"] + by_role["title"]["w"] <= 12.6
 
 
-def test_visual_slot_is_clamped_below_title_and_keeps_text_gap():
+def test_visual_slot_keeps_text_gap_below_title_and_left_of_body():
+    # 视觉槽的 y 下限钳制（≥1.7）由 visual-plan 边界（pipeline._ensure_executable_visual_plan
+    # → normalize_visual_region）负责；到达 _layout_slide 的 placement 已是规范化坐标，
+    # 这里验证确定性版式在规范化槽位下仍与标题/正文保持间距。
     slide = {
         "id": "slide_05", "page_type": "concept", "title": "侧面受力抵消而上下存在深度差",
         "body": ["正方体微观受力示意图", "微观视角：液体分子碰撞物体", "侧面情况：深度相同压力抵消"],
@@ -47,7 +93,7 @@ def test_visual_slot_is_clamped_below_title_and_keeps_text_gap():
     }
     layout = LayoutAgent._layout_slide(
         slide,
-        {"visualType": "image", "placement": {"x": 7.4, "y": 1.2, "w": 5.2, "h": 4.8}},
+        {"visualType": "image", "placement": {"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2}},
         "lessonforge_deck_smart_ai",
     )
     region = layout["visual_region"]
@@ -55,6 +101,36 @@ def test_visual_slot_is_clamped_below_title_and_keeps_text_gap():
     assert region["y"] >= 1.7
     assert by_role["title"]["y"] + by_role["title"]["h"] <= region["y"] - 0.3 + 1e-6
     assert by_role["body"]["x"] + by_role["body"]["w"] <= region["x"] - 0.3 + 1e-6
+
+
+def test_body_items_render_as_separate_spaced_textboxes():
+    """左侧正文应逐条独立成框并上下留白，才能响应"文字间隔/太单调"类诉求。"""
+    from app.agent.slide_rendering import bind_content_refs, render_coverage
+
+    slide = {
+        "id": "slide_03_ki", "page_type": "scenario", "title": "浮力成因解析",
+        "purpose": "", "body": ["侧面平衡：前后左右受力对称抵消", "深度压强：下表面更深，液体压强更大"],
+        "blocks": [{"kind": "bullets", "items": [
+            {"text": "侧面平衡：前后左右受力对称抵消"},
+            {"text": "深度压强：下表面更深，液体压强更大"},
+        ]}],
+        "speaker_notes": "", "duration_seconds": 30,
+    }
+    layout = LayoutAgent._layout_slide(slide, None, "lessonforge_deck_academic")
+    body_elements = [el for el in layout["elements"] if (el.get("content_ref") or "").startswith("body")]
+    assert len(body_elements) == 2, "正文条目应逐条渲染为独立文本框"
+    assert body_elements[0]["content_ref"] == "body.0"
+    assert body_elements[1]["content_ref"] == "body.1"
+    assert body_elements[1]["y"] > body_elements[0]["y"] + body_elements[0]["h"], "条目之间应留白"
+    assert not any(el.get("text") == "\n".join(slide["body"]) for el in layout["elements"])
+
+    bound, unresolved = bind_content_refs(slide, layout["elements"])
+    assert unresolved == []
+    coverage = render_coverage({**slide, "render_mode": "absolute", "elements": bound}, baseline=slide)
+    assert coverage["missing_refs"] == []
+    text_by_ref = {el.get("content_ref"): el.get("text") for el in bound if el.get("content_ref")}
+    assert text_by_ref["body.0"] == "侧面平衡：前后左右受力对称抵消"
+    assert text_by_ref["body.1"] == "深度压强：下表面更深，液体压强更大"
 
 
 def test_visual_plan_canonicalizes_slot_and_hardens_image_prompt():
@@ -348,6 +424,33 @@ def test_edit_policy_returns_stable_error_for_empty_content_agent_output():
     assert caught.value.code == "slide_content_invalid"
 
 
+def test_edit_policy_sanitizes_dense_block_content_before_pipeline():
+    """编辑类 slide_content 必须确定性收敛 blocks 密度（27字→≤25字、去装饰前缀），
+    否则 27>25 的边缘超标会让 QA 门禁在修复轮内无法收敛。"""
+    source_slide = {
+        "id": "slide_03_ki", "page_type": "scenario", "title": "浮力成因",
+        "purpose": "", "body": ["压力差产生浮力"], "blocks": [],
+        "speaker_notes": "", "duration_seconds": 30,
+    }
+    runtime = SimpleNamespace(
+        content_policy="edit", selected_slide_ids=["slide_03_ki"],
+        source_artifact=SimpleNamespace(content_json={"slides": [source_slide]}),
+    )
+    decision = _ensure_executable_slide_content(runtime, AgentDecision(completed=True, output={
+        "slides": [{
+            "id": "slide_03_ki", "changed_fields": ["title", "body", "blocks"],
+            "title": "浮力成因", "body": ["压力差产生浮力"],
+            "blocks": [{"kind": "bullets", "items": [
+                {"text": "🔹 本质公式：上下表面压力差形成浮力 F浮=F下-F上"},
+            ]}],
+        }],
+    }))
+    block = decision.output["slides"][0]["blocks"][0]
+    item = block["items"][0]
+    assert len(item["text"]) <= 25
+    assert not item["text"].startswith("🔹")
+
+
 @pytest.mark.asyncio
 async def test_media_ignores_aggregate_visual_asset_and_requires_leaf():
     class Artifacts:
@@ -454,6 +557,42 @@ async def test_absolute_layout_without_source_body_is_blocked(tmp_path):
     )
     result = await execute_tool("run_qa", tc, {})
     assert any(item["rule_id"] == "layout.incomplete_absolute" for item in result.output["issues"])
+
+
+@pytest.mark.asyncio
+async def test_edit_qa_uses_new_semantic_copy_as_render_coverage_baseline(tmp_path):
+    source = {
+        "id": "slide_01", "page_type": "cover", "title": "旧标题",
+        "purpose": "旧目标", "body": ["旧副标题"], "blocks": [],
+        "visual_suggestion": "", "speaker_notes": "", "duration_seconds": 60,
+    }
+    edited = {
+        **source,
+        "title": "润色后的标题",
+        "purpose": "润色后的目标",
+        "body": ["润色后的副标题"],
+        "render_mode": "absolute",
+        "elements": [
+            {"id": "E01", "kind": "textbox", "role": "title", "text": "润色后的标题", "x": 1, "y": 1, "w": 5, "h": 1},
+            {"id": "E02", "kind": "textbox", "role": "body", "text": "润色后的副标题", "x": 1, "y": 2, "w": 5, "h": 1},
+            {"id": "E03", "kind": "textbox", "role": "purpose", "text": "润色后的目标", "x": 1, "y": 3, "w": 5, "h": 1},
+        ],
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [edited],
+    })
+    runtime = SimpleNamespace(
+        active_intent="LOCAL_REGENERATE", content_policy="edit",
+        selected_slide_ids=["slide_01"], render_coverage={},
+    )
+    tc = ToolContext(
+        builder=builder, runtime=runtime,
+        ctx=SimpleNamespace(source_artifact=SimpleNamespace(content_json={"slides": [source]})),
+    )
+
+    result = await execute_tool("run_qa", tc, {})
+
+    assert not any(item["rule_id"] == "layout.incomplete_absolute" for item in result.output["issues"])
 
 
 @pytest.mark.asyncio
@@ -662,6 +801,52 @@ async def test_restore_layout_keeps_existing_image_and_semantic_content(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_modify_layout_keeps_existing_image_for_text_edit(tmp_path):
+    """文字润色（MODIFY + edit）重排布局时不得丢掉页面上已有的图片。"""
+    image_path = tmp_path / "existing.png"
+    Image.new("RGB", (320, 180), "teal").save(image_path)
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "浮力原理",
+        "purpose": "", "body": ["原文字描述"], "blocks": [],
+        "visual_suggestion": "潜水艇受力图", "speaker_notes": "原备注", "duration_seconds": 60,
+        "elements": [{
+            "id": "E01", "kind": "image", "x": 7.4, "y": 1.4, "w": 5, "h": 4,
+            "asset_path": str(image_path), "asset_id": "asset-v1", "role": "visual",
+            "visual_slot": "primary_visual", "style": {},
+        }],
+    }
+    builder = PresentationBuilder().from_ppt_content({"theme": "lessonforge_deck_academic", "slides": [source]})
+    runtime = SimpleNamespace(
+        active_intent="MODIFY", content_policy="edit",
+        selected_slide_ids=["slide_01"], mutation_evidence=[], affected_slide_ids=[],
+        draft_artifact_id=None, mutation_applied=False,
+    )
+    tc = ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime)
+    write = await execute_tool("write_slide_batch", tc, {"slides": [{
+        "id": "slide_01", "changed_fields": ["title", "body"],
+        "title": "润色后的标题", "body": ["润色后的正文"],
+    }]})
+    assert write.ok
+    result = await execute_tool("layout_slide_batch", tc, {"layouts": [{
+        "slide_id": "slide_01", "render_mode": "absolute",
+        "visual_region": {"x": 7.2, "y": 1.3, "w": 5.0, "h": 3.8},
+        "elements": [
+            {"kind": "textbox", "role": "title", "content_ref": "title", "text": "模型伪造标题", "x": 1, "y": 0.7, "w": 5.8, "h": 0.8},
+            {"kind": "textbox", "role": "body", "content_ref": "body", "text": "模型漏掉正文", "x": 1, "y": 1.8, "w": 5.8, "h": 3.8},
+        ],
+    }]})
+    assert result.ok
+    assert result.output["preserved_visual_resources"] == 1
+    layout_slide = builder.get_slide("slide_01")
+    images = [item for item in layout_slide["elements"] if item.get("kind") == "image"]
+    assert [item.get("asset_id") for item in images] == ["asset-v1"]
+    assert images[0]["asset_path"] == str(image_path)
+    assert images[0]["x"] >= 7.0
+    text_by_ref = {item.get("content_ref"): item.get("text") for item in layout_slide["elements"] if item.get("content_ref")}
+    assert text_by_ref == {"title": "润色后的标题", "body": "润色后的正文"}
+
+
+@pytest.mark.asyncio
 async def test_layout_rejects_unknown_content_ref_before_mutating_slide(tmp_path):
     source = {
         "id": "slide_04", "page_type": "concept", "title": "原标题", "purpose": "",
@@ -678,6 +863,94 @@ async def test_layout_rejects_unknown_content_ref_before_mutating_slide(tmp_path
     assert result.ok is False
     assert result.error_code == "layout_incomplete"
     assert builder.get_slide("slide_04")["elements"] == before
+
+
+@pytest.mark.asyncio
+async def test_edit_layout_rejects_missing_body_before_mutating_slide(tmp_path):
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "浮力原理",
+        "purpose": "", "body": ["第一条正文", "第二条正文"], "blocks": [],
+        "visual_suggestion": "", "speaker_notes": "", "duration_seconds": 30,
+        "render_mode": "absolute", "elements": [{
+            "id": "E01", "kind": "textbox", "role": "body", "content_ref": "body",
+            "text": "第一条正文\n第二条正文", "x": 2.2, "y": 1.7, "w": 8, "h": 2,
+        }],
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source],
+    })
+    original_elements = [dict(item) for item in builder.get_slide("slide_01")["elements"]]
+    runtime = SimpleNamespace(
+        active_intent="MODIFY", content_policy="edit", selected_slide_ids=["slide_01"],
+    )
+    tc = ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime)
+
+    result = await execute_tool("layout_slide_batch", tc, {"layouts": [{
+        "slide_id": "slide_01", "render_mode": "absolute", "elements": [{
+            "kind": "textbox", "role": "title", "content_ref": "title",
+            "text": "浮力原理", "x": 2.2, "y": 0.55, "w": 8, "h": 0.8,
+        }],
+    }]})
+
+    assert not result.ok
+    assert result.error_code == "layout_incomplete"
+    assert result.output["missing_refs"] == ["body.0", "body.1"]
+    assert result.output["missing_text"][0]["text"] == "第一条正文"
+    assert builder.get_slide("slide_01")["elements"] == original_elements
+
+
+@pytest.mark.asyncio
+async def test_layout_batch_stages_pages_and_partially_applies_safe_candidates(tmp_path):
+    source_1 = {
+        "id": "slide_01", "page_type": "concept", "title": "第一页",
+        "purpose": "", "body": ["可安全排版的正文"], "blocks": [],
+        "speaker_notes": "", "duration_seconds": 30, "elements": [],
+    }
+    source_2 = {
+        "id": "slide_02", "page_type": "concept", "title": "第二页",
+        "purpose": "", "body": ["必须保留的正文"], "blocks": [],
+        "speaker_notes": "", "duration_seconds": 30,
+        "render_mode": "absolute", "elements": [{
+            "id": "E99", "kind": "textbox", "role": "body", "content_ref": "body",
+            "text": "必须保留的正文", "x": 2.2, "y": 1.7, "w": 8.5, "h": 1.0,
+        }],
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source_1, source_2],
+    })
+    before_2 = deepcopy(builder.get_slide("slide_02"))
+    runtime = SimpleNamespace(
+        active_intent="LAYOUT_ONLY", content_policy="preserve",
+        selected_slide_ids=["slide_01", "slide_02"], baseline_slides=[source_1, source_2],
+        affected_slide_ids=[], mutation_evidence=[], mutation_applied=False,
+        layout_compile_results=[], result_status="applied", draft_artifact_id=None,
+    )
+
+    result = await execute_tool("layout_slide_batch", ToolContext(
+        builder=builder, workspace_root=tmp_path, runtime=runtime,
+    ), {"layouts": [
+        {"slide_id": "slide_01", "render_mode": "absolute", "elements": [
+            {"kind": "textbox", "role": "title", "content_ref": "title", "text": "第一页",
+             "x": 2.2, "y": 0.6, "w": 9.0, "h": 0.8, "style": {"size": 28}},
+            {"kind": "textbox", "role": "body", "content_ref": "body.0", "text": "可安全排版的正文",
+             "x": 2.2, "y": 1.7, "w": 9.0, "h": 3.0, "style": {"size": 20}},
+        ]},
+        {"slide_id": "slide_02", "render_mode": "absolute", "elements": [
+            {"kind": "textbox", "role": "title", "content_ref": "title", "text": "第二页",
+             "x": 2.2, "y": 0.6, "w": 9.0, "h": 0.8, "style": {"size": 28}},
+        ]},
+    ]})
+
+    assert result.ok
+    assert result.output["slide_ids"] == ["slide_01"]
+    assert result.output["preserved_slide_ids"] == ["slide_02"]
+    assert builder.get_slide("slide_01")["elements"]
+    assert builder.get_slide("slide_02") == before_2
+    assert runtime.result_status == "partial"
+    assert runtime.mutation_applied is True
+    assert next(
+        item for item in runtime.layout_compile_results if item["slide_id"] == "slide_02"
+    )["status"] == "preserved"
 
 
 @pytest.mark.asyncio
@@ -701,6 +974,196 @@ async def test_slide_content_patch_does_not_erase_unspecified_fields(tmp_path):
     assert updated["body"] == ["原正文"]
     assert updated["blocks"] == [{"kind": "note", "text": "结构化内容"}]
     assert updated["speaker_notes"] == "原备注"
+
+
+@pytest.mark.asyncio
+async def test_identical_slide_content_patch_is_no_change(tmp_path):
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "原标题", "purpose": "教学目的",
+        "body": ["原正文"], "blocks": [{"kind": "note", "text": "结构化内容"}],
+        "speaker_notes": "原备注", "duration_seconds": 60,
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source],
+    })
+    runtime = SimpleNamespace(
+        active_intent="MODIFY", selected_slide_ids=["slide_01"],
+        affected_slide_ids=[], mutation_evidence=[], mutation_applied=False,
+        draft_artifact_id=None, result_status="applied",
+    )
+
+    result = await execute_tool("write_slide_batch", ToolContext(builder=builder, runtime=runtime), {
+        "slides": [{
+            "id": "slide_01", "changed_fields": ["title", "body"],
+            "title": "原标题", "body": ["原正文"],
+        }],
+    })
+
+    assert result.ok
+    assert result.output["updated"] == 0
+    assert result.output["unchanged_slide_ids"] == ["slide_01"]
+    assert runtime.affected_slide_ids == []
+    assert runtime.mutation_applied is False
+    assert runtime.result_status == "no_change"
+
+
+@pytest.mark.asyncio
+async def test_text_only_patch_updates_visible_copy_without_geometry_change(tmp_path):
+    from app.agent.slide_rendering import render_coverage, semantic_geometry_hash
+
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "原标题", "purpose": "",
+        "body": ["原正文"], "blocks": [], "speaker_notes": "", "duration_seconds": 60,
+        "render_mode": "absolute", "elements": [
+            {"id": "T1", "kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "原标题", "x": 1.0, "y": 0.6, "w": 8.0, "h": 0.8,
+             "style": {"size": 28}},
+            {"id": "B1", "kind": "textbox", "role": "body", "content_ref": "body.0",
+             "text": "原正文", "x": 1.0, "y": 1.8, "w": 8.0, "h": 2.0,
+             "style": {"size": 18}},
+        ],
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source],
+    })
+    before_geometry = semantic_geometry_hash(builder.get_slide("slide_01"))
+    runtime = SimpleNamespace(
+        active_intent="MODIFY", selected_slide_ids=["slide_01"],
+        affected_slide_ids=[], mutation_evidence=[], mutation_applied=False,
+        draft_artifact_id=None, result_status="applied",
+    )
+
+    result = await execute_tool("write_slide_batch", ToolContext(builder=builder, runtime=runtime), {
+        "slides": [{
+            "id": "slide_01", "changed_fields": ["title", "body"],
+            "title": "润色后的标题", "body": ["润色后的正文"],
+        }],
+    })
+
+    assert result.ok and result.output["updated"] == 1
+    final = builder.get_slide("slide_01")
+    assert semantic_geometry_hash(final) == before_geometry
+    assert [item["text"] for item in final["elements"]] == ["润色后的标题", "润色后的正文"]
+    assert render_coverage(final, baseline=final)["missing_refs"] == []
+
+
+@pytest.mark.asyncio
+async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkeypatch):
+    from app.renderers.ppt_visual_qa import PPTVisualQARenderer
+
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "标题", "purpose": "",
+        "body": ["正文"], "blocks": [], "speaker_notes": "", "duration_seconds": 60,
+        "render_mode": "absolute", "elements": [
+            {"id": "E1", "kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "标题", "x": 1.0, "y": 0.6, "w": 8.0, "h": 0.8,
+             "style": {"size": 28}},
+            {"id": "E2", "kind": "textbox", "role": "body", "content_ref": "body.0",
+             "text": "正文", "x": 1.0, "y": 1.8, "w": 8.0, "h": 3.8,
+             "style": {"size": 18}},
+        ],
+    }
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source],
+    })
+    monkeypatch.setattr(PPTVisualQARenderer, "is_available", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        PPTVisualQARenderer, "convert_pptx_to_images",
+        staticmethod(lambda *_args, **_kwargs: []),
+    )
+    monkeypatch.setattr(
+        PresentationBuilder, "render",
+        lambda _self, path: (Path(path).parent.mkdir(parents=True, exist_ok=True), Path(path).touch()),
+    )
+    runtime = SimpleNamespace(
+        active_intent="LAYOUT_ONLY", content_policy="preserve",
+        selected_slide_ids=["slide_01"], affected_slide_ids=["slide_01"],
+        baseline_slides=[source], source_artifact=SimpleNamespace(content_json={"slides": [source]}),
+        layout_engine_params={"quality_mode": "polish_v2", "operations": [{"domain": "layout"}]},
+        render_coverage={}, layout_compile_results=[], result_status="applied",
+        mutation_applied=True,
+    )
+
+    result = await execute_tool(
+        "run_qa", ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime), {},
+    )
+
+    assert result.ok
+    assert result.output["missing_render_slide_ids"] == ["slide_01"]
+    assert result.output["qa_level"] == "geometry"
+    assert result.output["degraded"] is True
+    assert runtime.result_status == "no_change"
+    assert any(
+        issue["rule_id"] == "layout.candidate_preserved"
+        for issue in result.output["issues"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_geometry_round_trip_only_changes_existing_visual_box(tmp_path):
+    from app.agent.layouts.engine import compile_layout
+    from app.agent.schemas import PageLayoutSpec
+
+    source = {
+        "id": "slide_01", "page_type": "concept", "title": "浮力", "purpose": "",
+        "body": ["压力差产生浮力"], "blocks": [], "speaker_notes": "", "duration_seconds": 60,
+        "render_mode": "absolute", "elements": [
+            {"id": "T1", "kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "浮力", "x": 1.0, "y": 0.6, "w": 7.0, "h": 0.8,
+             "style": {"size": 28, "color": "primary"}},
+            {"id": "B1", "kind": "textbox", "role": "body", "content_ref": "body.0",
+             "text": "压力差产生浮力", "x": 1.0, "y": 1.8, "w": 6.5, "h": 3.5,
+             "style": {"size": 18, "color": "text"}},
+            {"id": "I1", "kind": "image", "role": "visual", "visual_slot": "primary_visual",
+             "asset_id": "asset-1", "asset_path": "/tmp/existing.png",
+             "crop": {"left": 0.1, "right": 0.0},
+             "x": 9.1, "y": 2.1, "w": 2.0, "h": 2.0, "style": {"radius": 8}},
+        ],
+    }
+    directive = {
+        "slide_id": "slide_01", "layout_type": "bullet_flow",
+        "image_geometry_only": True, "image_scale": 1.10,
+        "objectives": [{
+            "metric": "image_scale", "direction": "increase",
+            "minimum_delta": 0.10, "hard_requirement": True,
+        }],
+    }
+    compiled = compile_layout("lessonforge_deck_academic", source, directive)
+    # Exercise the Pydantic artifact boundary that previously dropped asset/crop.
+    layout = PageLayoutSpec.model_validate(compiled).model_dump()
+    image = next(item for item in layout["elements"] if item["kind"] == "image")
+    assert image["asset_id"] == "asset-1"
+    assert image["asset_path"] == "/tmp/existing.png"
+    assert image["crop"] == {"left": 0.1, "right": 0.0}
+
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_academic", "slides": [source],
+    })
+    runtime = SimpleNamespace(
+        active_intent="LAYOUT_ONLY", content_policy="preserve",
+        selected_slide_ids=["slide_01"], baseline_slides=[deepcopy(source)],
+        affected_slide_ids=[], mutation_evidence=[], mutation_applied=False,
+        layout_compile_results=[{"slide_id": "slide_01", "status": "applied"}],
+        layout_engine_params={"image_geometry_only": True}, result_status="applied",
+        draft_artifact_id=None,
+    )
+    result = await execute_tool(
+        "layout_slide_batch", ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime),
+        {"layouts": [layout]},
+    )
+
+    assert result.ok
+    final = builder.get_slide("slide_01")
+    assert final["elements"][:2] == source["elements"][:2]
+    final_image = final["elements"][2]
+    assert {
+        key: value for key, value in final_image.items() if key not in {"x", "y", "w", "h"}
+    } == {
+        key: value for key, value in source["elements"][2].items() if key not in {"x", "y", "w", "h"}
+    }
+    assert final_image["w"] == pytest.approx(2.2)
+    assert final_image["h"] == pytest.approx(2.2)
+    assert runtime.affected_slide_ids == ["slide_01"]
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,20 @@ from pydantic import BaseModel, Field
 
 from app.providers.llm.mock import MockProvider
 
+# V2 is a deterministic canonical command used by the runtime/publish gates.
+# Re-export it here so callers can migrate from the legacy one-dimensional
+# ``PolishIntent`` without changing their import root.
+from app.agent.polish_command import (
+    ParsedPageReferences,
+    PolishObjective,
+    PolishOperation,
+    PolishPreservation,
+    PolishScope,
+    ResolvedPolishCommandV2,
+    parse_page_references,
+    resolve_polish_command,
+)
+
 
 class PolishIntent(BaseModel):
     action: Literal[
@@ -23,6 +37,7 @@ class PolishIntent(BaseModel):
     ] = "overall"
     preserve_text: bool = True
     scope_slide_ids: list[str] = Field(default_factory=list)
+    size_scale: float | None = Field(default=None, ge=0.8, le=1.25)
     summary: str = ""
 
 
@@ -60,4 +75,79 @@ def dimension_to_engine_params(intent: PolishIntent | None) -> dict[str, Any]:
     elif intent.target_dimension == "balance":
         params["gap_scale"] = 1.1
         params["prefer_columns"] = True
+    elif intent.target_dimension == "size":
+        params["font_scale"] = intent.size_scale or 1.1
+        params["size_scale"] = intent.size_scale or 1.1
+        params["font_tier"] = "spacious" if (intent.size_scale or 1.1) >= 1.0 else "compact"
     return params
+
+
+def resolved_command_to_polish_intent(command: ResolvedPolishCommandV2) -> PolishIntent:
+    """Compatibility projection for code paths that still consume PolishIntent.
+
+    Multi-objective information intentionally remains on ``command``; when it
+    cannot be represented faithfully, the legacy dimension is ``overall``.
+    """
+    domains = {operation.domain for operation in command.operations}
+    if "restore" in domains:
+        action = "restore"
+    elif "export" in domains:
+        action = "export"
+    elif "qa" in domains and not domains - {"qa"}:
+        action = "visual_qa"
+    elif "template" in domains:
+        action = "template_switch"
+    elif domains and domains <= {"text"}:
+        action = "text_polish"
+    elif domains and domains <= {"image_asset", "image_geometry"}:
+        action = "image_only"
+    else:
+        action = "layout_only"
+
+    metric_dimensions = {
+        "vertical_utilization": "distribution",
+        "horizontal_utilization": "distribution",
+        "whitespace_balance": "balance",
+        "spacing": "spacing",
+        "alignment": "alignment",
+        "font_size": "size",
+        "image_scale": "size",
+        "contrast": "color",
+    }
+    dimensions = {
+        metric_dimensions[objective.metric]
+        for objective in command.objectives
+        if objective.metric in metric_dimensions
+    }
+    target_dimension = dimensions.pop() if len(dimensions) == 1 else "overall"
+    font_objective = next(
+        (item for item in command.objectives if item.metric == "font_size"), None,
+    )
+    size_scale = None
+    if font_objective and font_objective.direction in {"increase", "decrease"}:
+        delta = font_objective.minimum_delta or 0.05
+        size_scale = 1.0 + delta if font_objective.direction == "increase" else 1.0 - delta
+    return PolishIntent(
+        action=action,
+        target_dimension=target_dimension,
+        preserve_text=command.preservation.semantic_text,
+        scope_slide_ids=list(command.scope.target_slide_ids),
+        size_scale=size_scale,
+        summary=command.summary,
+    )
+
+
+__all__ = [
+    "ParsedPageReferences",
+    "PolishIntent",
+    "PolishObjective",
+    "PolishOperation",
+    "PolishPreservation",
+    "PolishScope",
+    "ResolvedPolishCommandV2",
+    "dimension_to_engine_params",
+    "extract_polish_intent",
+    "parse_page_references",
+    "resolve_polish_command",
+    "resolved_command_to_polish_intent",
+]

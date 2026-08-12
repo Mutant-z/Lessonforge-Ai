@@ -67,6 +67,21 @@ async def test_builder_to_ppt_content_round_trip():
     assert out["slides"][1]["duration_seconds"] == 60
 
 
+def test_builder_round_trip_keeps_untouched_legacy_slide_shape_exact():
+    slide = {
+        "id": "S01", "page_type": "cover", "title": "浮力原理", "purpose": "p",
+        "body": ["初中物理"], "layout": "cover", "visual_suggestion": "封面",
+        "speaker_notes": "开场", "duration_seconds": 30,
+        "script_segment_ids": [], "blocks": [], "elements": [], "render_mode": None,
+    }
+
+    output = PresentationBuilder().from_ppt_content({
+        "theme": TEMPLATE, "slides": [slide],
+    }).to_ppt_content()["slides"][0]
+
+    assert output == slide
+
+
 def test_builder_round_trip_keeps_element_ids_unique():
     builder = PresentationBuilder().from_ppt_content({
         "theme": TEMPLATE,

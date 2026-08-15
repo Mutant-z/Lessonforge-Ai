@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 import json
 import logging
 import re
-from typing import TypeVar
+from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from app.core.http_client import build_async_client
@@ -16,6 +16,7 @@ T = TypeVar("T", bound=BaseModel)
 
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
+    supports_native_tools = True
 
     def __init__(
         self,
@@ -157,6 +158,71 @@ class AnthropicProvider(LLMProvider):
             logger.warning("anthropic stream_decision 内容异常，回退 structured：%s", str(exc)[:200])
             decision = await self.structured(system, prompt, schema)
         yield ("decision_ready", decision)
+
+    async def native_agent_decision(
+        self,
+        system: str,
+        prompt: str,
+        tools: list[dict[str, Any]],
+    ):
+        """原生 tool calling（方案 §3.1）：Anthropic tool_use content block。
+
+        响应中的 tool_use block 转换为 AgentDecision.tool_calls；文本内容按
+        AgentDecision 结构化解析。协议错误返回 None，由调用方回退结构化协议。
+        """
+        from app.agent.schemas import AgentDecision, ToolCall
+
+        if not self.api_key:
+            return None
+        payload = {
+            "model": self.model_name,
+            "max_tokens": 4096,
+            "system": system,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "custom",
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "input_schema": tool.get("input_schema") or {},
+                }
+                for tool in tools
+                if tool.get("name")
+            ]
+        url = f"{self.base_url}/v1/messages"
+        try:
+            async with build_async_client(url, timeout=self.timeout) as client:
+                resp = await client.post(url, headers=self._headers(), json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception:  # noqa: BLE001  协议错误 → 回退结构化
+            return None
+        raw_text = ""
+        parsed_tools: list[ToolCall] = []
+        for item in data.get("content", []):
+            if item.get("type") == "text":
+                raw_text += item.get("text", "")
+            elif item.get("type") == "tool_use":
+                name = item.get("name") or ""
+                if not name:
+                    continue
+                arguments = item.get("input") or {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                parsed_tools.append(ToolCall(id=str(item.get("id") or ""), tool_name=name, input=arguments))
+        if parsed_tools:
+            return AgentDecision(
+                thinking=raw_text[:2000],
+                tool_calls=parsed_tools,
+                message="已调用工具继续执行。",
+            )
+        clean = raw_text.strip()
+        try:
+            return AgentDecision.model_validate_json(clean)
+        except (ValidationError, json.JSONDecodeError):
+            return None
 
     async def stream_text(self, system: str, prompt: str) -> AsyncIterator[str]:
         url = f"{self.base_url}/v1/messages"

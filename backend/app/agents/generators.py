@@ -1,4 +1,6 @@
 import json
+import math
+import re
 
 from app.models.entities import CourseProject
 from app.core.database import SessionLocal
@@ -18,6 +20,8 @@ from app.schemas.artifact import (
     TaskSheetObjective, TaskSheetQuestion, TaskSheetSelfAssessment, VerbatimContent,
     VerbatimSection, VideoAudioTrack, VideoInteraction, VideoProductionSettings, VideoScene,
     VideoScriptContent, VideoScriptCourseInfo, VideoTextTrack, VideoVisualTrack,
+    SeedanceCameraBeat, SeedanceVideoProductionSettings, SeedanceVideoScene,
+    SeedanceVideoScriptContent,
 )
 from app.schemas.blueprint import (
     AssessmentItem, CourseBlueprintSchema, CourseIdentity, KnowledgePoint, LearningAnalysis,
@@ -550,6 +554,28 @@ def _subtitle_chunks(text: str, duration: float, width: int = 18) -> list[Subtit
     ]
 
 
+def repair_video_script_subtitles(script: VideoScriptContent) -> VideoScriptContent:
+    """Deterministically realign mismatched subtitles to the approved narration.
+
+    Structured-output models occasionally return a valid scene timeline but omit
+    or paraphrase a few words in ``subtitle_chunks``. Subtitles are a derived
+    production track, so rebuilding only mismatched tracks is safer than
+    discarding the entire generated script or asking the model to retry.
+    """
+    repaired = script.model_copy(deep=True)
+    width = (
+        repaired.production_settings.subtitle_max_chars_per_line
+        * repaired.production_settings.subtitle_max_lines
+    )
+    for scene in repaired.scenes:
+        narration = scene.audio_track.narration_text
+        if "".join(chunk.text for chunk in scene.text_track.subtitle_chunks) == narration:
+            continue
+        duration = scene.end_seconds - scene.start_seconds
+        scene.text_track.subtitle_chunks = _subtitle_chunks(narration, duration, width)
+    return repaired
+
+
 def _video_role(page_type: str) -> str:
     return {
         "cover": "导入", "objectives": "目标", "scenario": "情境", "concept": "概念讲解",
@@ -648,8 +674,13 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
     scenes = []
     objective_ids_all = [item.id for item in bp.objectives]
     knowledge_ids_all = [item.id for item in bp.knowledge_points]
-    for index, slide in enumerate(ppt.slides, 1):
-        end = cursor + slide.duration_seconds
+    # The current PPT is the frame-accurate production source. Its page timings
+    # may have been edited after the blueprint was created, so the script must
+    # preserve those exact per-page durations and derive its target from them.
+    scene_durations = [slide.duration_seconds for slide in ppt.slides]
+    target_seconds = sum(scene_durations)
+    for index, (slide, scene_duration) in enumerate(zip(ppt.slides, scene_durations), 1):
+        end = cursor + scene_duration
         midpoint_minutes = ((cursor + end) / 2) / 60
         stage = next(
             (item for item in lesson_plan.stages if any(bp_stage.segment_id == item.id and bp_stage.start_minute <= midpoint_minutes <= bp_stage.end_minute for bp_stage in bp.timeline)),
@@ -662,18 +693,18 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
             knowledge_id for item in bp.objectives if item.id in objective_ids for knowledge_id in item.knowledge_point_ids
         )) or knowledge_ids_all
         interactive = slide.page_type in {"scenario", "exercise", "question"}
-        pause_duration = min(3.0, max(2.0, slide.duration_seconds * .08)) if interactive else 0
+        pause_duration = min(3.0, max(2.0, scene_duration * .08)) if interactive else 0
         narration = _scene_narration(bp, slide)
         # mock 自动旁白按分镜可用时长截断，避免旁白估算超时
-        available = max(1.0, slide.duration_seconds - pause_duration)
+        available = max(1.0, scene_duration - pause_duration)
         narration = _fit_mock_narration(narration, int(available * 4.0 * 0.9))
-        pause_offset = max(0.0, slide.duration_seconds - pause_duration - 1) if interactive else 0
+        pause_offset = max(0.0, scene_duration - pause_duration - 1) if interactive else 0
         animation_cues = [
             AnimationCue(offset_seconds=0, target="整页", action="显示", instruction=f"显示 {slide.id}《{slide.title}》"),
         ]
         if slide.body:
             animation_cues.append(AnimationCue(
-                offset_seconds=round(min(slide.duration_seconds * .35, max(1, slide.duration_seconds - 1)), 2),
+                offset_seconds=round(min(scene_duration * .35, max(1, scene_duration - 1)), 2),
                 target=slide.body[0], action="高亮", instruction="随旁白聚焦当前核心信息",
             ))
         interaction = None
@@ -699,7 +730,7 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
             ),
             text_track=VideoTextTrack(
                 on_screen_text=[slide.title],
-                subtitle_chunks=_subtitle_chunks(narration, slide.duration_seconds),
+                subtitle_chunks=_subtitle_chunks(narration, scene_duration),
             ),
             interaction=interaction,
             production_notes=[slide.visual_suggestion, "保持 16:9 PPT 录屏画面，不添加无来源素材"],
@@ -709,9 +740,85 @@ def make_video_script(bp: CourseBlueprintSchema, lesson_plan: LessonPlanContent,
         course_info=VideoScriptCourseInfo(
             course_title=bp.course_identity.title, subject=bp.course_identity.subject,
             grade_level=bp.course_identity.grade_level, audience=bp.course_identity.audience,
-            duration_seconds=bp.course_identity.duration_minutes * 60,
+            duration_seconds=target_seconds,
         ),
-        production_settings=VideoProductionSettings(target_duration_seconds=bp.course_identity.duration_minutes * 60),
+        production_settings=VideoProductionSettings(target_duration_seconds=target_seconds),
+        scenes=scenes,
+    )
+
+
+def make_seedance_video_script(
+    bp: CourseBlueprintSchema,
+    lesson_plan: LessonPlanContent,
+) -> SeedanceVideoScriptContent:
+    """Create a deterministic V3 mock without consulting PPT content."""
+    total = float(bp.course_identity.duration_minutes * 60)
+    count = max(1, math.ceil(total / 12))
+    while count > 1 and total / count < 8:
+        count -= 1
+    while total / count > 15:
+        count += 1
+    duration = total / count
+    if duration < 4:
+        raise ValueError("课程时长不足以生成 Seedance 原生视频片段")
+    objective_ids = [item.id for item in bp.objectives]
+    knowledge_ids = [item.id for item in bp.knowledge_points]
+    scenes: list[SeedanceVideoScene] = []
+    cursor = 0.0
+    for index in range(count):
+        end = total if index == count - 1 else round((index + 1) * duration, 3)
+        midpoint_minutes = ((cursor + end) / 2) / 60
+        timeline = next(
+            (item for item in bp.timeline if item.start_minute <= midpoint_minutes <= item.end_minute),
+            bp.timeline[min(index * len(bp.timeline) // count, len(bp.timeline) - 1)],
+        )
+        stage = next((item for item in lesson_plan.stages if item.id == timeline.segment_id), lesson_plan.stages[0])
+        stage_objectives = [item.id for item in bp.objectives if stage.id in item.activity_ids] or objective_ids[:1]
+        stage_knowledge = list(dict.fromkeys(
+            knowledge_id for item in bp.objectives if item.id in stage_objectives
+            for knowledge_id in item.knowledge_point_ids
+        )) or knowledge_ids[:1]
+        knowledge_names = [item.name for item in bp.knowledge_points if item.id in stage_knowledge]
+        topic = "、".join(knowledge_names) or bp.course_identity.title
+        role = "导入" if index == 0 else "总结" if index == count - 1 else "概念讲解"
+        spoken = (
+            f"先观察这个情境，我们将从中理解{topic}。"
+            if index == 0 else
+            f"这一段聚焦{topic}。请注意条件、过程和结论之间的关系。"
+            if index < count - 1 else
+            f"回顾本节内容，请用自己的话说明{topic}，并检查结论成立的条件。"
+        )
+        scene_duration = end - cursor
+        scenes.append(SeedanceVideoScene(
+            id=f"SV-{index + 1:02d}", sequence=index + 1, title=f"{stage.title} · {index + 1}",
+            pedagogical_role=role, lesson_stage_id=stage.id,
+            objective_ids=stage_objectives, knowledge_point_ids=stage_knowledge,
+            start_seconds=cursor, end_seconds=end, continuity_group=f"stage-{stage.id}",
+            visual_prompt=(
+                f"面向{bp.course_identity.audience}的真实教学影像，围绕{topic}呈现一个可观察、科学准确的场景；"
+                "主体动作清楚，环境简洁，镜头稳定，关键观察对象始终清晰。"
+            ),
+            camera_beats=[SeedanceCameraBeat(
+                start_offset_seconds=0, end_offset_seconds=scene_duration,
+                instruction="中景建立情境，缓慢推进到关键观察对象",
+            )],
+            spoken_text=spoken,
+            required_terms=knowledge_names[:3],
+            required_numbers=re.findall(r"\d+(?:\.\d+)?", spoken),
+            required_facts=[spoken.rstrip("。")],
+            voice_direction="自然、清晰、可信赖的中文教师讲解，重点处稍慢",
+            sound_design=["保留自然环境声，教师口播清晰靠前"],
+            negative_constraints=["禁止 PPT、幻灯片、信息图和软件界面", "禁止水印、乱码和大段可读文字", "禁止改变教学事实"],
+            production_notes=[timeline.purpose],
+        ))
+        cursor = end
+    return SeedanceVideoScriptContent(
+        course_info=VideoScriptCourseInfo(
+            course_title=bp.course_identity.title, subject=bp.course_identity.subject,
+            grade_level=bp.course_identity.grade_level, audience=bp.course_identity.audience,
+            duration_seconds=round(total),
+        ),
+        production_settings=SeedanceVideoProductionSettings(target_duration_seconds=total),
         scenes=scenes,
     )
 
@@ -736,6 +843,29 @@ def make_verbatim(bp: CourseBlueprintSchema, ppt: PPTContent, script: VideoScrip
             word_count=narration_len,
             estimated_duration_seconds=round(narration_len / 4.0, 1),
             interaction=scene.interaction.prompt if scene.interaction else "邀请学生用一句话概括当前要点。",
+        ))
+    return VerbatimContent(sections=sections)
+
+
+def make_seedance_verbatim(
+    bp: CourseBlueprintSchema,
+    script: SeedanceVideoScriptContent,
+) -> VerbatimContent:
+    sections = []
+    for scene in script.scenes:
+        text = scene.spoken_text
+        sections.append(VerbatimSection(
+            id=f"VT-{scene.sequence:02d}", scene_id=scene.id, slide_ids=[],
+            time_range=f"{int(scene.start_seconds) // 60:02d}:{int(scene.start_seconds) % 60:02d}–{int(scene.end_seconds) // 60:02d}:{int(scene.end_seconds) % 60:02d}",
+            pedagogical_action={
+                "导入": "hook", "目标": "objective_guide", "情境": "scenario_connect",
+                "概念讲解": "metaphor_explain", "示范": "step_demonstration",
+                "检查点": "check_in", "总结": "summary_recap",
+            }.get(scene.pedagogical_role, "scenario_connect"),
+            required_text=text, optional_text="",
+            key_emphasis=scene.required_terms, word_count=len(text),
+            estimated_duration_seconds=round(len(text) / 4, 1),
+            interaction="按脚本镜头节奏完成讲解。",
         ))
     return VerbatimContent(sections=sections)
 
@@ -815,8 +945,32 @@ def to_markdown(kind: str, content) -> str:
                 else:
                     append_question(block)
     elif kind == "video_script":
+        if data.get("schema_version") == "4.0":
+            from app.schemas.video_script_v4 import video_script_v4_to_markdown
+
+            return video_script_v4_to_markdown(data)
         info = data["course_info"]
         settings = data["production_settings"]
+        if data.get("schema_version") == "3.0":
+            lines += [
+                f"**课程：** {info['course_title']}",
+                f"**学科 / 年级：** {info['subject']} / {info['grade_level'] or info['audience']}",
+                "**制作方式：** Doubao-Seedance-2.5 原生有声分段生成",
+                f"**目标时长：** {settings['target_duration_seconds']} 秒",
+                f"**片段范围：** {settings['min_clip_seconds']}–{settings['max_clip_seconds']} 秒", "",
+            ]
+            for item in data["scenes"]:
+                lines += [
+                    f"## {item['id']} · {item['start_seconds']:.1f}s—{item['end_seconds']:.1f}s · {item['pedagogical_role']}",
+                    f"- 连续性分组：{item['continuity_group']}",
+                    f"- 目标 / 知识点：{'、'.join(item['objective_ids'])} / {'、'.join(item['knowledge_point_ids'])}",
+                    f"- 画面：{item['visual_prompt']}",
+                    f"- 原生口播：{item['spoken_text']}",
+                    f"- 声音指导：{item['voice_direction']}",
+                    f"- 必须保留：{'、'.join(item['required_terms'] + item['required_numbers']) or '无'}",
+                    f"- 禁止项：{'；'.join(item['negative_constraints']) or '无'}", "",
+                ]
+            return "\n".join(lines)
         lines += [
             f"**课程：** {info['course_title']}",
             f"**学科 / 年级：** {info['subject']} / {info['grade_level'] or info['audience']}",
@@ -849,6 +1003,10 @@ def to_markdown(kind: str, content) -> str:
                 "",
             ]
     elif kind == "verbatim":
+        if data.get("schema_version") == "2.0":
+            from app.schemas.verbatim_v2 import verbatim_v2_to_markdown
+
+            return verbatim_v2_to_markdown(data)
         lines += [f"**建议语速：** {data['speaking_rate']}", ""]
         for item in data["sections"]:
             lines += [f"## {item['id']} · {item['time_range']} · {','.join(item['slide_ids'])}", item["required_text"], f"> 可选补充：{item['optional_text']}", f"**互动：** {item['interaction']}", ""]

@@ -142,6 +142,32 @@ def test_narrow_column_but_tall_flags_column_balance():
     assert any(i["rule_id"] == "layout.column_balance" for i in issues)
 
 
+def test_narrow_text_column_with_right_visual_is_not_false_blank_space():
+    """A left-copy/right-image cover must not be treated as an empty right half."""
+    report = [
+        _el(
+            "S1", x=2.95, y=2.0, w=4.4, h=1.0,
+            text="第一条正文内容要点说明。", content_ref="body.0",
+        ),
+        _el(
+            "S1", x=2.95, y=3.2, w=4.4, h=1.0,
+            text="第二条正文内容要点说明。", content_ref="body.1",
+        ),
+        _el(
+            "S1", x=2.95, y=4.4, w=4.4, h=0.7,
+            text="第三条正文内容要点说明。", content_ref="purpose",
+        ),
+        {
+            **_el("S1", kind="image", x=7.8, y=1.7, w=4.7, h=3.5, text=""),
+            "role": "visual",
+        },
+    ]
+
+    issues = run_geometry_qa(report)
+
+    assert not any(i["rule_id"] == "layout.column_balance" for i in issues)
+
+
 def test_sparse_two_textboxes_still_checked():
     # 标题 + 单条正文（2 个元素）也查空间分布
     report = [_el("S1", x=0.65, y=0.55, w=8, h=0.8, text="标题", size=28),

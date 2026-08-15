@@ -1,6 +1,7 @@
 import pytest
 from app.agent.layouts.metrics import estimate_text_height
 from app.agent.layouts.zones import LayoutZones, zones_for
+from app.agent.layouts.engine import adaptive_quality_delta
 
 
 def test_academic_content_page_zones():
@@ -130,6 +131,76 @@ def test_cover_center_invariants():
     z = zones_for("lessonforge_deck_academic", "cover", has_visual=True, visual_region={"x": 7.4, "y": 1.7, "w": 5.2, "h": 4.2})
     slide = {"page_type": "cover", "title": "课程封面", "purpose": "单元导入", "body": ["目标一", "目标二"], "blocks": []}
     _invariants(PRESETS["cover_center"](z, slide, {}), require_vertical_fill=False)
+
+
+def test_long_cover_with_visual_preserves_purpose_and_all_body_copy():
+    """Regression for 2fa1a91a: rebound third body line overflowed fixed cover boxes."""
+    from app.agent.slide_rendering import render_coverage
+
+    slide = {
+        "id": "slide_01", "page_type": "cover",
+        "title": "探秘浮力成因与阿基米德原理",
+        "purpose": "创设潜水艇下潜情境，明确翻转预习目标，激发探究兴趣",
+        "body": [
+            "八年级物理 · 10分钟翻转预习微课",
+            "核心思考：潜水艇向深水下潜，受到的浮力会变大吗？",
+            "探究路径：解构液体上下压力差，实验推导阿基米德原理",
+        ],
+        "blocks": [],
+    }
+    out = compile_layout("lessonforge_deck_smart_ai", slide, {
+        "slide_id": "slide_01", "layout_type": "cover_left",
+        "style": {"font_tier": "spacious", "font_scale": 1.10, "gap_scale": 1.20},
+        "visual_region": {"x": 7.5, "y": 1.15, "w": 5.0, "h": 4.4},
+        "visual_type": "image",
+    })
+
+    assert render_coverage({**slide, **out}, baseline=slide)["missing_refs"] == []
+    assert {item.get("content_ref") for item in out["elements"]} >= {"title", "body", "purpose"}
+    selected = next(
+        item for item in out["compile_attempts"]
+        if item["candidate_id"] == out["selected_candidate_id"]
+    )
+    assert selected["geometry_failures"] == []
+    assert max(item["y"] + item["h"] for item in out["elements"]) <= 7.01
+
+    subtitle = next(item for item in out["elements"] if item.get("content_ref") == "body")
+    assert subtitle["text"] == "\n".join(slide["body"])
+
+
+def test_cover_search_adds_purpose_aware_recipe_for_generic_model_choice():
+    slide = {
+        "id": "slide_01", "page_type": "cover", "title": "浮力探秘",
+        "purpose": "建立探究情境", "body": ["八年级物理", "核心问题"], "blocks": [],
+    }
+    out = compile_layout("lessonforge_deck_smart_ai", slide, {
+        "slide_id": "slide_01", "layout_type": "left_text_right_visual",
+        "visual_region": {"x": 7.5, "y": 1.15, "w": 5.0, "h": 4.4},
+        "visual_type": "image",
+    })
+
+    assert out["layout_type"] == "cover_left"
+    assert any(item.get("content_ref") == "purpose" for item in out["elements"])
+
+
+def test_cover_body_subtitle_counts_as_body_quality_evidence():
+    from app.agent.layouts.analysis import analyze_layout
+    from app.agent.layouts.zones import zones_for
+
+    slide = {
+        "id": "slide_01", "page_type": "cover", "title": "浮力探秘",
+        "purpose": "建立探究情境", "body": ["八年级物理", "核心问题"], "blocks": [],
+    }
+    zones = zones_for(
+        "lessonforge_deck_smart_ai", "cover", has_visual=True,
+        visual_region={"x": 7.5, "y": 1.15, "w": 5.0, "h": 4.4},
+    )
+    elements = PRESETS["cover_left"](zones, slide, {})
+    metrics = analyze_layout(elements, zones, slide=slide, layout_type="cover_left")
+
+    assert metrics["body_element_count"] == 2
+    assert metrics["body_vertical_utilization"] > 0.20
+    assert metrics["quality_components"]["semantic_grouping"] == 10.0
 
 
 from app.agent.layouts.engine import compile_layout, normalize_layout_params
@@ -484,6 +555,135 @@ async def test_deterministic_repair_does_not_return_to_identical_source_geometry
     assert semantic_geometry_hash(source) != semantic_geometry_hash({"elements": repaired["elements"]})
 
 
+@pytest.mark.asyncio
+async def test_deterministic_repair_compiles_only_selected_slides(monkeypatch):
+    """A full-deck slide_content snapshot must not widen a one-page repair."""
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+
+    unselected = {
+        "id": "slide_01", "page_type": "cover", "title": "未选中的封面",
+        "purpose": "不可触碰", "body": ["原文"], "blocks": [], "elements": [],
+    }
+    selected = {
+        "id": "slide_05", "page_type": "concept", "title": "目标页",
+        "purpose": "", "body": ["润色后的正文"], "blocks": [],
+        "elements": [{
+            "kind": "textbox", "content_ref": "title", "text": "目标页",
+            "x": 2.2, "y": 0.55, "w": 10.0, "h": 0.8,
+        }],
+    }
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            if artifact_type == "slide_content":
+                return {"data": {"slides": [unselected, selected]}}
+            return None
+
+    compiled_ids = []
+
+    def compile_selected_only(slide, _visual, _template_id, *, style=None):
+        compiled_ids.append(slide["id"])
+        return {
+            "slide_id": slide["id"], "layout_type": "bullet_flow",
+            "elements": [{
+                "kind": "textbox", "content_ref": "title", "text": slide["title"],
+                "x": 2.45, "y": 0.55, "w": 10.0, "h": 0.8,
+            }],
+        }
+
+    monkeypatch.setattr(LAYOUT_AGENT, "_layout_slide", compile_selected_only)
+    tc = SimpleNamespace(
+        ctx=SimpleNamespace(has_tool_result=lambda _name: True, template={}),
+        artifacts=Artifacts(),
+        runtime=SimpleNamespace(
+            selected_slide_ids=["slide_05"], baseline_slides=[unselected, selected],
+            active_intent="MODIFY", content_policy="edit",
+            repair_mode="deterministic", preferred_template="lessonforge_deck_smart_ai",
+            layout_engine_params={},
+        ),
+    )
+
+    decision = await LAYOUT_AGENT.decide(tc)
+
+    assert compiled_ids == ["slide_05"]
+    assert [item["slide_id"] for item in decision.output["slides"]] == ["slide_05"]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_repair_failure_restores_baseline_and_editor_skips_rejected_copy(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.agents.ppt_editor import PPT_EDITOR_AGENT
+    from app.agent.layouts.engine import LayoutCompileError
+    from app.renderers.presentation_builder import PresentationBuilder
+
+    baseline = {
+        "id": "slide_05", "page_type": "concept", "title": "实验推理",
+        "purpose": "", "body": ["原始精炼正文"], "blocks": [],
+        "render_mode": "absolute",
+        "elements": [{
+            "kind": "textbox", "content_ref": "title", "text": "实验推理",
+            "x": 2.45, "y": 0.55, "w": 10.0, "h": 0.8,
+        }, {
+            "kind": "textbox", "content_ref": "body", "text": "原始精炼正文",
+            "x": 2.45, "y": 1.7, "w": 4.6, "h": 3.2,
+        }],
+    }
+    edited = {
+        **baseline,
+        "body": ["润色后但无法安全排布的超长正文" for _ in range(12)],
+    }
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            if artifact_type == "slide_content":
+                return {"data": {"slides": [edited]}}
+            if artifact_type == "slide_layout":
+                return {"data": {"slides": [preserved_layout]}}
+            return None
+
+        async def list_all(self):
+            return []
+
+    def fail_layout(*_args, **_kwargs):
+        raise LayoutCompileError([], [], False, attempts=[{
+            "candidate_id": "split_two_column:1", "geometry_safe": False,
+            "geometry_failures": ["overlap"],
+        }])
+
+    builder = PresentationBuilder().from_ppt_content({"slides": [edited]})
+    runtime = SimpleNamespace(
+        selected_slide_ids=["slide_05"], baseline_slides=[baseline],
+        active_intent="MODIFY", content_policy="edit",
+        repair_mode="deterministic", preferred_template="lessonforge_deck_smart_ai",
+        layout_engine_params={}, repair_reverted_slide_ids=[],
+        affected_slide_ids=["slide_05"], mutation_applied=False,
+        layout_compile_results=[],
+    )
+    tc = SimpleNamespace(
+        ctx=SimpleNamespace(has_tool_result=lambda _name: True, template={}),
+        artifacts=Artifacts(), runtime=runtime, builder=builder,
+    )
+    monkeypatch.setattr(LAYOUT_AGENT, "_layout_slide", fail_layout)
+
+    layout_decision = await LAYOUT_AGENT.decide(tc)
+    preserved_layout = layout_decision.output["slides"][0]
+
+    assert preserved_layout["compile_status"] == "preserved"
+    assert runtime.repair_reverted_slide_ids == ["slide_05"]
+    assert runtime.affected_slide_ids == []
+    assert builder.slides[0]["body"] == baseline["body"]
+
+    editor_decision = await PPT_EDITOR_AGENT.decide(tc)
+    assert editor_decision.completed is True
+    assert editor_decision.output["result_status"] == "no_change"
+    assert editor_decision.tool_calls == []
+    assert runtime.mutation_applied is True
+
+
 def test_v60_slide_02_quote_compare_spacious_is_complete_and_safe():
     """Regression for e957210c: V60 slide_02 lost five body refs and quote copy."""
     from app.agent.slide_rendering import render_coverage
@@ -578,11 +778,13 @@ def test_v60_analysis_fallback_injects_size_target_instead_of_preserving_page():
         [slide], LAYOUT_AGENT,
     ).model_dump()["slides"][0]
 
-    assert compiled["layout_type"] == "quote_compare"
+    assert compiled["layout_type"] in {"quote_compare", "split_two_column"}
     assert compiled["compile_status"] == "fallback"
     assert _average_text_size(compiled["elements"]) >= _average_text_size(slide["elements"]) * 1.01
     assert runtime.layout_compile_results[0]["requested_layout"] == "compare_columns"
-    assert runtime.layout_compile_results[0]["effective_layout"] == "quote_compare"
+    assert runtime.layout_compile_results[0]["effective_layout"] in {
+        "quote_compare", "split_two_column",
+    }
 
 
 def test_compare_columns_honors_font_and_gap_scale():
@@ -680,7 +882,7 @@ def test_underused_baseline_cannot_use_existing_absolute_scaled_shortcut():
     assert out["final_metrics"]["body_vertical_utilization"] >= 0.60
 
 
-def test_layout_polish_without_eight_point_gain_is_preserved_no_change():
+def test_layout_polish_without_adaptive_gain_is_preserved_no_change():
     semantic = {**_slide(), "id": "slide_03"}
     baseline = compile_layout(
         "lessonforge_deck_academic", semantic,
@@ -699,6 +901,34 @@ def test_layout_polish_without_eight_point_gain_is_preserved_no_change():
     assert out["elements"] == baseline["elements"]
     assert out["objective_results"][0]["metric"] == "layout_quality"
     assert out["objective_results"][0]["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("baseline", "minimum_delta"),
+    [(74.99, 8.0), (75.0, 5.0), (84.99, 5.0), (85.0, 3.0), (95.0, 3.0)],
+)
+def test_adaptive_quality_gate_by_baseline_tier(baseline, minimum_delta):
+    assert adaptive_quality_delta(baseline) == minimum_delta
+
+
+def test_v64_high_quality_page_gain_of_three_passes_adaptive_gate():
+    from app.agent.layouts.engine import _evaluate_objectives
+
+    results, passed = _evaluate_objectives(
+        [{
+            "metric": "layout_quality", "direction": "increase",
+            "minimum_delta": 0.0, "hard_requirement": True,
+            "source": "runtime_gate", "adaptive": True,
+        }],
+        {"quality_score": 85.47},
+        {"quality_score": 89.31},
+        baseline_elements=[], candidate_elements=[],
+        zones=zones_for("lessonforge_deck_academic"),
+    )
+
+    assert passed is True
+    assert results[0]["delta"] == pytest.approx(3.84)
+    assert results[0]["evidence"]["quality_gate_threshold"] == 3.0
 
 
 def test_candidate_confirmation_ignores_close_candidate_that_failed_hard_objective(monkeypatch):

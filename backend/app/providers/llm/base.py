@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -30,6 +30,9 @@ class LLMProviderError(RuntimeError):
 class LLMProvider(ABC):
     name: str
 
+    #: 是否支持原生 function/tool calling（方案 §3.1）。
+    supports_native_tools: bool = False
+
     @abstractmethod
     async def structured(self, system: str, prompt: str, schema: type[T]) -> T:
         raise NotImplementedError
@@ -48,6 +51,20 @@ class LLMProvider(ABC):
         内容异常时应回退到非流式 structured() 兜底。
         """
         raise NotImplementedError
+
+    async def native_agent_decision(
+        self,
+        system: str,
+        prompt: str,
+        tools: list[dict[str, Any]],
+    ) -> "AgentDecision | None":
+        """原生 tool calling（方案 §3.1）：模型原生返回工具调用或完成决策。
+
+        返回 None 表示协议不可用/返回协议错误，调用方回退现有结构化 AgentDecision
+        协议并发 ``provider.tool_protocol_fallback`` 事件。回退不改变工具执行、QA、
+        事件与发布语义。
+        """
+        raise NotImplementedError("该 provider 不支持原生 tool calling")
 
     @abstractmethod
     async def stream_text(self, system: str, prompt: str) -> AsyncIterator[str]:

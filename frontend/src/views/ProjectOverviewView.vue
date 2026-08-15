@@ -1,26 +1,49 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { useProjectStore } from '../stores/project';
 import ProjectShell from '../components/project/ProjectShell.vue';
 import OverviewConsoleWorkbench from '../components/project/overview/OverviewConsoleWorkbench.vue';
+import ProjectMemoryPanel from '../components/project/ProjectMemoryPanel.vue';
+import ErrorState from '../components/feedback/ErrorState.vue';
+import { errorMessage } from '../api/client';
 
 const route = useRoute();
 const store = useProjectStore();
 const courseId = route.params.id as string;
+const showMemory = ref(false);
+const projectError = ref('');
 
 const approvedCount = computed(() => store.tasks.filter(task => task.status === 'approved').length);
 const activeCount = computed(() => store.tasks.filter(task => ['queued', 'running'].includes(task.status)).length);
 const attentionCount = computed(() => store.tasks.filter(task => ['failed', 'stale'].includes(task.status)).length);
 const reviewCount = computed(() => store.tasks.filter(task => task.status === 'review').length);
 
-onMounted(() => store.open(courseId));
+async function loadProject() {
+  projectError.value = '';
+  try {
+    await store.open(courseId);
+  } catch (cause) {
+    projectError.value = errorMessage(cause);
+  }
+}
+
+onMounted(loadProject);
 onUnmounted(() => store.disconnect());
 </script>
 
 <template>
   <div v-if="store.loading && !store.project" class="project-loading">
     <el-skeleton :rows="8" animated />
+  </div>
+
+  <div v-else-if="projectError" class="project-error">
+    <ErrorState
+      title="项目暂时无法打开"
+      :error="projectError"
+      detail="项目数据加载失败，请稍后重试。"
+      @retry="loadProject"
+    />
   </div>
 
   <ProjectShell v-else-if="store.project">
@@ -37,14 +60,21 @@ onUnmounted(() => store.disconnect());
         :course-id="courseId"
         @retry-planning="store.retryPlanning(courseId)"
         @initialize-agents="store.initializeAgents(courseId)"
+        @open-memory="showMemory = true"
       />
     </div>
+    <ProjectMemoryPanel :course-id="courseId" :visible="showMemory" @close="showMemory = false" />
   </ProjectShell>
 </template>
 
 <style scoped>
 .project-loading {
   padding: 32px;
+}
+
+.project-error {
+  padding: 32px;
+  max-width: 720px;
 }
 
 .overview-scroll-wrap {

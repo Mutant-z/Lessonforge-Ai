@@ -525,6 +525,24 @@ def _restore_visual_resources(slide: dict[str, Any], layout: dict[str, Any], res
     return restored
 
 
+def compose_layout_elements(
+    source_slide: dict[str, Any], layout: dict[str, Any], *, preserve_visuals: bool = True,
+) -> list[dict[str, Any]]:
+    """Materialize the exact element set that staging will validate and render.
+
+    Layout recipes own text and decorative geometry, while existing images and
+    charts are locked resources.  Candidate scoring must see both layers; using
+    the recipe-only element list can rate a page that differs from the actual
+    staged slide and can miss image/text collisions.
+    """
+    composed = deepcopy(source_slide)
+    composed["elements"] = deepcopy(list(layout.get("elements") or []))
+    if preserve_visuals:
+        resources = _preserved_visual_resources(list(source_slide.get("elements") or []))
+        _restore_visual_resources(composed, layout, resources)
+    return list(composed.get("elements") or [])
+
+
 def _apply_layout_to_builder(
     builder: PresentationBuilder, layout: dict[str, Any], *, preserve_visuals: bool,
 ) -> tuple[int, int]:
@@ -634,6 +652,11 @@ def _mark_layout_preserved(runtime: Any, slide_id: str, warning: str) -> None:
         result = {"slide_id": slide_id, "status": "preserved", "warnings": []}
         results.append(result)
     result["status"] = "preserved"
+    result["decision"] = "preserved"
+    result.setdefault("rejection_code", "unsafe_geometry")
+    result["rejection_reasons"] = list(dict.fromkeys([
+        *(result.get("rejection_reasons") or []), warning,
+    ]))
     result["warnings"] = list(dict.fromkeys([*(result.get("warnings") or []), warning]))
     runtime.layout_compile_results = results
 

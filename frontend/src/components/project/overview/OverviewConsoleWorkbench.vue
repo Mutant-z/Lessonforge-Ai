@@ -36,11 +36,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'retry-planning'): void;
   (e: 'initialize-agents'): void;
+  (e: 'open-memory'): void;
 }>();
 
 const router = useRouter();
 
-// State for hovering dependencies & blueprint toggle
+// 共享项目记忆：悬停高亮显示该 Agent 可读取的参考产物（不再展示上下游拓扑依赖）
 const hoveredTaskType = ref<string | null>(null);
 const showBlueprint = ref(true);
 
@@ -64,15 +65,13 @@ function navigateToTask(taskType: string) {
   router.push(`/courses/${props.courseId}/tasks/${taskType}`);
 }
 
-function getDependencyNames(depTypes: string[]) {
-  return depTypes
-    .map(type => props.tasks.find(x => x.task_type === type)?.display_name)
-    .filter(Boolean)
-    .join('、');
-}
-
-function getDownstreamTasks(taskType: string) {
-  return props.tasks.filter(t => t.dependency_types.includes(taskType));
+function getReferenceNames(taskType: string) {
+  const task = props.tasks.find(x => x.task_type === taskType);
+  const available = Object.keys(task?.available_sources || {});
+  if (available.length) {
+    return available.map(type => props.tasks.find(x => x.task_type === type)?.display_name || type).join('、');
+  }
+  return '';
 }
 
 const currentHoveredTask = computed(() => {
@@ -80,17 +79,7 @@ const currentHoveredTask = computed(() => {
   return props.tasks.find(t => t.task_type === hoveredTaskType.value) || null;
 });
 
-function getRelationRole(task: CourseTask): 'self' | 'upstream' | 'downstream' | 'none' {
-  if (!hoveredTaskType.value || !currentHoveredTask.value) return 'none';
-  if (task.task_type === hoveredTaskType.value) return 'self';
-  if (currentHoveredTask.value.dependency_types.includes(task.task_type)) return 'upstream';
-  if (task.dependency_types.includes(hoveredTaskType.value)) return 'downstream';
-  return 'none';
-}
-
-function isHighlighted(task: CourseTask) {
-  return getRelationRole(task) !== 'none';
-}
+const memoryRevision = computed(() => props.project?.memory?.revision || 0);
 
 // Blueprint formatting helpers
 const formattedObjectives = computed(() => {
@@ -158,14 +147,22 @@ const qualityCheckTags = computed(() => {
             ID / {{ project.course.id.slice(0, 8).toUpperCase() }}
           </span>
           <span class="chip blueprint-chip">V{{ project.course.current_blueprint_version || 1 }} 蓝图</span>
+          <span class="chip memory-chip">
+            <el-icon><Memo /></el-icon>
+            项目记忆 V{{ memoryRevision }}
+          </span>
           <span class="chip active-tag">
             <span class="pulse-dot" />
-            6 Agent 矩阵协同
+            6 Agent 并行协同
           </span>
+          <button type="button" class="memory-open-btn" @click="emit('open-memory')">
+            <el-icon><CollectionTag /></el-icon>
+            项目记忆
+          </button>
         </div>
         <h1 class="console-title">{{ project.intent.headline || project.course.title }}</h1>
         <p class="console-subtext">
-          <span class="subtext-dot" /> 多 Agent 课程交付控制台：专属 Agent 矩阵按拓扑依赖协同推理，点击工位卡片可直接调试对话
+          <span class="subtext-dot" /> 多 Agent 课程交付控制台：六类 Agent 共享项目记忆、并行推进，点击工位卡片可直接进入对话工作台
         </p>
       </div>
 
@@ -355,25 +352,25 @@ const qualityCheckTags = computed(() => {
           </div>
           <div>
             <div class="title-row">
-              <h3>多 Agent 生产交付流水线矩阵</h3>
+              <h3>多 Agent 生产交付矩阵</h3>
               <span class="count-chip">6 大专属 Agent 工位</span>
             </div>
             <p class="subtitle">
-              按拓扑依赖串联 · 悬停任意 Agent 可高亮其 <strong>[上游来源]</strong> 与 <strong>[下游波及]</strong> 节点
+              共享项目记忆 · 各 Agent 并行生成，工作中按需读取其他 Agent 的产物；悬停任意 Agent 可查看其可读取的参考内容
             </p>
           </div>
         </div>
 
-        <!-- Hover Relation Flow Banner -->
+        <!-- Hover Memory Reference Banner -->
         <div v-if="currentHoveredTask" class="hover-flow-banner">
           <span class="hover-task-name">{{ currentHoveredTask.display_name }}</span>
           <span class="relation-tip">
-            <span v-if="currentHoveredTask.dependency_types.length > 0" class="rel-tag up">
-              依赖 {{ currentHoveredTask.dependency_types.length }} 项上游
+            <span v-if="getReferenceNames(currentHoveredTask.task_type)" class="rel-tag up">
+              可读取 {{ getReferenceNames(currentHoveredTask.task_type) }}
             </span>
-            <span v-else class="rel-tag root">独立根节点</span>
-            <span v-if="getDownstreamTasks(currentHoveredTask.task_type).length > 0" class="rel-tag down">
-              波及 {{ getDownstreamTasks(currentHoveredTask.task_type).length }} 项下游
+            <span v-else class="rel-tag root">独立生成 · 仅依赖蓝图</span>
+            <span v-if="currentHoveredTask.last_context_revision" class="rel-tag ref">
+              记忆 V{{ currentHoveredTask.last_context_revision }}
             </span>
           </span>
         </div>
@@ -387,8 +384,7 @@ const qualityCheckTags = computed(() => {
           class="agent-card"
           :class="[
             task.status,
-            getRelationRole(task),
-            { dimmed: hoveredTaskType && !isHighlighted(task) }
+            { highlighted: hoveredTaskType === task.task_type }
           ]"
           @mouseenter="hoveredTaskType = task.task_type"
           @mouseleave="hoveredTaskType = null"
@@ -398,12 +394,6 @@ const qualityCheckTags = computed(() => {
           <div class="card-top">
             <div class="index-row">
               <span class="folio-index">{{ String(task.display_order).padStart(2, '0') }}</span>
-              <span v-if="getRelationRole(task) === 'upstream'" class="relation-badge upstream">
-                上游依赖
-              </span>
-              <span v-else-if="getRelationRole(task) === 'downstream'" class="relation-badge downstream">
-                下游波及
-              </span>
             </div>
 
             <span class="status-pill" :class="task.status">
@@ -416,10 +406,10 @@ const qualityCheckTags = computed(() => {
                 {{ 
                   task.status === 'review' ? '待教师确认' : 
                   task.status === 'approved' ? '已确认交付' : 
-                  task.status === 'stale' ? '上游有更新' : 
+                  task.status === 'stale' ? '项目记忆已更新' : 
                   task.status === 'failed' ? '生成失败' : 
                   task.status === 'running' ? `推演中 ${task.progress}%` : 
-                  task.status === 'queued' ? '排队中' : '等待上游' 
+                  task.status === 'queued' ? '排队中' : '待生成' 
                 }}
               </span>
             </span>
@@ -447,15 +437,15 @@ const qualityCheckTags = computed(() => {
             <div class="progress-bar-fill" :style="{ width: `${task.progress || 0}%` }" />
           </div>
 
-          <!-- Dependencies -->
+          <!-- Shared Project Memory Reference -->
           <div class="card-dependencies">
-            <span class="dep-chip" :class="{ active: getRelationRole(task) === 'upstream' }">
+            <span class="dep-chip" :class="{ active: hoveredTaskType === task.task_type }">
               <span class="dot" />
-              <template v-if="task.dependency_types.length > 0">
-                依赖: {{ getDependencyNames(task.dependency_types) }}
+              <template v-if="Object.keys(task.available_sources || {}).length">
+                可读取: {{ getReferenceNames(task.task_type) }}
               </template>
               <template v-else>
-                根节点 · 规划即启动
+                独立生成 · 读取项目记忆 V{{ task.last_context_revision || memoryRevision }}
               </template>
             </span>
           </div>
@@ -465,8 +455,8 @@ const qualityCheckTags = computed(() => {
             <span class="cta-label">
               {{ 
                 task.status === 'review' ? '进入确认' : 
-                task.status === 'stale' ? '同步上游变更' : 
-                task.status === 'failed' ? '重新生成' : '进入对话调试' 
+                task.status === 'stale' ? '读取最新项目记忆' : 
+                task.status === 'failed' ? '重新生成' : '进入对话工作台' 
               }}
             </span>
             <div class="cta-icon">
@@ -615,6 +605,32 @@ const qualityCheckTags = computed(() => {
   background: #eef2ff;
   color: #4338ca;
   border: 1px solid #c7d2fe;
+}
+
+.memory-open-btn {
+  border: 1px solid #ddd6fe;
+  background: #ffffff;
+  color: #7c3aed;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 12px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all 150ms ease;
+}
+
+.memory-open-btn:hover {
+  background: #f5f3ff;
+  border-color: #c4b5fd;
+}
+
+.memory-chip {
+  background: #f5f3ff;
+  color: #7c3aed;
+  border: 1px solid #ddd6fe;
 }
 
 .active-tag {
@@ -1154,7 +1170,7 @@ const qualityCheckTags = computed(() => {
 .relation-tip { display: flex; gap: 6px; }
 .rel-tag { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
 .rel-tag.up { background: #e0e7ff; color: #4338ca; }
-.rel-tag.down { background: #fae8ff; color: #86198f; }
+.rel-tag.ref { background: #f5f3ff; color: #7c3aed; }
 .rel-tag.root { background: #f1f5f9; color: #475569; }
 
 /* 2D Pipeline Grid */
@@ -1199,21 +1215,10 @@ const qualityCheckTags = computed(() => {
   background: #ffffff;
 }
 
-.agent-card.upstream {
+.agent-card.highlighted {
   border-color: #818cf8;
   background: #eef2ff;
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
-}
-
-.agent-card.downstream {
-  border-color: #e879f9;
-  background: #fdf4ff;
-  box-shadow: 0 0 0 2px rgba(232, 121, 249, 0.2);
-}
-
-.agent-card.dimmed {
-  opacity: 0.45;
-  filter: grayscale(0.25);
 }
 
 .card-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

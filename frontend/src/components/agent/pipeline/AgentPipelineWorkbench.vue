@@ -31,11 +31,12 @@ const task = computed(() => projectStore.currentTask);
 const pipelineMatchesActiveRun = computed(() => {
   const activeRunId = task.value?.active_run_id;
   const detailRunId = pipelineStore.run?.generation_run_id;
-  return !activeRunId || activeRunId === detailRunId;
+  if (activeRunId) return activeRunId === detailRunId;
+  return true;
 });
 const status = computed(() => {
-  if (!pipelineMatchesActiveRun.value) return projectStore.pipelineStatus || task.value?.status || 'queued';
-  return pipelineStore.status || projectStore.pipelineStatus || task.value?.status || '';
+  if (task.value?.active_run_id && !pipelineMatchesActiveRun.value) return task.value?.status || 'queued';
+  return pipelineStore.status || task.value?.status || '';
 });
 const paused = computed(() => status.value === 'paused');
 const pausing = computed(() => status.value === 'pausing');
@@ -97,7 +98,11 @@ const polishSummary = computed(() => {
     applied: applied ? `已安全润色 ${applied} 页` : '页面润色已完成',
     partial: `已润色 ${applied} 页，${preserved} 页保留原状`,
     no_change: '未发现可验证的安全改善，原版本保持不变',
-    needs_confirmation: '修改目标需要确认，本轮未创建新版本',
+    needs_confirmation: pages.some(page => page.requires_candidate_confirmation)
+      ? '安全候选等待选择，确认前未创建新版本'
+      : '修改目标需要确认，本轮未创建新版本',
+    rejected: '本轮修改未通过安全门禁，原版本保持不变',
+    answer_only: '仅回答问题，未修改设计',
   };
   return {
     status: result.result_status,
@@ -109,9 +114,25 @@ const polishSummary = computed(() => {
 });
 
 function metricNumber(page: PPTPolishPageResult, key: string, side: 'baseline' | 'final'): number | null {
-  const metrics = side === 'baseline' ? page.baseline_metrics : page.final_metrics;
+  const metrics = side === 'baseline'
+    ? page.baseline_metrics
+    : page.decision === 'preserved' && page.best_candidate_metrics
+      ? page.best_candidate_metrics
+      : page.final_metrics;
   const value = metrics?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function polishPageLabel(page: PPTPolishPageResult): string {
+  return page.display_label || (page.page_number ? `第 ${page.page_number} 页` : page.slide_id);
+}
+
+function polishPageDelta(page: PPTPolishPageResult): number {
+  return Number(
+    page.decision === 'preserved'
+      ? page.best_candidate_quality_delta ?? page.quality_delta ?? 0
+      : page.quality_delta ?? 0,
+  );
 }
 
 function formatMetric(value: number | null, percent = false): string {
@@ -430,7 +451,10 @@ onMounted(async () => {
   startPolling();
 });
 
-onUnmounted(stopPolling);
+onUnmounted(() => {
+  stopPolling();
+  pipelineStore.reset();
+});
 
 watch(() => status.value, newStatus => {
   if (['queued', 'running', 'pausing', 'paused'].includes(newStatus)) startPolling();
@@ -516,15 +540,18 @@ watch(
         </div>
         <div v-if="polishSummary.pages.length" class="polish-page-metrics">
           <div v-for="page in polishSummary.pages.slice(0, 3)" :key="page.slide_id" class="polish-page-row">
-            <span class="polish-page-id">{{ page.slide_id }}</span>
+            <span class="polish-page-id">{{ polishPageLabel(page) }}</span>
             <span v-if="metricNumber(page, 'quality_score', 'baseline') != null || metricNumber(page, 'quality_score', 'final') != null">
               质量 {{ formatMetric(metricNumber(page, 'quality_score', 'baseline')) }} → {{ formatMetric(metricNumber(page, 'quality_score', 'final')) }}
             </span>
             <span v-if="metricNumber(page, 'vertical_utilization', 'baseline') != null || metricNumber(page, 'vertical_utilization', 'final') != null">
               纵向利用 {{ formatMetric(metricNumber(page, 'vertical_utilization', 'baseline'), true) }} → {{ formatMetric(metricNumber(page, 'vertical_utilization', 'final'), true) }}
             </span>
-            <span v-if="page.quality_delta != null" :class="page.quality_delta > 0 ? 'metric-positive' : 'metric-neutral'">
-              {{ page.quality_delta > 0 ? '+' : '' }}{{ page.quality_delta.toFixed(1) }}
+            <span :class="polishPageDelta(page) > 0 ? 'metric-positive' : 'metric-neutral'">
+              {{ polishPageDelta(page) > 0 ? '+' : '' }}{{ polishPageDelta(page).toFixed(1) }}
+            </span>
+            <span v-if="page.decision === 'preserved' && page.rejection_reasons?.length" class="metric-neutral">
+              {{ page.rejection_reasons[0] }}
             </span>
           </div>
           <div v-if="polishSummary.pages.length > 3" class="polish-page-more">
@@ -553,6 +580,10 @@ watch(
         :model-config-id="task?.model_config_id"
         :image-model-config-id="task?.image_model_config_id"
         :image-model-available-count="imageModelCandidates.length"
+        :show-image-model="true"
+        :show-modality="true"
+        task-type="ppt"
+        unit-name="页"
         @send="send"
         @pause="pause"
         @clear-target-slide="clearTargetSlides"

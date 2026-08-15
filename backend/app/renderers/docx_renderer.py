@@ -414,7 +414,177 @@ def _write_cell(cell, text: str, *, bold: bool = False, color: str = "18191D", a
     run.font.color.rgb = RGBColor.from_string(color)
 
 
+def _render_record_table_docx(doc: Document, record: dict) -> None:
+    _add_heading(doc, record["title"], 3)
+    doc.add_paragraph(record["instructions"])
+    columns = record["columns"]
+    table = doc.add_table(rows=1 + record["blank_rows"], cols=len(columns))
+    table.style = "Table Grid"
+    for index, column in enumerate(columns):
+        _shade_cell(table.cell(0, index), "E8EEF5")
+        _write_cell(table.cell(0, index), column, bold=True, color="1F4D78", align=WD_ALIGN_PARAGRAPH.CENTER)
+    _set_repeat_table_header(table.rows[0])
+    for row in table.rows[1:]:
+        row.height = Inches(0.42)
+        row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+    base = 9360 // len(columns)
+    widths = [base] * len(columns)
+    widths[-1] += 9360 - sum(widths)
+    _set_table_geometry(table, widths)
+
+
+def render_task_sheet_v3_docx(title: str, content: dict, output: Path, version: str = "V3") -> Path:
+    """V3 动态目录任务单 DOCX：按目录树层级递归输出 Heading 1–3 与强类型 Block。"""
+    doc = Document()
+    _configure_task_sheet(doc, title, version)
+    info = content["course_info"]
+
+    title_p = doc.add_paragraph()
+    title_p.paragraph_format.space_after = Pt(4)
+    title_run = title_p.add_run(info["course_title"])
+    title_run.bold = True
+    title_run.font.name = TASK_SHEET_CJK_FONT
+    title_run._element.get_or_add_rPr().rFonts.set(qn("w:eastAsia"), TASK_SHEET_CJK_FONT)
+    title_run.font.size = Pt(24)
+    title_run.font.color.rgb = RGBColor.from_string("0B2545")
+    subtitle = doc.add_paragraph("学习任务单 · 学生版 · 动态版")
+    subtitle.paragraph_format.space_after = Pt(14)
+    for run in subtitle.runs:
+        run.font.size = Pt(11)
+        run.font.color.rgb = RGBColor.from_string("656A73")
+
+    metadata = doc.add_table(rows=2, cols=4)
+    metadata.style = "Table Grid"
+    metadata_values = [
+        ("学科", info.get("subject") or "—"), ("年级", info.get("grade_level") or info.get("audience") or "—"),
+        ("建议时长", f"{info['duration_minutes']} 分钟"), ("学习对象", info.get("audience") or "—"),
+    ]
+    for row_index in range(2):
+        for pair_index in range(2):
+            label, value = metadata_values[row_index * 2 + pair_index]
+            label_cell = metadata.cell(row_index, pair_index * 2)
+            value_cell = metadata.cell(row_index, pair_index * 2 + 1)
+            _shade_cell(label_cell, "E8EEF5")
+            _write_cell(label_cell, label, bold=True, color="1F4D78")
+            _write_cell(value_cell, str(value))
+    _set_table_geometry(metadata, [1500, 3180, 1500, 3180])
+
+    catalog = {item["id"]: item for item in content.get("objective_catalog", [])}
+
+    def _objective_texts(objective_ids: list[str]) -> list[str]:
+        return [
+            f"{objective_id} · {catalog[objective_id]['statement']}（达成标准：{catalog[objective_id]['success_criterion']}）"
+            for objective_id in objective_ids
+            if objective_id in catalog
+        ]
+
+    def render_block(block: dict) -> None:
+        kind = block.get("kind")
+        if kind == "text":
+            doc.add_paragraph(block.get("text", ""))
+        elif kind == "objective_list":
+            _add_heading(doc, block.get("title") or "学习目标", 2)
+            for text in _objective_texts(block.get("objective_ids", [])):
+                paragraph = doc.add_paragraph(style="List Bullet")
+                paragraph.add_run(text)
+        elif kind == "learning_task":
+            collaboration_labels = {"individual": "独立", "pair": "结对", "group": "小组", "whole_class": "全班"}
+            _add_heading(doc, f"{block['id']} · {block['title']}", 2)
+            meta = doc.add_table(rows=2, cols=4)
+            meta.style = "Table Grid"
+            values = [
+                ("预计用时", f"{block.get('estimated_minutes')} 分钟"),
+                ("协作方式", collaboration_labels.get(block.get("collaboration_mode", ""), block.get("collaboration_mode", "独立"))),
+                ("对应目标", "、".join(block.get("objective_ids", []))),
+                ("教学环节", block.get("stage_id") or "—"),
+            ]
+            for row_index in range(2):
+                for pair_index in range(2):
+                    label, value = values[row_index * 2 + pair_index]
+                    label_cell = meta.cell(row_index, pair_index * 2)
+                    _shade_cell(label_cell, "F2F4F7")
+                    _write_cell(label_cell, label, bold=True, color="1F4D78")
+                    _write_cell(meta.cell(row_index, pair_index * 2 + 1), str(value))
+            _set_table_geometry(meta, [1400, 3280, 1400, 3280])
+            doc.add_paragraph(f"学习动作：{block.get('action')}；操作对象：{block.get('object')}")
+            _add_heading(doc, "操作步骤", 3)
+            for step in block.get("steps", []):
+                doc.add_paragraph(step, style="List Number")
+            output_p = doc.add_paragraph()
+            output_p.add_run("成果要求：").bold = True
+            output_p.add_run(block.get("student_output", ""))
+            criterion_p = doc.add_paragraph()
+            criterion_p.add_run("完成标准：").bold = True
+            criterion_p.add_run(block.get("completion_criterion", ""))
+            for scaffold in block.get("scaffolds", []):
+                doc.add_paragraph(scaffold, style="List Bullet")
+            if block.get("record_table"):
+                _render_record_table_docx(doc, block["record_table"])
+        elif kind == "record_table":
+            _render_record_table_docx(doc, block)
+        elif kind == "question_set":
+            _add_heading(doc, block.get("title") or "课堂问题", 2)
+            for question in block.get("questions", []):
+                paragraph = doc.add_paragraph()
+                paragraph.add_run(f"{question['id']} · ").bold = True
+                paragraph.add_run(question["prompt"])
+                response = doc.add_table(rows=2, cols=1)
+                response.style = "Table Grid"
+                for row in response.rows:
+                    row.height = Inches(0.35)
+                    row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+                _set_table_geometry(response, [9360])
+        elif kind == "assessment":
+            scale = block.get("scale", ["尚未做到", "基本做到", "能够做到"])
+            items = block.get("items", [])
+            assessment = doc.add_table(rows=1 + len(items), cols=1 + len(scale))
+            assessment.style = "Table Grid"
+            headers = ["自评项目", *scale]
+            for index, header in enumerate(headers):
+                _shade_cell(assessment.cell(0, index), "E8EEF5")
+                _write_cell(assessment.cell(0, index), header, bold=True, color="1F4D78", align=WD_ALIGN_PARAGRAPH.CENTER)
+            for row_index, item in enumerate(items, 1):
+                _write_cell(assessment.cell(row_index, 0), item["statement"])
+                for column_index in range(1, len(headers)):
+                    _write_cell(assessment.cell(row_index, column_index), "", align=WD_ALIGN_PARAGRAPH.CENTER)
+                assessment.rows[row_index].height = Inches(0.3)
+                assessment.rows[row_index].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
+            label_width = 4800
+            scale_width = (9360 - label_width) // len(scale)
+            widths = [label_width, *([scale_width] * len(scale))]
+            widths[-1] += 9360 - sum(widths)
+            _set_repeat_table_header(assessment.rows[0])
+            _set_table_geometry(assessment, widths)
+        elif kind == "checklist":
+            _add_heading(doc, block.get("title") or "检查表", 2)
+            for item in block.get("items", []):
+                doc.add_paragraph(f"□ {item['text']}", style="List Bullet")
+
+    # 深度优先遍历（parent_id/order 表达目录树）
+    sections = content.get("sections", [])
+    depth_map: dict[str, int] = {}
+    for section in sections:
+        depth_map[section["id"]] = 1 if not section.get("parent_id") else depth_map.get(section.get("parent_id"), 1) + 1
+    for section in sorted(sections, key=lambda s: (s.get("parent_id") or "", int(s.get("order", 0)))):
+        level = min(depth_map.get(section["id"], 1) + 1, 3)
+        _add_heading(doc, section["title"], level)
+        if section.get("purpose"):
+            purpose_p = doc.add_paragraph()
+            purpose_run = purpose_p.add_run(section["purpose"])
+            purpose_run.italic = True
+            purpose_run.font.color.rgb = RGBColor.from_string("656A73")
+        for block in section.get("blocks", []):
+            render_block(block)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(output)
+    Document(output)
+    return output
+
+
 def render_task_sheet_docx(title: str, content: dict, output: Path, version: str = "V1") -> Path:
+    if content.get("schema_version") == "3.0":
+        return render_task_sheet_v3_docx(title, content, output, "V3")
     doc = Document()
     _configure_task_sheet(doc, title, version)
     info = content["course_info"]

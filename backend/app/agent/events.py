@@ -39,13 +39,22 @@ class PipelineEventEmitter:
         self._dialogue_mirror_status: bool = True   # False：status_delta 不镜像（message 触发正文走最终回复）
 
     @staticmethod
-    async def for_run(generation_run: GenerationRun, pipeline_run: PipelineRun | None = None) -> "PipelineEventEmitter":
+    async def for_run(
+        generation_run: GenerationRun,
+        pipeline_run: PipelineRun | None = None,
+        task_type: str | None = None,
+    ) -> "PipelineEventEmitter":
+        """构造事件发射器。
+
+        ``task_type`` 默认 "ppt" 保持 PPT 行为不变；教学设计等新任务传入自己的
+        task_type（如 "lesson_plan"），事件协议本身与任务类型无关。
+        """
         return PipelineEventEmitter(
             pipeline_run_id=pipeline_run.id if pipeline_run else "",
             generation_run_id=generation_run.id,
             course_id=generation_run.course_id,
             task_id=getattr(generation_run, "course_task_id", None),
-            task_type="ppt",
+            task_type=task_type or "ppt",
         )
 
     def _base(self, **data: Any) -> dict[str, Any]:

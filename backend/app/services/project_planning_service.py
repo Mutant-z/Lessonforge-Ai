@@ -75,6 +75,14 @@ async def execute_blueprint_run(run_id: str):
             db.add(blueprint)
             await db.flush()
             await ensure_course_tasks(db, course.id)
+            # 共享项目记忆：自动批准蓝图进入项目记忆（同一事务，先写后 bump）。
+            from app.services.project_knowledge_service import bump, index_blueprint
+
+            await index_blueprint(db, blueprint, created_by="agent")
+            await bump(
+                db, course.id, f"蓝图 V{version} 已自动确认",
+                source_type="blueprint", source_id=blueprint.id, created_by="agent",
+            )
             course.status = "resource_generating"
             course.current_blueprint_version = version
             run.status = "completed"

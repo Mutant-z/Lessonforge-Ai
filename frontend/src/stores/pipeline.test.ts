@@ -118,4 +118,31 @@ describe('pipeline store draft restoration', () => {
 
     expect(pipeline.draftArtifact).toBeNull();
   });
+
+  it('filters live timeline events belonging to a different task or run', () => {
+    const pipeline = usePipelineStore();
+    const project = useProjectStore();
+    project.currentTask = { id: 'task-sheet-1', course_id: 'course-1', task_type: 'task_sheet', active_run_id: 'run-ts-1' } as any;
+    pipeline.detail = {
+      run: {
+        id: 'pipeline-ts-1', generation_run_id: 'run-ts-1', status: 'running', pipeline_type: 'task_sheet_agent_pipeline',
+        current_agent: '', current_step_index: 0, revision_round: 0, max_revision_rounds: 3,
+        plan: {}, checkpoint: {}, token_usage: {}, error: null, created_at: '2026-08-08T00:00:00Z',
+      },
+      plan: [], artifacts: [], tool_calls: [],
+      events: [{
+        id: 10, sequence: 10, event_type: 'tool_call_completed', created_at: '2026-08-08T00:00:01Z',
+        data: { run_id: 'run-ts-1', tool_name: 'task_sheet_initialize_draft' },
+      }],
+    };
+
+    project.pipelineEvents = [
+      { event_id: 1, type: 'tool_call_completed', data: { run_id: 'run-lesson-plan-old', tool_name: 'lesson_validate_alignment' } },
+      { event_id: 2, type: 'tool_call_completed', data: { run_id: 'run-ts-1', tool_name: 'task_sheet_add_section' } },
+    ];
+
+    const timeline = pipeline.timeline;
+    expect(timeline).toHaveLength(2);
+    expect(timeline.map(item => item.data.tool_name)).toEqual(['task_sheet_add_section', 'task_sheet_initialize_draft']);
+  });
 });

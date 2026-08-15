@@ -140,6 +140,27 @@ def run_geometry_qa(
             span_w = max(text_right) - min(text_x)
             content_h = SAFE_CONTENT_BOTTOM - MARGIN_Y
             full_body_w = SLIDE_WIDTH - 1.3
+            # A narrow text column is intentional in a left-copy/right-visual
+            # composition.  The former rule looked only at text geometry and
+            # therefore rejected a complete cover as "right side blank" even
+            # when a real image (or its visual panel) occupied that side.  A
+            # visual counts as complementary only when it is materially to the
+            # right of the body column and overlaps its vertical reading band;
+            # decorative background shapes do not receive this exemption.
+            complementary_visuals = [
+                item for item in items
+                if (
+                    item["kind"] in {"image", "chart"}
+                    or (
+                        item["kind"] == "shape"
+                        and str(item.get("role") or "") == "visual_panel"
+                    )
+                )
+                and float(item["x"]) >= max(text_right) + 0.12
+                and min(float(item["y"]) + float(item["h"]), max(text_bottom))
+                    - max(float(item["y"]), min(text_y)) > 0.25
+            ]
+            has_complementary_visual = bool(complementary_visuals)
             # Vertical and horizontal utilisation are independent axes.  The
             # former AND condition let a three-column row packed into the top
             # third pass merely because it was wide (the V60 regression).
@@ -156,7 +177,11 @@ def run_geometry_qa(
                     "target_agent": "layout",
                 })
             # 窄条竖排但占满高度、横向细条 → 右侧大片空白
-            if span_h >= content_h * MIN_BODY_VERTICAL_USAGE and span_w < full_body_w * 0.45:
+            if (
+                span_h >= content_h * MIN_BODY_VERTICAL_USAGE
+                and span_w < full_body_w * 0.45
+                and not has_complementary_visual
+            ):
                 issues.append({
                     "severity": "major", "slide_id": slide_id, "rule_id": "layout.column_balance",
                     "message": f"文字横向只占 {span_w:.1f}in，右侧大片空白",
@@ -404,7 +429,23 @@ def _preserve_rejected_layout_pages(
     for item in getattr(tc.runtime, "layout_compile_results", None) or []:
         slide_id = str(item.get("slide_id") or "")
         if slide_id in rejected:
+            reason_text = rejected[slide_id]
             item["status"] = "preserved"
+            item["decision"] = "preserved"
+            item["material_change"] = False
+            item["rejection_code"] = (
+                "render_unavailable"
+                if (
+                    "不可用" in reason_text or "渲染" in reason_text
+                    or "证据" in reason_text or "render." in reason_text
+                )
+                else "vision_not_better"
+                if "视觉审稿" in reason_text
+                else "unsafe_geometry"
+            )
+            item["rejection_reasons"] = list(dict.fromkeys([
+                *(item.get("rejection_reasons") or []), rejected[slide_id],
+            ]))
             item["warnings"] = list(dict.fromkeys([
                 *(item.get("warnings") or []), rejected[slide_id],
             ]))
@@ -662,7 +703,15 @@ async def _run_qa(tc: ToolContext, _: RunQaInput) -> ToolResult:
         for issue in issues:
             slide_id = str(issue.get("slide_id") or "")
             if slide_id in qa_scope and issue.get("severity") in {"critical", "major"}:
-                rejected.setdefault(slide_id, f"候选未通过 {issue.get('rule_id')}，已保留原布局")
+                rule_id = str(issue.get("rule_id") or "")
+                rejected.setdefault(
+                    slide_id,
+                    (
+                        "候选缺少真实渲染证据，已保留原布局"
+                        if rule_id == "render.evidence_missing"
+                        else f"候选未通过 {rule_id}，已保留原布局"
+                    ),
+                )
 
         pairwise_required = _requires_pairwise_vision(tc.runtime)
         spatial_quality_required = bool(

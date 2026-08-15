@@ -127,13 +127,24 @@ class PptEditorAgent(Agent):
         visual_regions = _visual_regions((visual_plan or {}).get("data", {}))
         target_ids = set(tc.runtime.selected_slide_ids or [])
         target_slides = [slide for slide in slides if not target_ids or slide.get("id") in target_ids]
+        # Deterministic QA repair may restore a page to the immutable baseline
+        # when no safe layout can fit the edited copy.  Do not immediately
+        # write the rejected slide_content snapshot over that restored page.
+        repair_reverted_ids = set(
+            getattr(tc.runtime, "repair_reverted_slide_ids", []) or []
+        )
+        if repair_reverted_ids:
+            target_slides = [
+                slide for slide in target_slides
+                if str(slide.get("id") or "") not in repair_reverted_ids
+            ]
         target_layouts = [
             layout for layout in layouts
             if (not target_ids or layout.get("slide_id") in target_ids)
             and layout.get("compile_status") != "preserved"
         ]
         preserve_content = getattr(tc.runtime, "content_policy", "edit") in {"preserve", "restore"}
-        calls = [] if strict_image or preserve_content else [
+        calls = [] if strict_image or preserve_content or not target_slides else [
             ToolCall(tool_name="write_slide_batch", input={"slides": target_slides})
         ]
         # IMAGE_UPDATE 也必须先应用经过内容覆盖校验的完整布局，再写入视觉槽位。

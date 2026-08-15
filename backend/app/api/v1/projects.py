@@ -52,14 +52,21 @@ router = APIRouter(tags=["课程项目任务"])
 
 class TaskRunRequest(BaseModel):
     action: str = "retry"
-    resolution: str = "1920x1080"
+    resolution: str = "1280x720"
     voice_style: str = "natural"
     subtitle_enabled: bool = True
     background_music_enabled: bool = False
+    visual_mode: str = "ai_visual_first"
+    quote_id: str | None = None
+    approved_max_cost_fen: int | None = None
 
 
 class TaskMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    # 教学设计 V2 指令扩展：章节作用域与显式模式（最终意图仍由 Agent 识别）。
+    selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
+    active_section_id: str | None = None
+    mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
 
 
 class TaskModelRequest(BaseModel):
@@ -103,6 +110,58 @@ async def _owned_task(course_id: str, task_type: str, user: User, db: AsyncSessi
     return task
 
 
+async def _cancel_active_task(db: AsyncSession, task: CourseTask) -> dict:
+    """Persist cancellation before returning so a missing/slow worker cannot leave a ghost run."""
+    if not task.active_run_id:
+        raise HTTPException(409, "当前任务没有正在运行的 Agent")
+
+    run_id = task.active_run_id
+    if task.task_type == "video_generation":
+        from app.services.seedance_video_generation_service import cancel_seedance_provider_jobs
+        await cancel_seedance_provider_jobs(db, task)
+
+    # Provider cancellation can race with normal completion in another session.
+    # Refresh before deciding whether there is still anything to cancel.
+    await db.refresh(task)
+    if task.active_run_id != run_id:
+        return {"task_id": task.id, "status": task.status}
+
+    run = await db.get(GenerationRun, run_id)
+    if run and run.status in {"completed", "failed", "cancelled"}:
+        task.active_run_id = None
+        if run.status in {"failed", "cancelled"}:
+            task.status = run.status
+            task.error_json = run.error_json
+        await db.commit()
+        return {"task_id": task.id, "status": task.status}
+
+    now = datetime.now(timezone.utc)
+    if run:
+        run.status = "cancelled"
+        run.finished_at = now
+        db.add(GenerationEvent(
+            run_id=run.id,
+            event_type="task_status_changed",
+            data_json={
+                "course_id": task.course_id,
+                "run_id": run.id,
+                "task_id": task.id,
+                "task_type": task.task_type,
+                "status": "cancelled",
+                "progress": task.progress,
+            },
+        ))
+    task.status = "cancelled"
+    task.active_run_id = None
+    task.error_json = None
+    await db.commit()
+
+    job = task_jobs.get(run_id)
+    if job and not job.done():
+        job.cancel()
+    return {"task_id": task.id, "status": "cancelled"}
+
+
 async def _quality_summary(db, course_id: str):
     report = await db.scalar(select(QualityReport).where(
         QualityReport.course_id == course_id,
@@ -134,6 +193,12 @@ async def get_project(course_id: str, user: User = Depends(current_user), db: As
     event_cursor = await _course_event_cursor(db, course_id)
     snapshot_at = datetime.now(timezone.utc).isoformat()
     tasks = await ensure_course_tasks(db, course_id)
+    # 共享项目记忆：只读回填存量需求/蓝图/材料/Artifact（幂等），返回当前版本。
+    from app.services.project_knowledge_service import current_revision, ensure_initialized, list_items
+
+    await ensure_initialized(db, course_id)
+    memory_revision = await current_revision(db, course_id)
+    memory_items = await list_items(db, course_id, limit=200)
     requirement = await db.scalar(select(CourseRequirement).where(
         CourseRequirement.course_id == course_id,
     ).order_by(CourseRequirement.version.desc()))
@@ -158,6 +223,20 @@ async def get_project(course_id: str, user: User = Depends(current_user), db: As
         "agent_initialization": await initialization_summary(db, course_id),
         "tasks": [await task_payload(db, item) for item in tasks],
         "quality": await _quality_summary(db, course_id),
+        "memory": {
+            "revision": memory_revision,
+            "item_count": len(memory_items),
+            "items": [{
+                "id": item.id,
+                "source_type": item.source_type,
+                "source_id": item.source_id,
+                "source_version": item.source_version,
+                "artifact_type": item.artifact_type,
+                "summary": item.summary_json,
+                "memory_revision": item.memory_revision,
+                "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+            } for item in memory_items],
+        },
     }
 
 
@@ -241,57 +320,60 @@ async def run_task(course_id: str, task_type: str, payload: TaskRunRequest, user
     task = await _owned_task(course_id, task_type, user, db)
     if task_type == "video_generation":
         if payload.action == "cancel":
-            if not task.active_run_id:
-                raise HTTPException(409, "当前视频任务没有正在运行的任务")
-            from app.services.video_generation_service import cancel_video_provider_jobs
-            await cancel_video_provider_jobs(db, task)
-            job = task_jobs.get(task.active_run_id)
-            if job:
-                job.cancel()
-            else:
-                run = await db.get(GenerationRun, task.active_run_id)
-                if run:
-                    run.status = "cancelled"
-                    run.finished_at = datetime.now(timezone.utc)
-                task.status = "cancelled"
-                task.active_run_id = None
-                await db.commit()
-            return {"task_id": task.id, "status": "cancelled"}
+            return await _cancel_active_task(db, task)
         if payload.action not in {"initial", "retry", "recompose", "sync_dependencies"}:
             raise HTTPException(422, "视频生成不支持该任务操作")
-        from app.schemas.video import VideoGenerationRunRequest
-        from app.services.video_generation_service import create_video_generation_run
+        from app.schemas.video import SeedanceVideoGenerationRunRequest
+        from app.services.seedance_video_generation_service import create_seedance_video_run
         try:
-            request = VideoGenerationRunRequest.model_validate(payload.model_dump())
-            run = await create_video_generation_run(db, task, request)
+            request = SeedanceVideoGenerationRunRequest.model_validate(payload.model_dump())
+            run = await create_seedance_video_run(db, task, request)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
         await db.commit()
         start_task_run(run.id)
         return {"run_id": run.id, "task_id": task.id, "status": "queued"}
+    return await dispatch_task_run_action(db, task, payload.action)
+
+
+async def dispatch_task_run_action(db: AsyncSession, task: CourseTask, action: str) -> dict:
+    """通用任务操作分发（initial / retry / sync_dependencies / sync_context）。
+
+    供 projects 泛化路由与动态 Agent 专用路由（教学设计/任务单/视频脚本/逐字稿）
+    共用：这些 Agent 的 message 路由先按 action 判断，非 message 操作委托到这里。
+    """
     allowed = {"initial", "retry", "sync_dependencies", "sync_context"}
-    if payload.action not in allowed:
+    if action not in allowed:
         raise HTTPException(422, "不支持的任务操作")
-    if payload.action == "sync_dependencies" and task.status != "stale":
+    if action == "sync_dependencies" and task.status != "stale":
         raise HTTPException(409, "当前任务不需要同步上游内容")
-    if payload.action == "sync_context" and not task.current_artifact_id:
+    if action == "sync_context" and not task.current_artifact_id:
         raise HTTPException(409, "任务文件尚未生成，无法同步项目上下文")
-    if payload.action == "sync_context":
+    if action == "sync_context":
         artifact = await db.get(Artifact, task.current_artifact_id)
         if artifact and artifact.is_locked:
             raise HTTPException(409, "当前任务文件已整体锁定")
-    if payload.action == "retry" and task.status not in {"failed", "cancelled"}:
+    if action == "retry" and task.status not in {"failed", "cancelled"}:
         raise HTTPException(409, "只有失败或已取消的任务可以重试")
-    if payload.action == "initial" and task.current_artifact_id:
+    if action == "initial" and task.current_artifact_id:
         raise HTTPException(409, "任务文件已经生成")
     try:
         retry_message = None
-        trigger_type = payload.action
-        if payload.action == "retry":
+        trigger_type = action
+        if action == "retry":
             failed_run = await db.scalar(select(GenerationRun).where(
                 GenerationRun.course_task_id == task.id,
                 GenerationRun.status == "failed",
             ).order_by(GenerationRun.created_at.desc()))
+            if failed_run and failed_run.trigger_type == "retry":
+                # A retry must retain the operation that originally failed. Otherwise a
+                # failed dependency/context sync silently turns into an initial generation
+                # on every subsequent click and loses the migration-specific behavior.
+                failed_run = await db.scalar(select(GenerationRun).where(
+                    GenerationRun.course_task_id == task.id,
+                    GenerationRun.status == "failed",
+                    GenerationRun.trigger_type != "retry",
+                ).order_by(GenerationRun.created_at.desc()))
             if failed_run and failed_run.trigger_type == "message":
                 retry_message = await db.scalar(select(AgentMessage).where(
                     AgentMessage.run_id == failed_run.id,
@@ -299,6 +381,8 @@ async def run_task(course_id: str, task_type: str, payload: TaskRunRequest, user
                 ).order_by(AgentMessage.created_at.desc()))
                 if retry_message:
                     trigger_type = "message"
+            elif failed_run and failed_run.trigger_type in {"initial", "sync_dependencies", "sync_context"}:
+                trigger_type = failed_run.trigger_type
         run = await create_task_run(db, task, trigger_type, retry_message)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -323,16 +407,18 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
         content=payload.content.strip(),
         status="pending",
     )
+    if task_type == "lesson_plan" and any((
+        payload.selected_section_ids, payload.active_section_id, payload.mode != "auto",
+    )):
+        message.metadata_json = {
+            "selected_section_ids": list(payload.selected_section_ids),
+            "active_section_id": payload.active_section_id,
+            "mode": payload.mode,
+        }
     db.add(message)
     if task_type == "video_generation":
-        from app.services.video_generation_service import create_video_instruction_run
-        try:
-            run = await create_video_instruction_run(db, task, message)
-        except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
-        await db.commit()
-        start_task_run(run.id)
-        return {"message_id": message.id, "run_id": run.id, "task_id": task.id, "status": "queued"}
+        await db.rollback()
+        raise HTTPException(409, "原生有声视频片段修改必须先在片段编辑器中获取并确认报价")
     try:
         run = await create_task_run(db, task, "message", message)
     except ValueError as exc:
@@ -344,6 +430,8 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
 
 @router.patch("/courses/{course_id}/tasks/{task_type}/model")
 async def change_task_model(course_id: str, task_type: str, payload: TaskModelRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    from app.services.media_provider_service import media_transport_supports
+
     await _owned_task(course_id, task_type, user, db)
     if not any((
         payload.model_config_id, payload.image_model_config_id, payload.vision_model_config_id,
@@ -374,11 +462,17 @@ async def change_task_model(course_id: str, task_type: str, payload: TaskModelRe
         video_config = await owned_model_config(db, user.id, payload.video_model_config_id)
         if "video_generation" not in (video_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明视频生成能力")
+        if task_type == "video_generation" and "native_audio_video_generation" not in (video_config.capabilities_json or []):
+            raise HTTPException(422, "视频生成任务只接受声明原生有声视频能力的模型配置")
+        if not media_transport_supports(video_config.provider, video_config.api_mode, "video_generation"):
+            raise HTTPException(422, "所选模型的接口模式不支持视频生成，请配置自定义异步视频 HTTP 接口")
         session.video_model_config_id = video_config.id
     if payload.speech_model_config_id:
         speech_config = await owned_model_config(db, user.id, payload.speech_model_config_id)
         if "speech_generation" not in (speech_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明语音生成能力")
+        if not media_transport_supports(speech_config.provider, speech_config.api_mode, "speech_generation"):
+            raise HTTPException(422, "所选模型的接口模式不支持语音生成，请配置自定义语音 HTTP 接口")
         session.speech_model_config_id = speech_config.id
     await db.commit()
     return {
@@ -397,6 +491,10 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
         raise HTTPException(409, "任务文件尚未生成")
     artifact = await db.get(Artifact, task.current_artifact_id)
     if task_type == "video_generation":
+        from app.services.course_task_service import is_publishable_video_artifact
+
+        if not is_publishable_video_artifact(artifact):
+            raise HTTPException(409, "视频尚未生成；请先确认视频脚本，再获取报价并生成视频")
         final_asset_id = ((artifact.content_json or {}).get("outputs") or {}).get("final_asset_id")
         final_asset = await db.get(ArtifactAsset, final_asset_id) if final_asset_id else None
         if not final_asset or final_asset.status != "approved":
@@ -407,6 +505,21 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     artifact.approved_at = datetime.now(timezone.utc)
     task.status = "approved"
     task.completed_at = datetime.now(timezone.utc)
+    # 共享项目记忆：教师确认决策进入项目记忆（同一事务，先写后 bump）。
+    from app.services.project_knowledge_service import bump, index_decision
+
+    await index_decision(
+        db, course_id, f"decision-{task.task_type}-approved",
+        f"确认 {TASK_SPEC_BY_TYPE[task.task_type][1]} V{artifact.version}",
+        f"教师确认了 {TASK_SPEC_BY_TYPE[task.task_type][1]} V{artifact.version} 作为交付内容。",
+        created_by="teacher",
+        summary={"task_type": task.task_type, "artifact_version": artifact.version},
+    )
+    await bump(
+        db, course_id, f"确认 {TASK_SPEC_BY_TYPE[task.task_type][1]} V{artifact.version}",
+        source_type="decision", source_id=f"decision-{task.task_type}-approved",
+        created_by="teacher",
+    )
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course_id)))
     course = await owned_course(course_id, user, db)
     content_ready = all(item.status == "approved" for item in tasks if item.task_type in CONTENT_TASK_TYPES)
@@ -414,30 +527,16 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     video_ready = not video_task or video_task.status in {"ready_to_generate", "approved"}
     course.status = "completed" if content_ready and video_ready else "teacher_review"
     await db.commit()
+    if task_type == "video_script":
+        await schedule_ready_tasks(course_id)
+        await db.refresh(task)
     return await task_payload(db, task)
 
 
 @router.post("/courses/{course_id}/tasks/{task_type}/cancel")
 async def cancel_task(course_id: str, task_type: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     task = await _owned_task(course_id, task_type, user, db)
-    if not task.active_run_id:
-        raise HTTPException(409, "当前任务没有正在运行的 Agent")
-    run_id = task.active_run_id
-    if task_type == "video_generation":
-        from app.services.video_generation_service import cancel_video_provider_jobs
-        await cancel_video_provider_jobs(db, task)
-    job = task_jobs.get(run_id)
-    if job:
-        job.cancel()
-    else:
-        run = await db.get(GenerationRun, run_id)
-        if run:
-            run.status = "cancelled"
-            run.finished_at = datetime.now(timezone.utc)
-        task.status = "cancelled"
-        task.active_run_id = None
-        await db.commit()
-    return {"task_id": task.id, "status": "cancelled"}
+    return await _cancel_active_task(db, task)
 
 
 @router.post("/courses/{course_id}/task-events/token")

@@ -543,6 +543,40 @@ def cover_left(zones: LayoutZones, content: dict[str, Any], params: dict[str, An
     purpose = str(content.get("purpose") or "")
     has_visual = zones.visual_slot is not None
     title_w = (zones.visual_slot.x - zones.content_x - 0.4) if has_visual else zones.canvas.w - zones.content_x - 0.9
+    # Cover copy is rebound to the complete canonical ``body`` after a
+    # candidate is generated.  The former fixed 0.8in subtitle box was sized
+    # from only ``body[:2]`` and then overflowed as soon as the third canonical
+    # line was restored.  Stack the real semantic strings using measured
+    # heights so cover candidates remain complete at every style tier.
+    gap = max(0.16, 0.22 * float(params.get("gap_scale") or 1.0))
+    # A Chinese cover title commonly wraps to two lines.  30pt as the recipe
+    # base keeps that hierarchy while leaving enough height for the complete
+    # three-line teaching lead.  It also avoids an exaggerated >2× title/body
+    # ratio; the requested scale still raises the effective title to 33pt for
+    # the current moderate polish request.
+    title_size = _font_size(params, 30)
+    subtitle_size = _font_size(params, 18)
+    purpose_size = _font_size(params, 15)
+    title_y = 0.72 if has_visual else 1.25
+    title_h = max(1.15, estimate_text_height(title, title_w, title_size))
+    subtitle_text = "\n".join(body)
+    subtitle_h = max(0.75, estimate_text_height(subtitle_text, title_w, subtitle_size)) if body else 0.0
+    subtitle_y = title_y + title_h + gap
+    purpose_h = max(0.60, estimate_text_height(purpose, title_w, purpose_size)) if purpose else 0.0
+    purpose_y = subtitle_y + subtitle_h + (gap if body else 0.0)
+    if purpose and has_visual:
+        # Keep the closing teaching purpose as a deliberate lower-page anchor.
+        # Shrinking this box to its natural text height previously pulled the
+        # whole left column into the upper half even though the locked visual
+        # continued lower on the right.  That made the complete candidate lose
+        # utilization/balance points and fail the no-regression gate.  The
+        # anchor remains inside the safe body rail and never stretches text.
+        visual_bottom = zones.visual_slot.bottom
+        lower_anchor = min(
+            zones.body_column.bottom - purpose_h - 0.18,
+            max(visual_bottom + 0.28, zones.body_column.y + zones.body_column.h * 0.73),
+        )
+        purpose_y = max(purpose_y, lower_anchor)
     elements.append(
         {
             "kind": "textbox",
@@ -550,10 +584,10 @@ def cover_left(zones: LayoutZones, content: dict[str, Any], params: dict[str, An
             "text": title,
             "content_ref": "title",
             "x": round(zones.content_x, 3),
-            "y": round(2.05 if has_visual else 2.3, 3),
+            "y": round(title_y, 3),
             "w": round(title_w, 3),
-            "h": 1.6,
-            "style": {"size": _font_size(params, 40), "color": "primary", "bold": True},
+            "h": round(title_h, 3),
+            "style": {"size": title_size, "color": "primary", "bold": True},
         }
     )
     if body:
@@ -561,13 +595,13 @@ def cover_left(zones: LayoutZones, content: dict[str, Any], params: dict[str, An
             {
                 "kind": "textbox",
                 "role": "subtitle",
-                "text": " · ".join(body[:2]),
+                "text": subtitle_text,
                 "content_ref": "body",
                 "x": round(zones.content_x, 3),
-                "y": 4.0,
+                "y": round(subtitle_y, 3),
                 "w": round(title_w, 3),
-                "h": 0.8,
-                "style": {"size": _font_size(params, 20), "color": "muted"},
+                "h": round(subtitle_h, 3),
+                "style": {"size": subtitle_size, "color": "muted"},
             }
         )
     if purpose:
@@ -578,10 +612,10 @@ def cover_left(zones: LayoutZones, content: dict[str, Any], params: dict[str, An
                 "text": purpose,
                 "content_ref": "purpose",
                 "x": round(zones.content_x, 3),
-                "y": 5.0,
+                "y": round(purpose_y, 3),
                 "w": round(title_w, 3),
-                "h": 0.65,
-                "style": {"size": _font_size(params, 15), "color": "primary", "bold": True},
+                "h": round(purpose_h, 3),
+                "style": {"size": purpose_size, "color": "primary", "bold": True},
             }
         )
     if has_visual:

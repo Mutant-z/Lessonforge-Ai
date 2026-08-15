@@ -1,17 +1,17 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { buildAgentTurns } from '../../../composables/useAgentStream';
 import type { AgentStreamNode } from '../../../composables/useAgentStream';
 import type { PipelineTimelineItem } from '../../../stores/pipeline';
 import type { CourseTask } from '../../../types';
-import type { PPTLayoutCandidateRanking, PPTPolishObjectiveResult, PPTPolishPageResult } from '../../../types/agentPipeline';
+import type { PipelineToolCall, PPTLayoutCandidateRanking, PPTPolishObjectiveResult, PPTPolishPageResult } from '../../../types/agentPipeline';
 import MarkdownRenderer from '../../content-renderers/MarkdownRenderer.vue';
 import AuthenticatedPreviewImage from './AuthenticatedPreviewImage.vue';
 
 const props = defineProps<{
   items: PipelineTimelineItem[];
   task: CourseTask | null;
-  toolCalls: Array<{ id: string; input: Record<string, any>; output: Record<string, any>; status: string; duration_ms: number; error: any }>;
+  toolCalls: PipelineToolCall[];
   isRunning?: boolean;
   agentThoughts?: Record<string, string>;
   agentStatusTexts?: Record<string, string>;
@@ -29,6 +29,8 @@ const unreadCount = ref(0);
 const expandedTools = ref<Set<string>>(new Set());
 const expandedEvents = ref<Set<string>>(new Set());
 let lastUnreadMessageId = '';
+let isProgrammaticScrolling = false;
+let resizeObserver: ResizeObserver | null = null;
 
 /** Codex 式 Turn：教师指令、执行轨迹、最终回复不会跨轮混排。 */
 const turns = computed(() =>
@@ -36,6 +38,7 @@ const turns = computed(() =>
     props.items,
     props.agentThoughts || {},
     props.task?.messages || [],
+    props.toolCalls,
   ),
 );
 
@@ -81,6 +84,23 @@ function toggleTool(id: string) {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   expandedTools.value = next;
+}
+
+const TOOL_ERROR_LABELS: Record<string, string> = {
+  blueprint_missing: '缺少课程蓝图，无法执行质量检查',
+  blueprint_invalid: '课程蓝图结构异常，无法执行质量检查',
+  tool_not_allowed: '该角色无权调用此工具',
+  tool_input_invalid: '工具参数不符合要求',
+  source_view_forbidden: '该角色无权读取完整候选稿',
+  section_scope_violation: '修改超出本轮选中的章节范围',
+  locked_path_conflict: '修改位置已被锁定',
+  artifact_locked: '教学设计已被整体锁定',
+  candidate_invalid: '修改后的教学设计结构不合法',
+  no_progress: '重复读取没有产生新信息，请继续下一步',
+};
+
+function friendlyToolError(node: Extract<AgentStreamNode, { kind: 'tool' }>): string {
+  return TOOL_ERROR_LABELS[String(node.errorCode || '')] || node.error || '工具执行失败';
 }
 
 /** QA / 修复类事件：可展开查看 severity/rule/message 明细 */
@@ -436,6 +456,15 @@ function eventIcon(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
     case 'revision_started': case 'revision_completed': case 'repair.started': case 'repair.completed': return '🔄';
     case 'layout.compile.result': return '📐';
     case 'polish.result': return '✅';
+    case 'intent.resolved': return '🎯';
+    case 'task.spec.created': return '📋';
+    case 'context.snapshot.created': return '📌';
+    case 'evidence.bundle.ready': return '🗂';
+    case 'patch.operation.applied': return '✏️';
+    case 'verification.completed': return '🧾';
+    case 'result.applied': return '✅';
+    case 'result.no_change': return '➖';
+    case 'result.rejected': return '⛔';
     case 'skill.discovered': case 'skill.loaded': case 'skill.completed': return '🧩';
     case 'agent.handoff': return '↪';
     case 'human.required': return '🙋';
@@ -480,9 +509,33 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
       if (d.message) return d.message;
       if (status === 'partial') return `已安全更新 ${applied} 页，${preserved} 页保留原布局`;
       if (status === 'no_change') return '当前页面已达到安全排版上限，原版本保持不变';
-      if (status === 'needs_confirmation') return '修改范围或目标存在歧义，请确认后再执行';
+      if (status === 'needs_confirmation') {
+        return d.payload?.request_id
+          ? '安全候选等待选择，确认后再发布'
+          : '修改范围或目标存在歧义，请确认后再执行';
+      }
       return `已完成 ${applied} 页润色`;
     }
+    case 'intent.resolved': {
+      const intent = d.payload?.intent || d.intent || '';
+      return d.message || `意图已识别：${intent}`;
+    }
+    case 'context.snapshot.created':
+      return d.message || `执行前上下文快照已创建（v${d.payload?.source_version || '?'}）`;
+    case 'task.spec.created':
+      return d.message || '任务规格已生成';
+    case 'evidence.bundle.ready':
+      return d.message || '证据包已就绪';
+    case 'patch.operation.applied':
+      return d.message || '修改操作已应用';
+    case 'verification.completed':
+      return d.message || '确定性验证已完成';
+    case 'result.applied':
+      return d.message || '修改已应用，新版本已生成';
+    case 'result.no_change':
+      return d.message || '未发现需要修改的内容';
+    case 'result.rejected':
+      return d.message || '本轮修改被拒绝，原教学设计保持不变';
     case 'plan.created': return d.message || '已创建动态执行计划';
     case 'skill.discovered': return `发现 Skill：${d.payload?.name || ''}`;
     case 'skill.loaded': return `已加载 Skill：${d.payload?.name || ''}`;
@@ -498,8 +551,72 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
   }
 }
 
+/** 执行前契约卡片：仅教学设计流水线的 intent/snapshot/rejected 事件渲染为卡片。 */
+const CONTRACT_EVENT_TYPES = new Set(['intent.resolved', 'context.snapshot.created', 'result.rejected']);
+const expandedContracts = ref<Set<string>>(new Set());
+
+function isContractEvent(type: string): boolean {
+  return CONTRACT_EVENT_TYPES.has(type);
+}
+
+function toggleContract(id: string) {
+  const next = new Set(expandedContracts.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedContracts.value = next;
+}
+
+function contractTitle(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  if (node.type === 'intent.resolved') return '执行前契约：意图与修改范围';
+  if (node.type === 'context.snapshot.created') return '执行前上下文快照';
+  return '执行前契约';
+}
+
+function contractIntentLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  const payload = node.data?.payload || {};
+  const intent = payload.intent || node.data?.intent || '';
+  const intentNames: Record<string, string> = {
+    GENERATE: '首次生成完整教学设计',
+    SECTION_EDIT: '修改指定章节内容',
+    SECTION_FORMAT_EDIT: '修正章节格式（编号/层级）',
+    RESTRUCTURE: '调整目录结构',
+    CONTENT_ENRICH: '补充丰富内容',
+    TIMING_ADJUST: '调整环节时长',
+    QA_ONLY: '仅质量检查',
+    ANSWER_ONLY: '仅回答问题',
+    CLARIFICATION_REQUIRED: '需要澄清',
+  };
+  return intentNames[intent] || intent || '未识别';
+}
+
+function contractTargets(node: Extract<AgentStreamNode, { kind: 'event' }>): string[] {
+  const payload = node.data?.payload || {};
+  const targets = payload.affected_section_ids || payload.target_section_ids || [];
+  return Array.isArray(targets) ? targets.map(String) : [];
+}
+
+function contractSourceVersion(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  return String((node.data?.payload || {})?.source_version || '—');
+}
+
+function contractPreserved(node: Extract<AgentStreamNode, { kind: 'event' }>): string[] {
+  const preserved = (node.data?.payload || {})?.preserved_section_ids || [];
+  return Array.isArray(preserved) ? preserved.map(String) : [];
+}
+
+function contractFactOwners(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  const owners = (node.data?.payload || {})?.fact_owners || {};
+  if (!owners || typeof owners !== 'object') return '—';
+  const entries = Object.entries(owners);
+  return entries.length ? entries.map(([fact, section]) => `${fact}→${section}`).join('；') : '—';
+}
+
+function contractRejectedCode(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
+  return String((node.data?.payload || {})?.error_code || '');
+}
+
 function handleScroll() {
-  if (!scrollRef.value) return;
+  if (!scrollRef.value || isProgrammaticScrolling) return;
   const { scrollTop, scrollHeight, clientHeight } = scrollRef.value;
   const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
   isUserScrolledUp.value = distanceFromBottom > 60;
@@ -510,6 +627,8 @@ function handleScroll() {
 }
 
 function scrollToBottom(smooth = true) {
+  if (!scrollRef.value) return;
+  isProgrammaticScrolling = true;
   nextTick(() => {
     if (scrollRef.value) {
       scrollRef.value.scrollTo({
@@ -520,12 +639,15 @@ function scrollToBottom(smooth = true) {
       unreadCount.value = 0;
       lastUnreadMessageId = '';
     }
+    requestAnimationFrame(() => {
+      isProgrammaticScrolling = false;
+    });
   });
 }
 
 function notifyVisibleMessage() {
   if (!isUserScrolledUp.value) {
-    scrollToBottom();
+    scrollToBottom(true);
   } else {
     const messageId = latestVisibleMessageId.value;
     if (messageId && messageId !== lastUnreadMessageId) {
@@ -535,10 +657,54 @@ function notifyVisibleMessage() {
   }
 }
 
+// 监听消息与追踪流
 watch(visibleMessageSignature, notifyVisibleMessage, { flush: 'post' });
 watch(traceSignature, () => {
   if (!isUserScrolledUp.value) scrollToBottom(false);
 }, { flush: 'post' });
+
+// 切换任务/运行状态时重置向上滚动状态并触底
+watch(() => props.task?.id, () => {
+  isUserScrolledUp.value = false;
+  unreadCount.value = 0;
+  scrollToBottom(false);
+});
+
+watch(() => props.isRunning, (running) => {
+  if (running) {
+    isUserScrolledUp.value = false;
+    unreadCount.value = 0;
+    scrollToBottom(false);
+  }
+});
+
+// 组件挂载与 Resize 动态自适应触底
+onMounted(() => {
+  isUserScrolledUp.value = false;
+  scrollToBottom(false);
+
+  // 多阶段校准：应对 Markdown 公式、<details> 展开和异步素材渲染导致的高度二次膨胀
+  setTimeout(() => scrollToBottom(false), 80);
+  setTimeout(() => scrollToBottom(false), 240);
+
+  // 监听内容区域高度变动，只要未处于主动向上翻阅状态就自动贴底
+  if (scrollRef.value) {
+    const target = scrollRef.value.querySelector('.term-stream') || scrollRef.value;
+    resizeObserver = new ResizeObserver(() => {
+      if (!isUserScrolledUp.value) {
+        scrollToBottom(false);
+      }
+    });
+    resizeObserver.observe(target);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+});
 </script>
 
 <template>
@@ -591,10 +757,10 @@ watch(traceSignature, () => {
               <span v-if="summarize(node.input, 120)" class="term-tool-arg">{{ summarize(node.input, 120) }}</span>
               <span v-if="node.running" class="term-status running">⏳ 执行中</span>
               <span v-else-if="node.ok" class="term-status ok">✓ {{ node.durationMs }}ms</span>
-              <span v-else class="term-status fail">✗ {{ node.error || '失败' }}</span>
+              <span v-else class="term-status fail">✗ {{ friendlyToolError(node) }}</span>
             </button>
             <pre v-if="expandedTools.has(node.id)" class="term-tool-json">{{
-              JSON.stringify({ input: node.input, output: node.output }, null, 2)
+              JSON.stringify({ input: node.input, output: node.output, error_code: node.errorCode, technical_error: node.error }, null, 2)
             }}</pre>
           </div>
 
@@ -645,10 +811,12 @@ watch(traceSignature, () => {
           >
             <div class="candidate-comparison-head">
               <div>
-                <strong>两个方案评分接近</strong>
-                <span>请选择更符合课堂表达的版式</span>
+                <strong>{{ mergedCandidateViews(turn, node).length > 1 ? '两个方案评分接近' : '安全改善方案等待确认' }}</strong>
+                <span>请选择更符合课堂表达的版式，或保留原版</span>
               </div>
-              <span v-if="mergedCandidateViews(turn, node)[0]?.slideId" class="candidate-slide">{{ mergedCandidateViews(turn, node)[0].slideId }}</span>
+              <span v-if="eventPayload(node).display_label || mergedCandidateViews(turn, node)[0]?.slideId" class="candidate-slide">
+                {{ eventPayload(node).display_label || mergedCandidateViews(turn, node)[0].slideId }}
+              </span>
             </div>
             <div class="candidate-grid">
               <article v-for="candidate in mergedCandidateViews(turn, node)" :key="candidate.candidateId" class="candidate-card">
@@ -656,8 +824,8 @@ watch(traceSignature, () => {
                   <AuthenticatedPreviewImage :src="candidate.previewUrl" :alt="`${candidate.label}预览`" />
                 </div>
                 <div v-else class="candidate-preview candidate-preview-empty">
-                  <span>暂无渲染缩略图</span>
-                  <small>仍可依据评分与目标结果选择</small>
+                  <span>候选预览不可用</span>
+                  <small>请重试本次润色；无真实预览时不会发布</small>
                 </div>
                 <div class="candidate-copy">
                   <div class="candidate-title">
@@ -719,6 +887,58 @@ watch(traceSignature, () => {
             </div>
             <div v-if="!eventIssues(node).length" class="issue-row empty">该事件没有附带问题明细。</div>
           </div>
+
+          <!-- 执行前契约卡片（教学设计：intent.resolved + context.snapshot.created） -->
+          <section
+            v-if="node.kind === 'event' && (node.type === 'intent.resolved' || node.type === 'context.snapshot.created')"
+            class="contract-card"
+            @click.stop
+          >
+            <div class="contract-card-head" @click="toggleContract(node.id)">
+              <strong>{{ contractTitle(node) }}</strong>
+              <span class="expand-caret" aria-hidden="true">{{ expandedContracts.has(node.id) ? '▾' : '▸' }}</span>
+            </div>
+            <dl class="contract-grid">
+              <template v-if="node.type === 'intent.resolved'">
+                <div class="contract-row">
+                  <dt>识别意图</dt>
+                  <dd>{{ contractIntentLabel(node) }}</dd>
+                </div>
+                <div class="contract-row">
+                  <dt>目标章节</dt>
+                  <dd>{{ contractTargets(node).length ? contractTargets(node).join('、') : '全局' }}</dd>
+                </div>
+              </template>
+              <template v-if="node.type === 'context.snapshot.created'">
+                <div class="contract-row">
+                  <dt>上下文版本</dt>
+                  <dd>{{ contractSourceVersion(node) }}</dd>
+                </div>
+                <div class="contract-row">
+                  <dt>保护章节</dt>
+                  <dd>{{ contractPreserved(node).length ? contractPreserved(node).join('、') : '无' }}</dd>
+                </div>
+                <div class="contract-row">
+                  <dt>事实归属</dt>
+                  <dd>{{ contractFactOwners(node) }}</dd>
+                </div>
+              </template>
+            </dl>
+            <pre v-if="expandedContracts.has(node.id)" class="contract-json">{{
+              JSON.stringify(node.data?.payload || node.data, null, 2)
+            }}</pre>
+          </section>
+          <section
+            v-if="node.kind === 'event' && node.type === 'result.rejected'"
+            class="contract-card contract-card-rejected"
+            @click.stop
+          >
+            <div class="contract-card-head">
+              <strong>⛔ 本轮修改未执行</strong>
+              <span v-if="contractRejectedCode(node)" class="rejected-code">{{ contractRejectedCode(node) }}</span>
+            </div>
+            <p class="contract-rejected-message">{{ eventLabel(node) }}</p>
+          </section>
 
               </template>
               </details>
@@ -1322,6 +1542,90 @@ watch(traceSignature, () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* 执行前契约卡片（教学设计） */
+.contract-card {
+  margin: 4px 0 4px 26px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #7c3aed;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.contract-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  color: #334155;
+}
+
+.contract-card-head strong {
+  font-size: 12px;
+}
+
+.contract-grid {
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.contract-row {
+  display: flex;
+  gap: 8px;
+  line-height: 1.5;
+}
+
+.contract-row dt {
+  flex-shrink: 0;
+  color: #64748b;
+  min-width: 56px;
+}
+
+.contract-row dd {
+  margin: 0;
+  color: #1e293b;
+  word-break: break-all;
+}
+
+.contract-json {
+  margin: 6px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 10px;
+  color: #475569;
+  background: #f1f5f9;
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.contract-card-rejected {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+}
+
+.contract-card-rejected .contract-card-head {
+  cursor: default;
+}
+
+.rejected-code {
+  font-size: 10px;
+  font-weight: 700;
+  color: #b91c1c;
+  background: #fee2e2;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.contract-rejected-message {
+  margin: 6px 0 0;
+  color: #7f1d1d;
+  line-height: 1.6;
 }
 
 .issue-row {

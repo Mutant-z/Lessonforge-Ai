@@ -259,6 +259,22 @@ describe('project task store', () => {
     ]);
   });
 
+  it('cancels a non-pipeline task through the generic task endpoint and clears its active run', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.project.tasks[0] = { ...store.project.tasks[0], id: 'task-video', task_type: 'video_generation' };
+    store.currentTask = store.project.tasks[0];
+    vi.spyOn(store, 'refreshCurrentTask').mockResolvedValue(undefined);
+    vi.mocked(api.post).mockResolvedValue({ data: { task_id: 'task-video', status: 'cancelled' } });
+
+    await store.cancelTask('course-1', 'video_generation');
+
+    expect(api.post).toHaveBeenCalledWith('/courses/course-1/tasks/video_generation/cancel');
+    expect(store.currentTask.status).toBe('cancelled');
+    expect(store.currentTask.active_run_id).toBeNull();
+    expect(store.refreshCurrentTask).toHaveBeenCalledOnce();
+  });
+
   it('preserves the large PPT artifact identity during status polling', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('window', globalThis);
@@ -435,6 +451,26 @@ describe('project task store', () => {
     expect(api.post).toHaveBeenCalledWith('/ppt-agent/runs/run-modality/instructions', {
       content: '只改文字', target_slide_ids: ['slide_01'], selected_slide_ids: ['slide_01'],
       resume_if_paused: false, modality: 'text', polish_options: {},
+    });
+  });
+
+  it('passes the active section id through createLessonPlanRun', async () => {
+    const store = useProjectStore();
+    store.project = structuredClone(project);
+    store.currentTask = store.project.tasks[0];
+    vi.spyOn(store, 'startActiveTaskPolling').mockImplementation(() => undefined);
+    vi.mocked(api.post).mockResolvedValue({ data: {
+      run_id: 'run-lesson', task_id: 'task-lesson', message_id: 'message-lesson',
+      status: 'queued', selected_section_ids: ['SEC-REFLECTION'],
+    } });
+
+    await store.createLessonPlanRun('course-1', '教学反思的序号有问题', ['SEC-REFLECTION'], 'content', 'SEC-REFLECTION');
+
+    expect(api.post).toHaveBeenCalledWith('/courses/course-1/tasks/lesson_plan/runs', {
+      content: '教学反思的序号有问题',
+      selected_section_ids: ['SEC-REFLECTION'],
+      mode: 'content',
+      active_section_id: 'SEC-REFLECTION',
     });
   });
 

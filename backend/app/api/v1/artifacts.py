@@ -26,6 +26,7 @@ from app.schemas.artifact import (
     TaskSheetContent,
     VerbatimContent,
     VideoScriptContent,
+    SeedanceVideoScriptContent,
 )
 from app.services.model_config_service import owned_model_config, resolve_provider, resolved_model_name
 from app.services.course_task_service import register_artifact_version
@@ -34,7 +35,12 @@ from app.agents.generators import make_exercises, make_task_sheet, to_markdown
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.quality_service import validate_exercise, validate_video_script
 from app.services.ppt_template_service import get_ppt_template, resolve_ppt_template
-from app.schemas.video import VideoGenerationContent, video_generation_markdown
+from app.schemas.video import (
+    SeedanceVideoGenerationContent,
+    VideoGenerationContent,
+    seedance_video_generation_markdown,
+    video_generation_markdown,
+)
 
 router = APIRouter(tags=["课程资源"])
 MODULES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "video_generation", "verbatim", "quality_report", "citation_report"}
@@ -43,16 +49,44 @@ MODULE_SCHEMAS = {
     "ppt": PPTContent,
     "task_sheet": TaskSheetContent,
     "exercise": ExerciseContent,
-    "video_script": VideoScriptContent,
-    "video_generation": VideoGenerationContent,
+    "video_script": SeedanceVideoScriptContent,
+    "video_generation": SeedanceVideoGenerationContent,
     "verbatim": VerbatimContent,
     "quality_report": QualityReportContent,
     "citation_report": CitationReportContent,
 }
 
 
+def _lesson_plan_schema_for(content: dict) -> type:
+    """V1/V2 按 schema_version 分派校验；V2 统一走 LessonPlanContentV2。"""
+    from app.schemas.lesson_plan import LessonPlanContentV2
+
+    return LessonPlanContentV2 if (content or {}).get("schema_version") == "2.0" else LessonPlanContent
+
+
+def _video_script_schema_for(content: dict) -> type:
+    """V3/V4 按 schema_version 分派校验；V4 统一走 SeedanceVideoScriptContentV4。"""
+    from app.schemas.video_script_v4 import VIDEO_SCRIPT_V4, SeedanceVideoScriptContentV4
+
+    return SeedanceVideoScriptContentV4 if (content or {}).get("schema_version") == VIDEO_SCRIPT_V4 else SeedanceVideoScriptContent
+
+
+def _video_script_markdown(content: dict) -> str:
+    """V4 按章节渲染 Markdown；V3 走通用渲染。"""
+    from app.schemas.video_script_v4 import VIDEO_SCRIPT_V4, video_script_v4_to_markdown
+
+    return video_script_v4_to_markdown(content) if (content or {}).get("schema_version") == VIDEO_SCRIPT_V4 else to_markdown("video_script", content)
+
+
+def _lesson_plan_markdown(content: dict) -> str:
+    """V2 从章节树渲染 Markdown；V1 走通用渲染。"""
+    from app.schemas.lesson_plan import lesson_plan_to_markdown_v2
+
+    return lesson_plan_to_markdown_v2(content)
+
+
 def serialize(item: Artifact) -> dict:
-    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "source_versions_json", "agent_profile_id", "created_at", "approved_at")}
+    return {key: getattr(item, key) for key in ("id", "course_id", "artifact_type", "version", "blueprint_version", "content_json", "content_markdown", "status", "model_name", "prompt_version", "is_locked", "change_summary", "source_versions_json", "agent_profile_id", "created_at", "approved_at", "memory_revision_created")}
 
 
 def _locked_value(content: dict, path: str):
@@ -173,7 +207,8 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
         content_markdown = to_markdown("exercise", validated)
     elif source.artifact_type == "video_script":
         try:
-            validated = VideoScriptContent.model_validate(payload.content_json)
+            schema = _video_script_schema_for(payload.content_json)
+            validated = schema.model_validate(payload.content_json)
         except ValidationError as exc:
             raise HTTPException(422, detail=exc.errors()) from exc
         blueprint = await db.scalar(select(CourseBlueprint).where(
@@ -186,39 +221,32 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
         lesson_query = select(Artifact).where(
             Artifact.course_id == source.course_id, Artifact.artifact_type == "lesson_plan",
         )
-        ppt_query = select(Artifact).where(
-            Artifact.course_id == source.course_id, Artifact.artifact_type == "ppt",
-        )
         if source_versions.get("lesson_plan"):
             lesson_query = lesson_query.where(Artifact.version == source_versions["lesson_plan"])
         else:
             lesson_query = lesson_query.order_by(Artifact.version.desc())
-        if source_versions.get("ppt"):
-            ppt_query = ppt_query.where(Artifact.version == source_versions["ppt"])
-        else:
-            ppt_query = ppt_query.order_by(Artifact.version.desc())
         lesson_artifact = await db.scalar(lesson_query)
-        ppt_artifact = await db.scalar(ppt_query)
-        if not lesson_artifact or not ppt_artifact:
-            raise HTTPException(409, "视频脚本对应的教学设计或 PPT 版本不存在")
+        if not lesson_artifact:
+            raise HTTPException(409, "视频脚本对应的教学设计版本不存在")
         issues = validate_video_script(
             CourseBlueprintSchema.model_validate(blueprint.content_json), validated.model_dump(),
-            lesson_artifact.content_json, ppt_artifact.content_json,
+            lesson_artifact.content_json, None,
         )
         blocking = [item for item in issues if item["severity"] in {"critical", "major"}]
         if blocking:
             raise HTTPException(422, detail=blocking)
         content_json = validated.model_dump()
-        content_markdown = to_markdown("video_script", validated)
+        content_markdown = _video_script_markdown(content_json)
     elif source.artifact_type == "video_generation":
         try:
-            validated_video = VideoGenerationContent.model_validate(payload.content_json)
+            schema = SeedanceVideoGenerationContent if payload.content_json.get("schema_version") == "3.0" else VideoGenerationContent
+            validated_video = schema.model_validate(payload.content_json)
         except ValidationError as exc:
             raise HTTPException(422, detail=exc.errors()) from exc
         referenced_assets = {
             asset_id
             for scene in validated_video.scenes
-            for asset_id in (scene.video_asset_id, scene.audio_asset_id, scene.thumbnail_asset_id)
+            for asset_id in (scene.video_asset_id, getattr(scene, "audio_asset_id", None), scene.thumbnail_asset_id)
             if asset_id
         } | {
             asset_id
@@ -240,7 +268,11 @@ async def update_artifact(artifact_id: str, payload: ArtifactUpdate, user: User 
             if not asset:
                 raise HTTPException(422, f"视频资源 {asset_id} 不属于当前课程或尚未通过检查")
         content_json = validated_video.model_dump()
-        content_markdown = video_generation_markdown(validated_video)
+        content_markdown = (
+            seedance_video_generation_markdown(validated_video)
+            if isinstance(validated_video, SeedanceVideoGenerationContent)
+            else video_generation_markdown(validated_video)
+        )
     version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == source.course_id, Artifact.artifact_type == source.artifact_type)) or 0) + 1
     item = Artifact(course_id=source.course_id, artifact_type=source.artifact_type, version=version, blueprint_version=source.blueprint_version, content_json=content_json, content_markdown=content_markdown, status="draft", model_name=source.model_name, prompt_version=source.prompt_version, change_summary=payload.change_summary, source_versions_json=source.source_versions_json, agent_profile_id=source.agent_profile_id)
     db.add(item)
@@ -339,6 +371,21 @@ async def lock_artifact(artifact_id: str, payload: LockRequest, user: User = Dep
     db.add(ArtifactLock(artifact_id=item.id, json_path=payload.json_path, created_by=user.id))
     if payload.json_path in {"", "$"}:
         item.is_locked = True
+    # 共享项目记忆：教师锁定决策进入项目记忆（同一事务，先写后 bump）。
+    from app.services.project_knowledge_service import bump, index_decision
+
+    await index_decision(
+        db, item.course_id, f"decision-lock-{item.id}-{payload.json_path}",
+        f"锁定 {item.artifact_type} V{item.version} 内容",
+        f"教师锁定了 {item.artifact_type} V{item.version} 的路径 {payload.json_path}。",
+        created_by="teacher",
+        summary={"artifact_type": item.artifact_type, "artifact_version": item.version, "json_path": payload.json_path},
+    )
+    await bump(
+        db, item.course_id, f"锁定 {item.artifact_type} 内容",
+        source_type="decision", source_id=f"decision-lock-{item.id}-{payload.json_path}",
+        created_by="teacher",
+    )
     await db.commit()
     return {"locked": True, "path": payload.json_path}
 
@@ -504,6 +551,8 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
         )
     else:
         schema = MODULE_SCHEMAS[module_type]
+        if module_type == "lesson_plan":
+            schema = _lesson_plan_schema_for(source.content_json)
         previous_messages = list(await db.scalars(
             select(AgentMessage).where(
                 AgentMessage.course_id == course_id,
@@ -535,16 +584,22 @@ async def chat_send(course_id: str, module_type: str, payload: RegenerateRequest
             raise HTTPException(502, f"模型修订失败，未创建新版本：{str(exc)[:240]}") from exc
 
     try:
-        validated_content = MODULE_SCHEMAS[module_type].model_validate(revision.content_json).model_dump()
+        if module_type == "lesson_plan":
+            validated_content = _lesson_plan_schema_for(revision.content_json).model_validate(revision.content_json).model_dump()
+        else:
+            validated_content = MODULE_SCHEMAS[module_type].model_validate(revision.content_json).model_dump()
     except ValidationError as exc:
         raise HTTPException(502, "模型返回内容不符合当前模块结构，未创建新版本") from exc
     _validate_locked_content(source.content_json, validated_content, locks)
     _validate_report_invariants(module_type, source.content_json, validated_content)
-    rendered_markdown = (
-        to_markdown(module_type, MODULE_SCHEMAS[module_type].model_validate(validated_content))
-        if module_type in {"task_sheet", "exercise"}
-        else revision.content_markdown
-    )
+    if module_type == "lesson_plan" and validated_content.get("schema_version") == "2.0":
+        rendered_markdown = _lesson_plan_markdown(validated_content)
+    else:
+        rendered_markdown = (
+            to_markdown(module_type, MODULE_SCHEMAS[module_type].model_validate(validated_content))
+            if module_type in {"task_sheet", "exercise"}
+            else revision.content_markdown
+        )
     user_message = AgentMessage(course_id=course_id, module_type=module_type, role="user", content=payload.instruction)
     db.add(user_message)
     artifact = Artifact(

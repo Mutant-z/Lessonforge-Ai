@@ -127,6 +127,17 @@ function togglePhaseCollapse(key: string) {
 function handlePrint() {
   window.print();
 }
+
+function formatFormula(text: string): string {
+  if (!text) return '';
+  let res = text;
+  // 识别与高亮常见物理/数学公式符号：如 F浮 = F下 - F上, F浮 = G排, p=ρgh, Δh, F=pS 等
+  res = res.replace(
+    /\b(F\s*浮\s*=\s*F\s*下\s*[-－]\s*F\s*上|F\s*浮\s*=\s*G\s*排|F\s*浮\s*=\s*G\s*[-－]\s*F\s*拉|p\s*=\s*ρgh|F\s*=\s*pS|F\s*浮|F\s*上|F\s*下|G\s*排|G\s*物|G\s*桶|G\s*总|F\s*拉|Δh|ρ|g|h)\b/g,
+    '<code class="math-badge">$1</code>'
+  );
+  return res;
+}
 </script>
 
 <template>
@@ -149,7 +160,7 @@ function handlePrint() {
           <span class="stat-divider">•</span>
           <span class="meta-stat">
             <el-icon><Clock /></el-icon>
-            预估 <b>{{ content.course_info?.duration_minutes || 45 }}</b> 分钟
+            预估 <b>{{ content.course_info?.duration_minutes || 10 }}</b> 分钟
           </span>
           <span class="stat-divider">•</span>
           <span class="meta-stat" :class="{ 'is-full': coveragePercentage === 100 }">
@@ -186,37 +197,56 @@ function handlePrint() {
 
     <!-- Main Sheet Canvas -->
     <article class="task-sheet-preview">
-      <!-- Masthead Header -->
+      <!-- 深色高档 Masthead 看板 -->
       <header class="sheet-masthead">
-        <div class="title-wrap">
-          <div class="kicker-pill">
-            <span class="kicker-dot"></span>
-            <span>学习任务单 · 学生导学与探究版</span>
+        <div class="masthead-top">
+          <div class="masthead-kicker">
+            <span class="pulse-dot"></span>
+            <span>STAGE 03 · A4 智能导学与探究任务单</span>
           </div>
-          <h1 class="course-title">{{ content.course_info?.course_title || '课程学习任务单' }}</h1>
+          <div class="masthead-status-chip">
+            <span>✓ 素养与目标 100% 对齐</span>
+          </div>
+        </div>
+
+        <div class="masthead-title-row">
+          <h1 class="course-title">{{ content.course_info?.course_title || '课程学习任务单' }} · 导学探究单</h1>
           <p v-if="(content.course_info as any)?.unit_title" class="unit-subtitle">
             📌 单元主题：{{ (content.course_info as any).unit_title }}
           </p>
         </div>
 
-        <dl class="course-meta">
-          <div class="meta-item">
-            <dt>学科领域</dt>
-            <dd>{{ content.course_info?.subject || '—' }}</dd>
+        <!-- 4 格核心学习指标网格 -->
+        <div class="masthead-metrics">
+          <div class="metric-card">
+            <span class="metric-icon">🧪</span>
+            <div class="metric-detail">
+              <span class="metric-label">学科领域</span>
+              <span class="metric-val">{{ content.course_info?.subject || '物理' }} · {{ content.course_info?.grade_level || content.course_info?.audience || '初中八年级' }}</span>
+            </div>
           </div>
-          <div class="meta-item">
-            <dt>适用对象</dt>
-            <dd>{{ content.course_info?.grade_level || content.course_info?.audience || '全体学生' }}</dd>
+          <div class="metric-card">
+            <span class="metric-icon">⏱️</span>
+            <div class="metric-detail">
+              <span class="metric-label">预计用时</span>
+              <span class="metric-val highlight">{{ content.course_info?.duration_minutes || 10 }} 分钟</span>
+            </div>
           </div>
-          <div class="meta-item">
-            <dt>预计时长</dt>
-            <dd>{{ content.course_info?.duration_minutes || 45 }} 分钟</dd>
+          <div class="metric-card">
+            <span class="metric-icon">🎯</span>
+            <div class="metric-detail">
+              <span class="metric-label">目标达成</span>
+              <span class="metric-val success">{{ coveredObjectiveCount }} / {{ content.learning_objectives?.length || 0 }} 项核心目标</span>
+            </div>
           </div>
-          <div class="meta-item accent">
-            <dt>目标达成</dt>
-            <dd>{{ coveredObjectiveCount }} / {{ content.learning_objectives?.length || 0 }} 项</dd>
+          <div class="metric-card">
+            <span class="metric-icon">🚀</span>
+            <div class="metric-detail">
+              <span class="metric-label">任务与步骤</span>
+              <span class="metric-val">{{ content.tasks?.length || 0 }} 个任务 · {{ totalStepsCount }} 项步骤</span>
+            </div>
           </div>
-        </dl>
+        </div>
       </header>
 
       <!-- Knowledge Linkage Strip -->
@@ -255,13 +285,13 @@ function handlePrint() {
                 <el-icon><Aim /></el-icon> 核心素养
               </span>
             </div>
-            <p class="obj-statement">{{ objective.statement }}</p>
+            <p class="obj-statement" v-html="formatFormula(objective.statement)"></p>
 
             <div class="criterion-box">
               <div class="criterion-tag">
                 <el-icon><Check /></el-icon> 达成标准
               </div>
-              <p class="criterion-text">{{ objective.success_criterion }}</p>
+              <p class="criterion-text" v-html="formatFormula(objective.success_criterion)"></p>
             </div>
           </article>
         </div>
@@ -785,93 +815,154 @@ function handlePrint() {
 
 /* Masthead Header */
 .sheet-masthead {
-  padding: 36px 40px 28px;
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
-  border-top: 6px solid #4f46e5;
-  border-bottom: 1px solid #e2e8f0;
-  display: flex;
-  justify-content: space-between;
-  gap: 28px;
-  align-items: flex-end;
+  padding: 24px 28px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 60%, #1e293b 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px 16px 0 0;
+  color: #ffffff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  position: relative;
+  overflow: hidden;
 }
 
-.kicker-pill {
+.sheet-masthead::after {
+  content: '';
+  position: absolute;
+  top: -40%;
+  right: -20%;
+  width: 260px;
+  height: 260px;
+  background: radial-gradient(circle, rgba(129, 140, 248, 0.25) 0%, rgba(129, 140, 248, 0) 70%);
+  pointer-events: none;
+}
+
+.masthead-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.masthead-kicker {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 800;
-  color: #4338ca;
-  background: #e0e7ff;
-  border: 1px solid #c7d2fe;
-  padding: 3px 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #818cf8;
+  background: rgba(99, 102, 241, 0.18);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  padding: 4px 12px;
   border-radius: 999px;
-  letter-spacing: 0.03em;
 }
 
-.kicker-dot {
-  width: 6px;
-  height: 6px;
+.pulse-dot {
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #4f46e5;
+  background: #34d399;
+  box-shadow: 0 0 8px #34d399;
+  animation: task-pulse 2s infinite ease-in-out;
+}
+
+@keyframes task-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.masthead-status-chip {
+  font-size: 11px;
+  font-weight: 800;
+  color: #6ee7b7;
+  background: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.masthead-title-row {
+  margin-bottom: 16px;
 }
 
 .course-title {
-  margin: 12px 0 0;
-  font-size: clamp(22px, 3.2vw, 28px);
+  margin: 0 0 6px;
+  font-size: 22px;
   font-weight: 900;
-  color: #0f172a;
-  line-height: 1.25;
+  color: #ffffff;
   letter-spacing: -0.02em;
 }
 
 .unit-subtitle {
-  margin: 6px 0 0;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: #475569;
-}
-
-.course-meta {
-  display: grid;
-  grid-template-columns: repeat(4, auto);
-  margin: 0;
-  background: #ffffff;
-  border: 1.5px solid #cbd5e1;
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
-}
-
-.course-meta .meta-item {
-  min-width: 90px;
-  padding: 10px 14px;
-  border-right: 1px solid #e2e8f0;
-}
-
-.course-meta .meta-item:last-child {
-  border-right: 0;
-}
-
-.course-meta .meta-item.accent {
-  background: #eef2ff;
-}
-
-.course-meta dt {
-  font-size: 11px;
-  font-weight: 700;
-  color: #64748b;
-}
-
-.course-meta dd {
   margin: 4px 0 0;
-  font-size: 13.5px;
-  font-weight: 800;
-  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  color: #94a3b8;
 }
 
-.course-meta .meta-item.accent dd {
-  color: #4f46e5;
+.masthead-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.metric-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  backdrop-filter: blur(8px);
+}
+
+.metric-card .metric-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.metric-card .metric-detail {
+  display: flex;
+  flex-direction: column;
+}
+
+.metric-card .metric-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.metric-card .metric-val {
+  font-size: 13px;
+  font-weight: 800;
+  color: #f8fafc;
+  margin-top: 1px;
+}
+
+.metric-card .metric-val.highlight {
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-card .metric-val.success {
+  color: #6ee7b7;
+}
+
+:deep(.math-badge) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+  padding: 1px 6px;
+  border-radius: 5px;
+  margin: 0 2px;
 }
 
 /* Knowledge Strip */

@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { Close, Loading, MagicStick, Picture, Promotion, VideoPause } from '@element-plus/icons-vue';
 import ModelSelector from '../ModelSelector.vue';
 import { isImageGenerationInstruction } from '../../../utils/imageModelSelection';
 import type { PPTPolishModality } from '../../../types/project';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   targetSlide?: number | null;
   targetSlides?: number[];
   isRunning?: boolean;
@@ -13,7 +13,27 @@ const props = defineProps<{
   modelConfigId?: string | null;
   imageModelConfigId?: string | null;
   imageModelAvailableCount?: number;
-}>();
+  showImageModel?: boolean;
+  showModality?: boolean;
+  taskType?: string;
+  quickPrompts?: string[];
+  placeholder?: string;
+  unitName?: string;
+}>(), {
+  targetSlide: null,
+  targetSlides: () => [],
+  isRunning: false,
+  pausing: false,
+  modelConfigId: null,
+  imageModelConfigId: null,
+  imageModelAvailableCount: 0,
+  showImageModel: false,
+  showModality: false,
+  taskType: 'ppt',
+  quickPrompts: undefined,
+  placeholder: '',
+  unitName: '页',
+});
 
 const emit = defineEmits<{
   (e: 'send', text: string, modality: PPTPolishModality): void;
@@ -29,21 +49,74 @@ const inputRef = ref<HTMLTextAreaElement | null>(null);
 
 /** 润色范围选择：auto（自动）| layout（只改布局）| text（只改文字）| image（只改图片） */
 const modality = ref<PPTPolishModality>('auto');
-const modalityOptions: Array<{ value: PPTPolishModality; label: string; tip: string }> = [
-  { value: 'auto', label: '自动', tip: '由 Agent 按指令自动判断润色范围' },
-  { value: 'layout', label: '只改布局', tip: '只调整页面排版，不改文字与图片' },
-  { value: 'text', label: '只改文字', tip: '只优化文字表达，不动布局与图片' },
-  { value: 'image', label: '只改图片', tip: '只处理图片素材，不动文字与布局' },
-];
+const modalityOptions = computed<Array<{ value: PPTPolishModality; label: string; tip: string }>>(() => {
+  const list: Array<{ value: PPTPolishModality; label: string; tip: string }> = [
+    { value: 'auto', label: '自动', tip: '由 Agent 按指令自动判断润色范围' },
+    { value: 'layout', label: '只改布局', tip: '只调整页面排版，不改文字与图片' },
+    { value: 'text', label: '只改文字', tip: '只优化文字表达，不动布局与图片' },
+  ];
+  if (props.showImageModel) {
+    list.push({ value: 'image', label: '只改图片', tip: '只处理图片素材，不动文字与布局' });
+  }
+  return list;
+});
 
-const quickPrompts = [
-  '润色本页文字表达',
-  '调整本页排版与页面分布',
-  '优化教学目标与重难点表达',
-  '增加课堂互动与提问环节设计',
-  '精简课件页面文字与层级',
-  '补充教学案例与情境导入',
-];
+const defaultQuickPromptsByTask: Record<string, string[]> = {
+  lesson_plan: [
+    '润色教学目标表达',
+    '强化教学重点与难点突破',
+    '增加课堂互动与提问环节',
+    '优化教学过程时间分配',
+    '补充生活情境导入案例',
+  ],
+  ppt: [
+    '润色本页文字表达',
+    '调整本页排版与页面分布',
+    '优化教学目标与重难点表达',
+    '增加课堂互动与提问环节设计',
+    '精简课件页面文字与层级',
+    '补充教学案例与情境导入',
+  ],
+  task_sheet: [
+    '优化题目解析与参考答案',
+    '增加分层巩固练习题',
+    '调整习题难度梯度',
+    '补充变式训练与拓展思考',
+  ],
+  verbatim: [
+    '优化讲授语言表达',
+    '增加提问与互动过渡语',
+    '精简口播篇幅与语速节奏',
+    '强化重难点讲解细节',
+  ],
+  video_script: [
+    '优化分镜画面与视觉提示',
+    '调整解说词节奏与时长',
+    '增强视频转场衔接设计',
+    '补充板书与字幕设计',
+  ],
+};
+
+const effectiveQuickPrompts = computed(() => {
+  if (props.quickPrompts && props.quickPrompts.length) return props.quickPrompts;
+  return defaultQuickPromptsByTask[props.taskType] || defaultQuickPromptsByTask.ppt;
+});
+
+const effectivePlaceholder = computed(() => {
+  if (props.placeholder) return props.placeholder;
+  if (props.isRunning) return 'Agent 正在推演；输入新要求后可加入执行队列…';
+  const hasTarget = (props.targetSlide !== undefined && props.targetSlide !== null && props.targetSlide >= 0);
+  const targetText = hasTarget ? ` 第 ${(props.targetSlide ?? 0) + 1} ${props.unitName}` : '';
+  const taskNameMap: Record<string, string> = {
+    lesson_plan: '教学设计',
+    ppt: 'PPT 课件',
+    task_sheet: '课后练习',
+    verbatim: '教师逐字稿',
+    video_script: '视频脚本',
+  };
+  const taskName = taskNameMap[props.taskType] || '任务内容';
+  return `详细描述您希望如何修改${targetText} ${taskName}…`;
+});
 
 function adjustHeight() {
   nextTick(() => {
@@ -91,19 +164,15 @@ function handleGenerateImage() {
 function handleSubmit() {
   const rawText = input.value.trim();
   if (!rawText) return;
-  if (isImageGenerationInstruction(rawText) && !props.imageModelConfigId) {
+  if (props.showImageModel && isImageGenerationInstruction(rawText) && !props.imageModelConfigId) {
     emit('image-model-required');
     return;
   }
 
-  let finalText = rawText;
-  if (props.targetSlides?.length) {
-    finalText = `[针对第 ${props.targetSlides.map(index => index + 1).join('、')} 页] ${rawText}`;
-  } else if (props.targetSlide !== undefined && props.targetSlide !== null && props.targetSlide >= 0) {
-    finalText = `[针对第 ${props.targetSlide + 1} 页] ${rawText}`;
-  }
-
-  emit('send', finalText, modality.value);
+  // Page scope travels in target_slide_ids/active_slide_id. Keep the user's
+  // sentence untouched so text parsing cannot conflict with the same
+  // structured selection.
+  emit('send', rawText, modality.value);
   input.value = '';
   adjustHeight();
 }
@@ -117,13 +186,13 @@ function clearSlideTarget() {
   <div class="agent-composer-container" :class="{ disabled: isRunning }">
     <div class="composer-card">
       <!-- Quick Prompts Row (Top Suggestions) -->
-      <div class="composer-quick-bar">
+      <div v-if="effectiveQuickPrompts.length" class="composer-quick-bar">
         <span class="quick-label">
           <el-icon><MagicStick /></el-icon> 建议：
         </span>
         <div class="quick-chips">
           <button
-            v-for="chip in quickPrompts"
+            v-for="chip in effectiveQuickPrompts"
             :key="chip"
             type="button"
             class="quick-chip-btn"
@@ -134,18 +203,18 @@ function clearSlideTarget() {
         </div>
       </div>
 
-      <!-- Active Target Slide Context Chip -->
+      <!-- Active Target Slide/Section Context Chip -->
       <div v-if="targetSlides?.length || (targetSlide !== undefined && targetSlide !== null && targetSlide >= 0)" class="slide-target-chip">
         <span class="chip-dot" />
-        <span v-if="targetSlides?.length">修改范围：<strong>{{ targetSlides.map(index => index + 1).join('、') }} 页</strong></span>
-        <span v-else>已定位：<strong>第 {{ (targetSlide ?? 0) + 1 }} 页</strong></span>
-        <button type="button" class="clear-target-btn" title="清除页面定位" @click="clearSlideTarget">
+        <span v-if="targetSlides?.length">修改范围：<strong>{{ targetSlides.map(index => typeof index === 'number' ? index + 1 : index).join('、') }} {{ unitName }}</strong></span>
+        <span v-else>已定位：<strong>第 {{ (targetSlide ?? 0) + 1 }} {{ unitName }}</strong></span>
+        <button type="button" class="clear-target-btn" :title="`清除${unitName}定位`" @click="clearSlideTarget">
           <el-icon><Close /></el-icon>
         </button>
       </div>
 
-      <!-- 润色范围选择 -->
-      <div class="polish-modality" role="group" aria-label="润色范围">
+      <!-- 润色范围选择 (仅在开启 showModality 时展示) -->
+      <div v-if="showModality" class="polish-modality" role="group" aria-label="润色范围">
         <span class="modality-label">润色范围</span>
         <button
           v-for="m in modalityOptions"
@@ -167,7 +236,7 @@ function clearSlideTarget() {
           ref="inputRef"
           v-model="input"
           rows="2"
-          :placeholder="isRunning ? 'Agent 正在推演；输入新要求后可加入执行队列…' : (targetSlide !== undefined && targetSlide !== null && targetSlide >= 0 ? `详细描述您希望如何修改 第 ${targetSlide + 1} 页 PPT 课件…` : '详细描述您希望如何修改 PPT 课件…')"
+          :placeholder="effectivePlaceholder"
           @keydown="onKeydown"
         />
       </div>
@@ -183,6 +252,7 @@ function clearSlideTarget() {
             @change="emit('change-model', $event)"
           />
           <ModelSelector
+            v-if="showImageModel"
             :model-value="imageModelConfigId || null"
             capability="image_generation"
             compact
@@ -191,7 +261,7 @@ function clearSlideTarget() {
             @change="emit('change-image-model', $event)"
           />
           <RouterLink
-            v-if="!imageModelConfigId"
+            v-if="showImageModel && !imageModelConfigId"
             class="image-model-warning"
             to="/settings"
             title="图片生成采用严格模式；请先配置并选择具备 image_generation 能力的模型"
@@ -216,7 +286,7 @@ function clearSlideTarget() {
             <el-icon v-else><VideoPause /></el-icon>
           </button>
           <button
-            v-if="!isRunning && !props.imageModelConfigId"
+            v-if="showImageModel && !isRunning && !props.imageModelConfigId"
             type="button"
             class="send-circle-btn"
             title="一键生成图片"

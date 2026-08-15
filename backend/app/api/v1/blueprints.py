@@ -95,6 +95,14 @@ async def approve_blueprint(blueprint_id: str, user: User = Depends(current_user
     item.approved_at = datetime.now(timezone.utc)
     course.current_blueprint_version = item.version
     course.status = "resource_generating"
+    # 共享项目记忆：已批准蓝图进入项目记忆（同一事务，先写后 bump）。
+    from app.services.project_knowledge_service import bump, index_blueprint
+
+    await index_blueprint(db, item, created_by="teacher")
+    await bump(
+        db, course.id, f"蓝图 V{item.version} 已确认",
+        source_type="blueprint", source_id=item.id, created_by="teacher",
+    )
     await ensure_course_tasks(db, course.id)
     run, created = await create_initialization_run(db, course, "blueprint_updated")
     await db.commit()

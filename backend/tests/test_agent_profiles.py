@@ -197,7 +197,7 @@ async def test_profiles_gate_generation_are_traceable_and_version_on_context_cha
         client, auth_headers, course["id"],
         lambda item: item["agent_initialization"]["status"] == "ready"
         and all(task["current_artifact"] for task in item["tasks"] if task["task_type"] != "video_generation")
-        and next(task for task in item["tasks"] if task["task_type"] == "video_generation")["status"] == "ready_to_generate",
+        and next(task for task in item["tasks"] if task["task_type"] == "video_generation")["status"] == "waiting_dependency",
     )
     assert project["agent_initialization"]["version"] == 1
     assert all(task["agent_profile_status"] == "ready" for task in project["tasks"])
@@ -207,10 +207,12 @@ async def test_profiles_gate_generation_are_traceable_and_version_on_context_cha
     assert video_generation["agent_profile_summary"] is None
     assert video_generation["agent_profile_version"] == 0
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_script")
-    assert video_task["dependency_types"] == ["lesson_plan", "ppt"]
-    assert video_task["current_artifact"]["content_json"]["schema_version"] == "2.0"
-    assert video_task["current_artifact"]["prompt_version"] == "v2"
-    assert video_task["current_artifact"]["source_versions_json"].keys() >= {"lesson_plan", "ppt"}
+    # 共享项目记忆架构：video_script 不再有硬依赖（教学设计为可选参考，不阻塞启动）。
+    # 并行首稿时教学设计可能尚未生成，source_versions 记录"实际读取"的版本（可为空）。
+    assert video_task["dependency_types"] == []
+    assert video_task["optional_reference_types"] == ["lesson_plan"]
+    assert video_task["current_artifact"]["content_json"]["schema_version"] == "3.0"
+    assert video_task["current_artifact"]["prompt_version"] == "v3"
     artifacts = (await client.get(
         f"/api/v1/courses/{course['id']}/artifacts", headers=auth_headers,
     )).json()
@@ -238,6 +240,8 @@ async def test_profiles_gate_generation_are_traceable_and_version_on_context_cha
     )
     lesson = next(task for task in project["tasks"] if task["task_type"] == "lesson_plan")
     assert lesson["agent_profile_summary"]["audience"] == "需要更多视觉支架的八年级学生"
+    # 项目背景变化后：同步项目上下文（走通用分发，兼容旧客户端 action），
+    # 使用当前专属配置重新生成候选稿，stale_agent_profile 应清除。
     synced = await client.post(
         f"/api/v1/courses/{course['id']}/tasks/lesson_plan/runs", headers=auth_headers,
         json={"action": "sync_context"},

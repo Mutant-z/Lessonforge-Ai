@@ -88,8 +88,12 @@ def all_tools() -> list[Tool]:
 
 def all_tool_schemas(allowed_names: list[str] | None = None) -> list[dict[str, Any]]:
     ensure_loaded()
-    allowed = set(allowed_names or [])
-    return [tool.schema_dict() for tool in _REGISTRY.values() if not allowed or tool.name in allowed]
+    # ``None`` means an unfiltered catalog.  An explicit empty list is a real
+    # deny-all policy (control-only agents such as intent planners rely on it).
+    if allowed_names is None:
+        return [tool.schema_dict() for tool in _REGISTRY.values()]
+    allowed = set(allowed_names)
+    return [tool.schema_dict() for tool in _REGISTRY.values() if tool.name in allowed]
 
 
 _loaded = False
@@ -101,6 +105,9 @@ def ensure_loaded():
     if _loaded:
         return
     from app.agent import tools  # noqa: F401  触发 tools/__init__ 注册全部工具
+    from app.agent.tools import register_domain_tools  # noqa: F401  惰性注册领域工具
+
+    register_domain_tools()
     _loaded = True
 
 

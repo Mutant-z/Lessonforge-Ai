@@ -63,6 +63,9 @@ const TASK_EVENTS = [
   'qa.started', 'qa.issue', 'qa.completed', 'repair.started', 'repair.completed',
   'layout.compile.result', 'polish.result',
   'human.required', 'run.instruction.queued', 'run.instruction.merged',
+  'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
+  // 共享项目记忆事件
+  'project_memory.updated', 'context.snapshot_created', 'artifact.published', 'memory.source_read',
 ];
 
 /** 流水线事件被路由到项目 store 的收件箱，工作台据此渲染时间线 */
@@ -81,6 +84,7 @@ const PIPELINE_EVENT_TYPES = new Set([
   'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed', 'qa.started', 'qa.issue',
   'repair.started', 'repair.completed', 'human.required', 'run.instruction.queued', 'run.instruction.merged',
   'layout.compile.result', 'polish.result',
+  'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
 ]);
 
 function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessage[] {
@@ -277,6 +281,7 @@ export const useProjectStore = defineStore('project', {
       const epoch = ++this.taskRequestEpoch;
       this.hydrationStatus = 'loading_task_snapshot';
       this.viewedArtifact = null;
+      this.pipelineStatus = '';
       if (!this.project || this.project.course.id !== courseId) {
         await this.open(courseId);
       } else {
@@ -424,6 +429,180 @@ export const useProjectStore = defineStore('project', {
       this.startActiveTaskPolling(courseId, taskType);
       return data;
     },
+    /** 教学设计 V2：创建带章节作用域的 message 运行（流式执行时间线）。 */
+    async createLessonPlanRun(
+      courseId: string,
+      content: string,
+      selectedSectionIds: string[] = [],
+      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+      activeSectionId?: string,
+    ) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousPipelineEvents = this.pipelineEvents;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineEvents = [];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createLessonPlanRun(courseId, content, selectedSectionIds, mode, activeSectionId);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'lesson_plan');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.pipelineStatus = previousPipelineStatus;
+        throw cause;
+      }
+    },
+    /** 学习任务单 V3：创建带章节作用域的 message 运行（流式执行时间线）。 */
+    async createTaskSheetRun(
+      courseId: string,
+      content: string,
+      selectedSectionIds: string[] = [],
+      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+    ) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousPipelineEvents = this.pipelineEvents;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineEvents = [];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createTaskSheetRun(courseId, content, selectedSectionIds, mode);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'task_sheet');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.pipelineStatus = previousPipelineStatus;
+        throw cause;
+      }
+    },
+    /** 教师逐字稿 V2：创建带章节作用域的 message 运行（流式执行时间线）。 */
+    async createVerbatimRun(
+      courseId: string,
+      content: string,
+      selectedSectionIds: string[] = [],
+      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+    ) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousPipelineEvents = this.pipelineEvents;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineEvents = [];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createVerbatimRun(courseId, content, selectedSectionIds, mode);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'verbatim');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.pipelineStatus = previousPipelineStatus;
+        throw cause;
+      }
+    },
+    /** 视频脚本 V4：创建带章节/分镜作用域的 message 运行（流式执行时间线）。 */
+    async createVideoScriptRun(
+      courseId: string,
+      content: string,
+      selectedSectionIds: string[] = [],
+      selectedSceneIds: string[] = [],
+      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+    ) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousPipelineEvents = this.pipelineEvents;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineEvents = [];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createVideoScriptRun(courseId, content, selectedSectionIds, selectedSceneIds, mode);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'video_script');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.pipelineStatus = previousPipelineStatus;
+        throw cause;
+      }
+    },
+    async cancelTask(courseId: string, taskType: string) {
+      const { data } = await api.post<{ task_id: string; status: CourseTask['status'] }>(
+        `/courses/${courseId}/tasks/${taskType}/cancel`,
+      );
+      if (this.currentTask?.id === data.task_id) {
+        this.currentTask.status = data.status;
+        this.currentTask.active_run_id = null;
+        this.currentTask.error = null;
+        this.replaceTask(this.currentTask);
+      }
+      this.stopActiveTaskPolling();
+      // Pull the durable terminal snapshot so a late progress event cannot keep
+      // controls disabled after cancellation.
+      await this.refreshCurrentTask();
+      return data;
+    },
     async initializeAgents(courseId: string) {
       const { data } = await api.post(`/courses/${courseId}/agent-initialization/runs`);
       if (this.project) {
@@ -452,6 +631,15 @@ export const useProjectStore = defineStore('project', {
     async setTaskModel(courseId: string, taskType: string, modelConfigId: string) {
       const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType}/model`, { model_config_id: modelConfigId });
       if (this.currentTask) this.currentTask.model_config_id = data.model_config_id;
+      return data;
+    },
+    async loadMemory(courseId: string) {
+      const { data } = await api.get(`/courses/${courseId}/memory`);
+      if (this.project && this.project.course.id === courseId) this.project.memory = data;
+      return data;
+    },
+    async searchMemory(courseId: string, query: string) {
+      const { data } = await api.get(`/courses/${courseId}/memory/search`, { params: { q: query } });
       return data;
     },
     async setTaskImageModel(courseId: string, taskType: string, modelConfigId: string) {
@@ -490,7 +678,9 @@ export const useProjectStore = defineStore('project', {
           else messages.push(userMessage);
           this.currentTask.messages = deduplicateMessages(messages);
         }
-        if (event.status) this.pipelineStatus = event.status;
+        const isCurrentRun = (!event.task_id || event.task_id === this.currentTask?.id)
+          && (!event.run_id || event.run_id === this.currentTask?.active_run_id);
+        if (event.status && isCurrentRun) this.pipelineStatus = event.status;
         if (this.pipelineEvents.length > 800) this.pipelineEvents.splice(0, this.pipelineEvents.length - 800);
         return;
       }
@@ -498,6 +688,44 @@ export const useProjectStore = defineStore('project', {
         this.project.planning.status = event.status || 'ready';
         this.project.planning.progress = event.progress || 0;
         if (event.status === 'ready') this.refreshTasks();
+        return;
+      }
+      // 共享项目记忆：快照创建事件更新当前任务的记忆版本与可用来源清单。
+      if (type === 'context.snapshot_created') {
+        if (this.currentTask) {
+          if (typeof event.memory_revision === 'number') {
+            this.currentTask.memory_revision = event.memory_revision;
+            this.currentTask.last_context_revision = event.memory_revision;
+          }
+          const manifest = (event as any).context_manifest;
+          if (manifest && typeof manifest === 'object') {
+            this.currentTask.available_sources = manifest.available_sources || this.currentTask.available_sources || {};
+            this.currentTask.missing_optional_sources = manifest.missing_optional_sources || [];
+          }
+        }
+        if (event.task_id && this.project) {
+          const task = this.project.tasks.find(item => item.id === event.task_id);
+          if (task) {
+            if (typeof event.memory_revision === 'number') {
+              task.memory_revision = event.memory_revision;
+              task.last_context_revision = event.memory_revision;
+            }
+            const manifest = (event as any).context_manifest;
+            if (manifest && typeof manifest === 'object') {
+              task.available_sources = manifest.available_sources || task.available_sources || {};
+              task.missing_optional_sources = manifest.missing_optional_sources || [];
+            }
+          }
+        }
+        return;
+      }
+      // 共享项目记忆：版本推进 → 刷新任务快照（获取最新 available_sources）。
+      if (type === 'project_memory.updated') {
+        this.refreshTasks();
+        return;
+      }
+      if (type === 'memory.source_read') {
+        // 只读事件，用于时间线展示；无需额外状态变更。
         return;
       }
       if (type.startsWith('agent_initialization_') && this.project) {

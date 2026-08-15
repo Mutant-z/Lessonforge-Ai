@@ -98,6 +98,12 @@ class PageLayoutSpec(BaseModel):
     requested_objectives: list[dict[str, Any]] = Field(default_factory=list)
     candidate_rankings: list[dict[str, Any]] = Field(default_factory=list)
     selected_candidate_id: str | None = None
+    decision: Literal["applied", "preview_required", "preserved"] = "applied"
+    best_candidate_id: str | None = None
+    best_candidate_metrics: dict[str, Any] = Field(default_factory=dict)
+    best_candidate_quality_delta: float = 0.0
+    rejection_code: str = ""
+    rejection_reasons: list[str] = Field(default_factory=list)
     material_change: bool = True
     candidate_score_gap: float | None = None
     requires_candidate_confirmation: bool = False

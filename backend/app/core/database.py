@@ -72,10 +72,15 @@ async def create_schema() -> None:
                     "course_task_id": "VARCHAR(36)",
                     "trigger_type": "VARCHAR(30) NOT NULL DEFAULT 'initial'",
                     "agent_profile_id": "VARCHAR(36)",
+                    "memory_revision": "INTEGER NOT NULL DEFAULT 0",
+                    "context_manifest_json": "JSON NOT NULL DEFAULT '{}'",
+                    "context_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+                    "batch_id": "VARCHAR(40) NOT NULL DEFAULT ''",
                 },
                 "artifacts": {
                     "source_versions_json": "JSON NOT NULL DEFAULT '{}'",
                     "agent_profile_id": "VARCHAR(36)",
+                    "memory_revision_created": "INTEGER NOT NULL DEFAULT 0",
                 },
                 "agent_messages": {
                     "task_id": "VARCHAR(36)",
@@ -87,6 +92,9 @@ async def create_schema() -> None:
                     "current_agent_profile_id": "VARCHAR(36)",
                     "agent_profile_status": "VARCHAR(30) NOT NULL DEFAULT 'pending'",
                     "agent_profile_error_json": "JSON",
+                    "optional_reference_types_json": "JSON NOT NULL DEFAULT '[]'",
+                    "required_input_contract_json": "JSON NOT NULL DEFAULT '{}'",
+                    "last_context_revision": "INTEGER NOT NULL DEFAULT 0",
                 },
                 "agent_chat_sessions": {
                     "image_model_config_id": "VARCHAR(36)",
@@ -101,6 +109,11 @@ async def create_schema() -> None:
                 },
                 "pipeline_tool_calls": {
                     "model_call_id": "VARCHAR(120) NOT NULL DEFAULT ''",
+                },
+                "video_scene_jobs": {
+                    "api_mode": "VARCHAR(50) NOT NULL DEFAULT ''",
+                    "provider_file_id": "VARCHAR(200) NOT NULL DEFAULT ''",
+                    "actual_model_name": "VARCHAR(120) NOT NULL DEFAULT ''",
                 },
             }
             for table_name, definitions in compatibility_columns.items():

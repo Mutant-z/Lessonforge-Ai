@@ -9,6 +9,8 @@ from app.api.deps import current_user, owned_course
 from app.api.v1.projects import TASK_SPEC_BY_TYPE, _owned_task  # noqa: F401 复用任务归属校验
 from app.core.database import SessionLocal, get_db
 from app.models.entities import (
+    AgentHumanRequest,
+    AgentRunInstruction,
     CourseProject,
     CourseTask,
     GenerationRun,
@@ -55,6 +57,12 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
     events = list(await db.scalars(select(PipelineEvent).where(
         PipelineEvent.pipeline_run_id == pipeline_run.id,
     ).order_by(PipelineEvent.sequence)))
+    instructions = list(await db.scalars(select(AgentRunInstruction).where(
+        AgentRunInstruction.pipeline_run_id == pipeline_run.id,
+    ).order_by(AgentRunInstruction.created_at)))
+    human_requests = list(await db.scalars(select(AgentHumanRequest).where(
+        AgentHumanRequest.pipeline_run_id == pipeline_run.id,
+    ).order_by(AgentHumanRequest.created_at)))
 
     def _artifact(row) -> dict:
         return {
@@ -66,10 +74,13 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
         }
 
     def _tool(row) -> dict:
+        error = row.error_json or {}
         return {
             "id": row.id, "model_call_id": row.model_call_id, "agent_key": row.agent_key, "tool_name": row.tool_name,
             "input": row.input_json, "output": row.output_json, "status": row.status,
             "duration_ms": row.duration_ms, "error": row.error_json,
+            "error_code": error.get("code"), "error_message": error.get("message"),
+            "retryable": bool(error.get("retryable", False)),
             "created_at": row.created_at.isoformat() if row.created_at else "",
         }
 
@@ -93,6 +104,23 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
         "artifacts": [_artifact(row) for row in artifacts],
         "tool_calls": [_tool(row) for row in tool_calls],
         "events": [_event(row) for row in events],
+        "instructions": [
+            {
+                "id": row.id, "content": row.content, "status": row.status,
+                "client_instruction_id": row.client_instruction_id,
+                "created_at": row.created_at.isoformat() if row.created_at else "",
+                "applied_at": row.applied_at.isoformat() if row.applied_at else "",
+            }
+            for row in instructions
+        ],
+        "human_requests": [
+            {
+                "id": row.id, "type": row.request_type, "prompt": row.prompt,
+                "options": row.options_json, "status": row.status,
+                "response": row.response_json,
+            }
+            for row in human_requests
+        ],
     }
 
 

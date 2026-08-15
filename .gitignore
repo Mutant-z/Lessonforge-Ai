@@ -78,5 +78,26 @@ temp/
 logs/
 .runtime/
 
-# Claude Code local settings
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# AI & Agent Assistants
+.zcode/
 .claude/
+.claude.json
+.cursor/
+.windsurf/
+.cline/
+.roo/
+.roomodes
+.aider*
+.continue/
+.superpowers/
+.agent/
+.agents/
+

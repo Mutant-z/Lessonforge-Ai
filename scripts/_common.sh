@@ -8,6 +8,16 @@ BACKEND_PID_FILE="$RUNTIME_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUNTIME_DIR/frontend.pid"
 BACKEND_LOG="$RUNTIME_DIR/backend.log"
 FRONTEND_LOG="$RUNTIME_DIR/frontend.log"
+BACKEND_LAUNCH_LOG="$RUNTIME_DIR/backend-launchd.log"
+FRONTEND_LAUNCH_LOG="$RUNTIME_DIR/frontend-launchd.log"
+
+# `nohup ... &` is not enough in desktop/agent environments: the host may reap
+# every process that still belongs to the completed command session.  On macOS
+# we therefore submit the dev servers to the user's launchd domain.  Include a
+# stable project-path checksum so multiple LessonForge checkouts do not collide.
+PROJECT_LAUNCH_ID="$(printf '%s' "$PROJECT_DIR" | cksum | awk '{print $1}')"
+BACKEND_LAUNCH_LABEL="com.lessonforge.ai.${PROJECT_LAUNCH_ID}.backend"
+FRONTEND_LAUNCH_LABEL="com.lessonforge.ai.${PROJECT_LAUNCH_ID}.frontend"
 
 mkdir -p "$RUNTIME_DIR"
 
@@ -29,6 +39,51 @@ is_running() {
   local pid
   pid="$(read_pid "$pid_file" 2>/dev/null || true)"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+launchd_available() {
+  [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1
+}
+
+launchd_target() {
+  local label="$1"
+  printf 'gui/%s/%s' "$(id -u)" "$label"
+}
+
+launchd_service_exists() {
+  local label="$1"
+  launchd_available && launchctl print "$(launchd_target "$label")" >/dev/null 2>&1
+}
+
+launchd_service_pid() {
+  local label="$1"
+  launchd_available || return 1
+  launchctl print "$(launchd_target "$label")" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' \
+    | head -n 1
+}
+
+remove_launchd_service() {
+  local label="$1"
+  if launchd_service_exists "$label"; then
+    launchctl remove "$label" >/dev/null 2>&1 || true
+  fi
+}
+
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local attempts="${3:-40}"
+  local attempt=0
+  while [ "$attempt" -lt "$attempts" ]; do
+    if curl --silent --show-error --fail --max-time 1 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  echo "错误：${name}进程已启动，但 HTTP 就绪检查失败（${url}）。" >&2
+  return 1
 }
 
 remove_stale_pid() {

@@ -13,6 +13,26 @@ const emit = defineEmits<{
   (e: 'restore', version: Artifact): void;
   (e: 'close'): void;
 }>();
+
+function isContentAnomalous(version: Artifact): boolean {
+  if (version.artifact_type !== 'lesson_plan' || version.content_json?.schema_version !== '2.0') return false;
+  const sections = (version.content_json?.outline as { sections?: Array<Record<string, unknown>> } | undefined)?.sections || [];
+  let leafCount = 0;
+  let visibleLeafCount = 0;
+  const visit = (items: Array<Record<string, unknown>>) => {
+    for (const item of items) {
+      const children = Array.isArray(item.children) ? item.children as Array<Record<string, unknown>> : [];
+      if (children.length) visit(children);
+      else {
+        leafCount += 1;
+        const blocks = Array.isArray(item.blocks) ? item.blocks : [];
+        if (blocks.length || String(item.summary || '').trim()) visibleLeafCount += 1;
+      }
+    }
+  };
+  visit(sections);
+  return leafCount > 0 && visibleLeafCount === 0;
+}
 </script>
 
 <template>
@@ -34,6 +54,7 @@ const emit = defineEmits<{
         <div class="v-meta">
           <span class="v-tag">Version {{ v.version }}</span>
           <span v-if="v.version === currentVersion" class="current-badge">当前使用中</span>
+          <span v-else-if="isContentAnomalous(v)" class="anomaly-badge">正文异常，建议勿用</span>
         </div>
         <p class="v-summary">{{ v.change_summary || '编辑修改产物' }}</p>
         <span class="v-time">
@@ -94,6 +115,12 @@ const emit = defineEmits<{
 .current-badge {
   font-size: 11px;
   color: var(--color-success);
+  font-weight: 700;
+}
+
+.anomaly-badge {
+  font-size: 11px;
+  color: var(--color-danger);
   font-weight: 700;
 }
 

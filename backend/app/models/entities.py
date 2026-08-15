@@ -191,6 +191,8 @@ class Artifact(Base, TimestampMixin):
         ForeignKey("course_task_agent_profiles.id", ondelete="SET NULL"), nullable=True, index=True
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 该版本创建时读取的项目记忆版本（用于追溯"产物基于哪一版记忆生成"）。
+    memory_revision_created: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class ArtifactLock(Base, TimestampMixin):
@@ -220,6 +222,12 @@ class GenerationRun(Base, TimestampMixin):
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 本次运行读取的项目记忆版本与上下文快照（溯源：实际读了哪些 Artifact 版本）。
+    memory_revision: Mapped[int] = mapped_column(Integer, default=0)
+    context_manifest_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    context_hash: Mapped[str] = mapped_column(String(64), default="")
+    #: 并行首稿批次标识：同一批并行启动的内容 Agent 共享同一记忆快照。
+    batch_id: Mapped[str] = mapped_column(String(40), default="", index=True)
 
 
 class GenerationStep(Base, TimestampMixin):
@@ -255,12 +263,50 @@ class VideoSceneJob(Base, TimestampMixin):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    request_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    provider: Mapped[str] = mapped_column(String(50), default="")
+    api_mode: Mapped[str] = mapped_column(String(50), default="")
+    model_name: Mapped[str] = mapped_column(String(120), default="")
+    provider_file_id: Mapped[str] = mapped_column(String(200), default="", index=True)
+    actual_model_name: Mapped[str] = mapped_column(String(120), default="")
+    reference_asset_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    actual_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_fen: Mapped[int] = mapped_column(Integer, default=0)
+    actual_cost_fen: Mapped[int] = mapped_column(Integer, default=0)
+    usage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    qa_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_asset_id: Mapped[str | None] = mapped_column(
         ForeignKey("artifact_assets.id", ondelete="SET NULL"), nullable=True
     )
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VideoGenerationQuote(Base, TimestampMixin):
+    __tablename__ = "video_generation_quotes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("course_projects.id", ondelete="CASCADE"), index=True
+    )
+    script_artifact_id: Mapped[str] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="CASCADE"), index=True
+    )
+    model_config_id: Mapped[str] = mapped_column(
+        ForeignKey("model_configs.id", ondelete="CASCADE"), index=True
+    )
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    scenes_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_fen: Mapped[int] = mapped_column(Integer, default=0)
+    maximum_cost_fen: Mapped[int] = mapped_column(Integer, default=0)
+    currency: Mapped[str] = mapped_column(String(10), default="CNY")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GenerationEvent(Base):
@@ -416,6 +462,44 @@ class PPTHumanRequest(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentHumanRequest(Base, TimestampMixin):
+    """通用人工确认请求（教学设计等非 PPT 流水线复用）。
+
+    字段与 ppt_human_requests 完全领域无关；PPT 专用表保持兼容不迁移。
+    """
+
+    __tablename__ = "agent_human_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    request_type: Mapped[str] = mapped_column(String(60))
+    prompt: Mapped[str] = mapped_column(Text)
+    options_json: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentRunInstruction(Base, TimestampMixin):
+    """运行中追加的教师指令（方案 §3.2 持久化）。
+
+    client_instruction_id 用于幂等提交；status 为 queued/merged/superseded/cancelled。
+    运行在每次工具完成、Agent 完成和 LLM 调用前的安全边界原子消费 queued 指令，
+    合并到当前目标并触发意图重识别（plan.revised）。
+    """
+
+    __tablename__ = "agent_run_instructions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    pipeline_run_id: Mapped[str] = mapped_column(ForeignKey("pipeline_runs.id", ondelete="CASCADE"), index=True)
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    client_instruction_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class PPTTemplateProfile(Base, TimestampMixin):
@@ -586,6 +670,12 @@ class CourseTask(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="waiting_dependency", index=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     dependency_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    #: 共享项目记忆时代的可选参考来源（不再控制启动顺序，仅影响上下文快照内容）。
+    optional_reference_types_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    #: 运行输入契约：执行时必须满足的事实条件（如视频生成必须存在 V3/V4 脚本）。
+    required_input_contract_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    #: 该任务最近一次运行实际读取的项目记忆版本。
+    last_context_revision: Mapped[int] = mapped_column(Integer, default=0)
     current_artifact_id: Mapped[str | None] = mapped_column(
         ForeignKey("artifacts.id", ondelete="SET NULL"), nullable=True
     )
@@ -632,3 +722,45 @@ class CourseTaskAgentProfile(Base, TimestampMixin):
     model_name: Mapped[str] = mapped_column(String(120), default="")
     status: Mapped[str] = mapped_column(String(30), default="initializing", index=True)
     error_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+class ProjectMemoryRevision(Base):
+    """项目记忆版本流水：单调递增 revision，记录变更原因与来源。"""
+
+    __tablename__ = "project_memory_revisions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("course_projects.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, index=True)
+    change_reason: Mapped[str] = mapped_column(String(300), default="")
+    source_type: Mapped[str] = mapped_column(String(40), default="")
+    source_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(30), default="system")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ProjectMemoryItem(Base, TimestampMixin):
+    """共享项目记忆统一索引：需求/蓝图/材料/Artifact/决策/QA/对话摘要。
+
+    原始文件与完整 Artifact 仍保留在各自表中；这里只存结构化摘要与引用，
+    供 Agent 上下文快照、项目记忆面板与检索使用。按 course_id 严格隔离。
+    """
+
+    __tablename__ = "project_memory_items"
+    __table_args__ = (UniqueConstraint("course_id", "source_type", "source_id"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    course_id: Mapped[str] = mapped_column(
+        ForeignKey("course_projects.id", ondelete="CASCADE"), index=True
+    )
+    #: requirement | blueprint | material | artifact | decision | qa | dialogue
+    source_type: Mapped[str] = mapped_column(String(40), index=True)
+    source_id: Mapped[str] = mapped_column(String(120), index=True)
+    source_version: Mapped[int] = mapped_column(Integer, default=0)
+    artifact_type: Mapped[str] = mapped_column(String(40), default="")
+    summary_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content_ref: Mapped[str] = mapped_column(String(300), default="")
+    keywords_json: Mapped[list] = mapped_column(JSON, default=list)
+    trust_level: Mapped[str] = mapped_column(String(20), default="agent_generated")
+    memory_revision: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    created_by: Mapped[str] = mapped_column(String(30), default="system")

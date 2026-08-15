@@ -1056,10 +1056,10 @@ async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkey
         "body": ["正文"], "blocks": [], "speaker_notes": "", "duration_seconds": 60,
         "render_mode": "absolute", "elements": [
             {"id": "E1", "kind": "textbox", "role": "title", "content_ref": "title",
-             "text": "标题", "x": 1.0, "y": 0.6, "w": 8.0, "h": 0.8,
+             "text": "标题", "x": 2.2, "y": 0.6, "w": 8.0, "h": 0.8,
              "style": {"size": 28}},
             {"id": "E2", "kind": "textbox", "role": "body", "content_ref": "body.0",
-             "text": "正文", "x": 1.0, "y": 1.8, "w": 8.0, "h": 3.8,
+             "text": "正文", "x": 2.2, "y": 1.8, "w": 8.0, "h": 3.8,
              "style": {"size": 18}},
         ],
     }
@@ -1080,7 +1080,10 @@ async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkey
         selected_slide_ids=["slide_01"], affected_slide_ids=["slide_01"],
         baseline_slides=[source], source_artifact=SimpleNamespace(content_json={"slides": [source]}),
         layout_engine_params={"quality_mode": "polish_v2", "operations": [{"domain": "layout"}]},
-        render_coverage={}, layout_compile_results=[], result_status="applied",
+        render_coverage={}, layout_compile_results=[{
+            "slide_id": "slide_01", "status": "applied", "decision": "applied",
+            "material_change": True, "warnings": [],
+        }], result_status="applied",
         mutation_applied=True,
     )
 
@@ -1093,6 +1096,9 @@ async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkey
     assert result.output["qa_level"] == "geometry"
     assert result.output["degraded"] is True
     assert runtime.result_status == "no_change"
+    assert runtime.layout_compile_results[0]["decision"] == "preserved"
+    assert runtime.layout_compile_results[0]["rejection_code"] == "render_unavailable"
+    assert runtime.layout_compile_results[0]["material_change"] is False
     assert any(
         issue["rule_id"] == "layout.candidate_preserved"
         for issue in result.output["issues"]
@@ -1164,6 +1170,94 @@ async def test_image_geometry_round_trip_only_changes_existing_visual_box(tmp_pa
     assert final_image["w"] == pytest.approx(2.2)
     assert final_image["h"] == pytest.approx(2.2)
     assert runtime.affected_slide_ids == ["slide_01"]
+
+
+@pytest.mark.asyncio
+async def test_polished_cover_with_right_visual_passes_staging_and_preserves_asset(tmp_path):
+    """Regression for run 2fa1a91a: cover copy and purpose must survive staging."""
+    from app.agent.layouts.engine import compile_layout
+
+    image_path = tmp_path / "submarine.png"
+    Image.new("RGB", (640, 480), "teal").save(image_path)
+    source = {
+        "id": "slide_01", "page_type": "cover",
+        "title": "探秘浮力成因与阿基米德原理",
+        "purpose": "创设潜水艇下潜情境，明确翻转预习目标，激发探究兴趣",
+        "body": [
+            "八年级物理 · 10分钟翻转预习微课",
+            "核心思考：潜水艇向深水下潜，受到的浮力会变大吗？",
+            "探究路径：解构液体上下压力差，实验推导阿基米德原理",
+        ],
+        "blocks": [], "speaker_notes": "原备注", "duration_seconds": 30,
+        "render_mode": "absolute",
+        "elements": [
+            {"id": "T1", "kind": "textbox", "role": "title", "content_ref": "title",
+             "text": "探秘浮力成因与阿基米德原理", "x": 3.0, "y": 0.8,
+             "w": 4.0, "h": 1.1, "style": {"size": 28, "bold": True}},
+            {"id": "B1", "kind": "textbox", "role": "body", "content_ref": "body",
+             "text": "\n".join([
+                 "八年级物理 · 10分钟翻转预习微课",
+                 "核心思考：潜水艇向深水下潜，受到的浮力会变大吗？",
+                 "探究路径：解构液体上下压力差，实验推导阿基米德原理",
+             ]), "x": 3.0, "y": 2.1, "w": 4.0, "h": 2.2,
+             "style": {"size": 15}},
+            {"id": "P1", "kind": "textbox", "role": "purpose", "content_ref": "purpose",
+             "text": "创设潜水艇下潜情境，明确翻转预习目标，激发探究兴趣",
+             "x": 3.2, "y": 4.8, "w": 3.6, "h": 1.4, "style": {"size": 14}},
+            {"id": "I1", "kind": "image", "role": "visual",
+             "asset_id": "submarine-asset", "asset_path": str(image_path),
+             "x": 7.8, "y": 1.7, "w": 4.7, "h": 3.525, "style": {}},
+        ],
+    }
+    directive = {
+        "slide_id": "slide_01", "layout_type": "cover_left", "polish_mode": True,
+        "style": {
+            "font_tier": "default", "font_scale": 1.10,
+            "gap_scale": 1.15, "highlight": True,
+        },
+        "visual_region": {"x": 7.8, "y": 1.7, "w": 4.7, "h": 3.525},
+        "visual_type": "image",
+        "objectives": [
+            {"metric": "alignment", "direction": "optimize", "hard_requirement": False},
+        ],
+    }
+    compiled = compile_layout("lessonforge_deck_smart_ai", source, directive)
+    builder = PresentationBuilder().from_ppt_content({
+        "theme": "lessonforge_deck_smart_ai", "slides": [source],
+    })
+    runtime = SimpleNamespace(
+        active_intent="LAYOUT_ONLY", content_policy="preserve",
+        selected_slide_ids=["slide_01"], baseline_slides=[deepcopy(source)],
+        source_artifact=SimpleNamespace(content_json={
+            "theme": "lessonforge_deck_smart_ai", "slides": [source],
+        }),
+        affected_slide_ids=[], mutation_evidence=[], mutation_applied=False,
+        layout_compile_results=[compiled], result_status="applied", draft_artifact_id=None,
+        layout_engine_params={
+            "quality_mode": "polish_v2",
+            "operations": [{"domain": "layout"}, {"domain": "typography"}],
+            "objectives": directive["objectives"],
+        },
+    )
+
+    result = await execute_tool(
+        "layout_slide_batch",
+        ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime),
+        {"layouts": [compiled]},
+    )
+
+    assert result.ok
+    assert result.output["placed"] > 0
+    assert result.output["preserved_slide_ids"] == []
+    final = builder.get_slide("slide_01")
+    assert {item.get("content_ref") for item in final["elements"]} >= {
+        "title", "body", "purpose",
+    }
+    body = next(item for item in final["elements"] if item.get("content_ref") == "body")
+    assert body["style"]["size"] >= 18
+    images = [item for item in final["elements"] if item.get("kind") == "image"]
+    assert [item.get("asset_id") for item in images] == ["submarine-asset"]
+    assert images[0]["asset_path"] == str(image_path)
 
 
 @pytest.mark.asyncio

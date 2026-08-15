@@ -56,6 +56,13 @@ const polishTitle = computed(() => {
   return applied ? `已安全润色 ${applied} 页` : '页面润色已完成';
 });
 const closeCandidatePage = computed(() => pageResults.value.find(page => page.requires_candidate_confirmation && (page.candidate_rankings?.length || 0) >= 2));
+const pageLabel = (page: PPTPolishPageResult) => page.display_label
+  || (page.page_number ? `第 ${page.page_number} 页` : page.slide_id);
+const displayedDelta = (page: PPTPolishPageResult) => Number(
+  page.decision === 'preserved'
+    ? page.best_candidate_quality_delta ?? page.quality_delta ?? 0
+    : page.quality_delta ?? 0,
+);
 </script>
 
 <template>
@@ -94,11 +101,16 @@ const closeCandidatePage = computed(() => pageResults.value.find(page => page.re
         <div v-if="eventData.warnings?.length" class="event-sub warn">{{ eventData.warnings[0] }}</div>
         <div v-if="pageResults.length" class="result-pages">
           <span v-for="page in pageResults.slice(0, 4)" :key="page.slide_id" :class="page.status || page.compile_status">
-            {{ page.slide_id }} · {{ (page.status || page.compile_status) === 'preserved' ? '保留' : `+${Number(page.quality_delta || 0).toFixed(1)}` }}
+            {{ pageLabel(page) }} · {{ (page.status || page.compile_status) === 'preserved'
+              ? `保留（最佳尝试 ${displayedDelta(page) >= 0 ? '+' : ''}${displayedDelta(page).toFixed(1)}）`
+              : `+${displayedDelta(page).toFixed(1)}` }}
           </span>
         </div>
+        <div v-if="pageResults[0]?.rejection_reasons?.length" class="event-sub warn">
+          {{ pageResults[0].rejection_reasons?.[0] }}
+        </div>
         <div v-if="closeCandidatePage" class="candidate-inline">
-          <strong>{{ closeCandidatePage.slide_id }} 两个候选评分接近：</strong>
+          <strong>{{ pageLabel(closeCandidatePage) }}两个候选评分接近：</strong>
           <span v-for="candidate in closeCandidatePage.candidate_rankings?.slice(0, 2)" :key="candidate.candidate_id">
             {{ candidate.layout_type || candidate.candidate_id }} {{ candidate.quality_score ?? '—' }}
           </span>

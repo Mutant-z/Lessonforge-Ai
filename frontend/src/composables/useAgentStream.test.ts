@@ -153,6 +153,24 @@ describe('buildStreamNodes', () => {
     expect(turns[1].replies.map(node => node.content)).toEqual(['第二页检查完成']);
   });
 
+  it('hydrates the same flattened tool error fields after a refresh', () => {
+    const turns = buildAgentTurns([
+      item(1, 'tool_call_started', {
+        run_id: 'run-1', tool_call_id: 'tool-1', tool_name: 'lesson_validate_alignment',
+      }),
+    ], {}, [], [{
+      id: 'tool-1', tool_name: 'lesson_validate_alignment', input: {}, output: {},
+      status: 'failed', duration_ms: 12,
+      error: { code: 'blueprint_invalid', message: '原始异常', retryable: false },
+      error_code: 'blueprint_invalid', error_message: '质量检查输入异常', retryable: false,
+    }]);
+
+    expect(turns[0].trace[1]).toMatchObject({
+      kind: 'tool', running: false, ok: false,
+      errorCode: 'blueprint_invalid', error: '质量检查输入异常', retryable: false,
+    });
+  });
+
   it('pairs legacy messages without run ids into chronological turns', () => {
     const turns = buildAgentTurns([], {}, [
       { id: 'u1', role: 'user', content: '第一轮', status: 'completed' },

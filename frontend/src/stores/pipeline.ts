@@ -56,11 +56,21 @@ export const usePipelineStore = defineStore('pipeline', {
     plan: state => (state.detail?.plan as Array<Record<string, any>>) ?? [],
     timeline(state): PipelineTimelineItem[] {
       const project = useProjectStore();
-      const live = project.pipelineEvents.map(event => ({
-        id: event.event_id,
-        type: event.type,
-        data: event.data,
-      }));
+      const currentRunId = String(state.detail?.run?.generation_run_id || project.currentTask?.active_run_id || '');
+      const currentTaskId = String(project.currentTask?.id || '');
+      const live = project.pipelineEvents
+        .filter(event => {
+          const evRunId = String(event.data?.run_id || '');
+          const evTaskId = String(event.data?.task_id || '');
+          if (currentRunId && evRunId) return evRunId === currentRunId;
+          if (currentTaskId && evTaskId) return evTaskId === currentTaskId;
+          return !currentRunId && !evRunId && !evTaskId;
+        })
+        .map(event => ({
+          id: event.event_id,
+          type: event.type,
+          data: event.data,
+        }));
       const history = (state.detail?.events ?? []).map(event => ({
         id: event.id,
         type: event.event_type,
@@ -176,11 +186,81 @@ export const usePipelineStore = defineStore('pipeline', {
           || String(data.course_id || currentTask.course_id) !== currentTask.course_id
           || String(data.task_id || currentTask.id) !== currentTask.id
           || runId !== String(this.run?.generation_run_id || '')) return;
-        const draft = { ...(this.draftArtifact || {}), slides: [...((this.draftArtifact?.slides as any[]) || [])] } as Record<string, any>;
+        const existing = this.draftArtifact || {};
+        const draft = { ...existing } as Record<string, any>;
+        // 任务单 V3：sections 目录树 / Block 局部更新；初始化与迁移整文档替换。
+        const isTaskSheetV3Draft = Array.isArray(draft.sections) || data.artifact_type === 'task_sheet';
         let applied = false;
         for (const operation of data.patch as Array<Record<string, any>>) {
-          const match = typeof operation.path === 'string' && operation.path.match(/^\/slides\/(\d+)$/);
+          const path = String(operation.path || '');
+          if (isTaskSheetV3Draft) {
+            if (!Array.isArray(draft.sections)) draft.sections = [];
+            if (operation.op === 'replace' && path === '') {
+              // 整文档替换（初始化 / 迁移）
+              Object.assign(draft, operation.value || {});
+              applied = true;
+              continue;
+            }
+            const addMatch = path.match(/^\/sections\/([^/]+)$/);
+            if (addMatch && operation.op === 'add' && operation.value) {
+              const sectionId = decodeURIComponent(addMatch[1]);
+              const sections = draft.sections as any[];
+              const exists = sections.some((item: any) => item.id === sectionId);
+              if (!exists) sections.push(operation.value);
+              applied = true;
+              continue;
+            }
+            const removeMatch = path.match(/^\/sections\/([^/]+)$/);
+            if (removeMatch && operation.op === 'remove') {
+              draft.sections = (draft.sections as any[]).filter((item: any) => item.id !== decodeURIComponent(removeMatch[1]));
+              applied = true;
+              continue;
+            }
+            const fieldMatch = path.match(/^\/sections\/([^/]+)\/([^/]+)$/);
+            if (fieldMatch && operation.op === 'replace') {
+              const sectionId = decodeURIComponent(fieldMatch[1]);
+              const field = fieldMatch[2];
+              const section = (draft.sections as any[]).find((item: any) => item.id === sectionId);
+              if (section) {
+                section[field] = operation.value;
+                applied = true;
+              }
+              continue;
+            }
+            const blockRemoveMatch = path.match(/^\/sections\/([^/]+)\/blocks\/([^/]+)$/);
+            if (blockRemoveMatch && operation.op === 'remove') {
+              const section = (draft.sections as any[]).find((item: any) => item.id === decodeURIComponent(blockRemoveMatch[1]));
+              if (section && Array.isArray(section.blocks)) {
+                section.blocks = section.blocks.filter((block: any) => block.id !== decodeURIComponent(blockRemoveMatch[2]));
+                applied = true;
+              }
+              continue;
+            }
+            const blockMatch = path.match(/^\/sections\/([^/]+)\/blocks\/([^/]+)(?:\/(.+))?$/);
+            if (blockMatch) {
+              const section = (draft.sections as any[]).find((item: any) => item.id === decodeURIComponent(blockMatch[1]));
+              if (section && Array.isArray(section.blocks)) {
+                const blockId = decodeURIComponent(blockMatch[2]);
+                const rest = blockMatch[3];
+                if (operation.op === 'add' && operation.value && !rest) {
+                  const exists = section.blocks.some((block: any) => block.id === blockId);
+                  if (!exists) section.blocks.push(operation.value);
+                  applied = true;
+                } else if (rest && operation.op === 'replace') {
+                  const block = section.blocks.find((item: any) => item.id === blockId);
+                  if (block) {
+                    block[decodeURIComponent(rest)] = operation.value;
+                    applied = true;
+                  }
+                }
+              }
+              continue;
+            }
+            continue;
+          }
+          const match = path.match(/^\/slides\/(\d+)$/);
           if (match && ['add', 'replace'].includes(String(operation.op)) && isCompleteSlidePatch(operation.value)) {
+            draft.slides = [...(existing.slides || [])] as any[];
             draft.slides[Number(match[1])] = operation.value;
             applied = true;
           }
@@ -204,7 +284,7 @@ export const usePipelineStore = defineStore('pipeline', {
         if (epoch !== this.requestEpoch) return null;
         const project = useProjectStore();
         const activeRunId = project.currentTask?.active_run_id;
-        if (activeRunId && detail.run?.generation_run_id !== activeRunId) {
+        if (activeRunId && detail.run?.generation_run_id && detail.run.generation_run_id !== activeRunId) {
           this.error = '流水线快照尚未对齐当前任务，正在重新同步。';
           return null;
         }

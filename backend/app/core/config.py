@@ -22,11 +22,24 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 180
     llm_max_tokens: int = 16000
     ppt_agent_runtime_enabled: bool = True
+    # 教学设计 Agent V2 动态工具化流水线开关；关闭时回退旧单次生成路径。
+    lesson_plan_agent_runtime_enabled: bool = True
+    # 学习任务单 Agent V3 动态工具化流水线开关；关闭时回退旧单次生成路径。
+    task_sheet_agent_runtime_enabled: bool = True
+    # 视频脚本 Agent V4 动态工具化流水线开关（动态章节 + 意图识别 + 工具 + QA 返修）；
+    # 关闭时回退旧单次生成路径。
+    video_script_agent_runtime_enabled: bool = False
+    # 教师逐字稿 Agent V2 动态工具化流水线开关（意图识别 + 工具修改候选稿 + QA 返修 +
+    # 流式可视化）；关闭时回退旧的单次确定性派生路径。默认开启。
+    verbatim_agent_runtime_enabled: bool = True
     ffmpeg_binary: str = ""
     ffprobe_binary: str = ""
     video_max_mb: int = 500
     video_max_concurrency: int = 2
     video_max_duration_seconds: int = 1800
+    # Gemini Interactions 原生有声视频仍依赖本地网关暴露 Interactions/Files 代理。
+    # 默认关闭，能力探测通过后由部署环境显式开启。
+    gemini_interactions_video_enabled: bool = False
     default_language: str = "zh-CN"
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 

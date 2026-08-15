@@ -64,6 +64,14 @@ export interface CourseTask {
   progress: number;
   dependency_types: string[];
   stale_dependencies: string[];
+  optional_reference_types?: string[];
+  required_input_contract?: Record<string, string>;
+  /** 该任务最近一次运行实际读取的项目记忆版本（旧客户端可忽略）。 */
+  memory_revision?: number;
+  last_context_revision?: number;
+  /** 共享项目记忆中当前可读取的参考产物（类型 → 版本/状态），不阻塞启动。 */
+  available_sources?: Record<string, { version: number; status: string }>;
+  missing_optional_sources?: string[];
   agent_profile_status: 'pending' | 'initializing' | 'ready' | 'failed' | 'stale';
   agent_profile_version: number;
   agent_profile_template_version?: string | null;
@@ -164,6 +172,39 @@ export interface ProjectQuality {
   }>;
 }
 
+/** 共享项目记忆条目（需求/蓝图/材料/Artifact/决策/QA/对话摘要的索引）。 */
+export interface MemoryItem {
+  id: string;
+  course_id: string;
+  source_type: 'requirement' | 'blueprint' | 'material' | 'artifact' | 'decision' | 'qa' | 'dialogue';
+  source_id: string;
+  source_version: number;
+  artifact_type?: string;
+  summary?: Record<string, any>;
+  content_ref?: string;
+  keywords?: string[];
+  trust_level?: string;
+  memory_revision: number;
+  created_by?: string;
+  updated_at?: string | null;
+}
+
+/** 项目记忆摘要（项目总览与记忆面板共用）。 */
+export interface ProjectMemorySummary {
+  revision: number;
+  item_count: number;
+  items: MemoryItem[];
+}
+
+/** Agent 运行上下文快照清单（本次读取的记忆版本 + 可用来源 + 缺失来源）。 */
+export interface ContextManifest {
+  memory_revision: number;
+  available_sources?: Record<string, { version: number; status: string }>;
+  missing_optional_sources?: string[];
+  decisions?: Array<Record<string, any>>;
+  qa_findings?: Array<Record<string, any>>;
+}
+
 export interface CourseProjectWorkspace {
   event_cursor?: number;
   snapshot_at?: string;
@@ -173,6 +214,8 @@ export interface CourseProjectWorkspace {
   agent_initialization: AgentInitializationState;
   tasks: CourseTask[];
   quality: ProjectQuality;
+  /** 共享项目记忆摘要（只读回填后返回）。 */
+  memory?: ProjectMemorySummary;
 }
 
 export interface ProjectTaskEvent {
@@ -199,6 +242,11 @@ export interface ProjectTaskEvent {
   reset?: boolean;
   issue?: Record<string, any>;
   payload?: Record<string, any>;
+  /** 共享项目记忆事件字段（context.snapshot_created / project_memory.updated）。 */
+  memory_revision?: number;
+  context_manifest?: ContextManifest;
+  context_hash?: string;
+  change_reason?: string;
 }
 
 /** 润色范围：auto（自动）| layout（只改布局）| text（只改文字）| image（只改图片） */

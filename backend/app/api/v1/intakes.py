@@ -407,6 +407,20 @@ async def confirm_intake(session_id: str, payload: IntakeConfirm, user: User = D
     for material in materials:
         material.course_id = course.id
         material.intake_session_id = None
+    # 共享项目记忆：确认需求与上传材料进入项目记忆（同一事务，先写后 bump）。
+    requirement = await db.scalar(select(CourseRequirement).where(
+        CourseRequirement.course_id == course.id,
+    ).order_by(CourseRequirement.version.desc()))
+    if requirement:
+        from app.services.project_knowledge_service import bump, index_material, index_requirement
+
+        await index_requirement(db, requirement, created_by="teacher")
+        await bump(
+            db, course.id, "需求已确认", source_type="requirement",
+            source_id=requirement.id, created_by="teacher",
+        )
+        for material in materials:
+            await index_material(db, material, created_by="teacher")
     run = GenerationRun(course_id=course.id, thread_id=str(uuid4()), run_type="blueprint", status="queued")
     db.add(run)
     tasks = await ensure_course_tasks(db, course.id)

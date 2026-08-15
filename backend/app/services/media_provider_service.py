@@ -26,10 +26,36 @@ class MediaResult:
 
 
 class MediaProviderError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = True, provider_job_id: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        provider_job_id: str = "",
+        code: str = "video_provider_unsupported",
+    ):
         super().__init__(message)
         self.retryable = retryable
         self.provider_job_id = provider_job_id
+        self.code = code
+
+
+MEDIA_CAPABILITY_API_MODES = {
+    "image_generation": {"openai_images", "google_gemini_image", "custom_image_http", "mock_media"},
+    "video_generation": {"custom_video_async_http", "volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+    "native_audio_video_generation": {"volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+    "speech_recognition": {"volcengine_asr", "mock_media"},
+    "speech_generation": {"custom_speech_http", "mock_media"},
+    "media_composition": {"local_ffmpeg", "mock_media"},
+}
+
+
+def media_transport_supports(provider: str, api_mode: str | None, capability: str) -> bool:
+    """Return whether a model's transport can actually execute a declared media capability."""
+    if provider == "mock":
+        return True
+    allowed_modes = MEDIA_CAPABILITY_API_MODES.get(capability)
+    return True if allowed_modes is None else (api_mode or "text_chat") in allowed_modes
 
 
 def _json_path(data, path: str):

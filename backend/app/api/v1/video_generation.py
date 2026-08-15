@@ -2,16 +2,25 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, owned_course
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import create_asset_token, decode_asset_token
-from app.models.entities import ArtifactAsset, CourseProject, User
-from app.schemas.video import VideoSceneRegenerateRequest
+from app.models.entities import ArtifactAsset, CourseProject, CourseTask, User, VideoGenerationQuote, VideoSceneJob
+from app.schemas.video import (
+    SeedanceSceneRegenerateRequest,
+    VideoGenerationMetricsResponse,
+    VideoGenerationQuoteRequest,
+    VideoGenerationQuoteResponse,
+)
 from app.services.course_task_service import start_task_run
-from app.services.video_generation_service import create_video_scene_regeneration_run
+from app.services.seedance_video_generation_service import (
+    create_seedance_scene_regeneration_run,
+    create_video_generation_quote,
+)
 
 
 router = APIRouter(tags=["视频生成"])
@@ -37,7 +46,7 @@ async def _owned_video_asset(asset_id: str, user: User, db: AsyncSession) -> tup
 async def regenerate_video_scene(
     course_id: str,
     scene_id: str,
-    payload: VideoSceneRegenerateRequest,
+    payload: SeedanceSceneRegenerateRequest,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -52,12 +61,96 @@ async def regenerate_video_scene(
     if not task:
         raise HTTPException(404, "视频生成任务不存在")
     try:
-        run = await create_video_scene_regeneration_run(db, task, scene_id, payload)
+        run = await create_seedance_scene_regeneration_run(db, task, scene_id, payload)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     await db.commit()
     start_task_run(run.id)
     return {"run_id": run.id, "task_id": task.id, "scene_id": scene_id, "status": "queued"}
+
+
+@router.post(
+    "/courses/{course_id}/tasks/video_generation/quotes",
+    response_model=VideoGenerationQuoteResponse,
+)
+async def quote_video_generation(
+    course_id: str,
+    payload: VideoGenerationQuoteRequest,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await owned_course(course_id, user, db)
+    from sqlalchemy import select
+    task = await db.scalar(select(CourseTask).where(
+        CourseTask.course_id == course_id, CourseTask.task_type == "video_generation",
+    ))
+    if not task:
+        raise HTTPException(404, "视频生成任务不存在")
+    try:
+        quote = await create_video_generation_quote(db, task, user.id, payload)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    return quote
+
+
+@router.get(
+    "/courses/{course_id}/tasks/video_generation/metrics",
+    response_model=VideoGenerationMetricsResponse,
+)
+async def video_generation_metrics(
+    course_id: str,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return course-scoped, audit-table-derived Seedance operating metrics."""
+    await owned_course(course_id, user, db)
+    jobs = list(await db.scalars(select(VideoSceneJob).where(
+        VideoSceneJob.course_id == course_id,
+        VideoSceneJob.scene_id != "__run__",
+        VideoSceneJob.operation == "generate",
+    )))
+    terminal = [job for job in jobs if job.status in {"completed", "qa_failed", "failed"}]
+    completed = [job for job in terminal if job.status == "completed"]
+    scene_attempts: dict[tuple[str, str], int] = {}
+    for job in jobs:
+        key = (job.generation_run_id, job.scene_id)
+        scene_attempts[key] = max(scene_attempts.get(key, 0), int(job.attempt or 1))
+    retried = sum(1 for attempt in scene_attempts.values() if attempt > 1)
+
+    actual_cost = sum(int(job.actual_cost_fen or 0) for job in jobs)
+    estimated_cost = sum(int(job.estimated_cost_fen or 0) for job in jobs)
+    billable_duration = sum(
+        float((job.input_json or {}).get("duration_seconds") or 0)
+        for job in jobs if int(job.actual_cost_fen or 0) > 0
+    )
+    qa_checked = [job for job in terminal if (job.qa_json or {}).get("status")]
+    qa_failed = [job for job in qa_checked if (job.qa_json or {}).get("status") != "passed"]
+
+    quotes = list(await db.scalars(select(VideoGenerationQuote).where(
+        VideoGenerationQuote.course_id == course_id,
+    )))
+    quoted_scenes = [scene for quote in quotes for scene in (quote.scenes_json or [])]
+    reusable = sum(1 for scene in quoted_scenes if scene.get("reusable"))
+
+    return VideoGenerationMetricsResponse(
+        scene_attempt_count=len(terminal),
+        completed_attempt_count=len(completed),
+        generation_success_rate=len(completed) / len(terminal) if terminal else 0,
+        retried_scene_count=retried,
+        scene_retry_rate=retried / len(scene_attempts) if scene_attempts else 0,
+        actual_cost_fen=actual_cost,
+        estimated_cost_fen=estimated_cost,
+        estimate_actual_deviation_rate=(actual_cost - estimated_cost) / estimated_cost if estimated_cost else 0,
+        billable_duration_seconds=billable_duration,
+        average_cost_fen_per_minute=actual_cost / (billable_duration / 60) if billable_duration else 0,
+        qa_checked_attempt_count=len(qa_checked),
+        qa_failed_attempt_count=len(qa_failed),
+        asr_fact_failure_rate=len(qa_failed) / len(qa_checked) if qa_checked else 0,
+        quoted_scene_count=len(quoted_scenes),
+        reusable_scene_count=reusable,
+        cache_reuse_rate=reusable / len(quoted_scenes) if quoted_scenes else 0,
+    )
 
 
 def _range_response(path: Path, mime_type: str, range_header: str | None):

@@ -4,13 +4,14 @@ Mock 路径：按标准版式策略（标题 + 正文流 / 左文右图）确定
 LLM 路径：可基于内容与设计系统选择任意版式策略并输出元素几何。
 """
 import math
+from copy import deepcopy
 from typing import Any
 
 from app.agent.agents.base import Agent
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, ToolCall
 from app.agent.slide_rendering import runtime_baseline_slides, semantic_body_refs
-from app.agent.layouts.engine import PRESET_KEYS, compile_layout
+from app.agent.layouts.engine import LayoutCompileError, PRESET_KEYS, compile_layout
 from app.renderers.presentation_builder import SLIDE_HEIGHT, SLIDE_WIDTH
 
 MARGIN_X = 0.65
@@ -210,6 +211,18 @@ class LayoutAgent(Agent):
         visual_plan = await tc.artifacts.latest("visual_plan") if tc.artifacts else None
         source_slides = runtime_baseline_slides(tc.runtime)
         slides = (slide_content or {}).get("data", {}).get("slides") or source_slides
+        # ``slide_content`` is persisted as a full-deck snapshot even for a
+        # single-page edit.  Deterministic QA repair calls ``decide`` directly,
+        # so it does not pass through the later artifact scope filter.  Keep
+        # the compiler inside the confirmed page scope here; otherwise an
+        # unrelated page can fail layout compilation and abort the selected
+        # page's repair.
+        selected_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+        if selected_ids:
+            slides = [
+                slide for slide in slides
+                if str(slide.get("id") or "") in selected_ids
+            ]
         visual_by_slide = {}
         if visual_plan:
             visual_data = visual_plan.get("data", {})
@@ -245,32 +258,70 @@ class LayoutAgent(Agent):
             ).items() if key in {"font_tier", "font_scale", "gap_scale", "highlight"}
         }
         for index, slide in enumerate(slides):
-            layout = self._layout_slide(
-                slide, visual_by_slide.get(slide.get("id", "")), template_id,
-                style=engine_style,
-            )
-            # A deterministic QA repair must not compile straight back to the
-            # exact source geometry.  That previously turned an invalid LLM
-            # proposal into the original steps layout, scored 100 in QA, then
-            # failed the final monotony gate.  Prefer the generic safe column
-            # layout when the content-aware preset is a geometric no-op.
-            if getattr(tc.runtime, "repair_mode", "") == "deterministic":
-                from app.agent.layouts.engine import compile_layout
-                from app.agent.slide_rendering import semantic_geometry_hash
+            slide_id = str(slide.get("id") or "")
+            try:
+                layout = self._layout_slide(
+                    slide, visual_by_slide.get(slide_id), template_id,
+                    style=engine_style,
+                )
+                # A deterministic QA repair must not compile straight back to the
+                # exact source geometry.  That previously turned an invalid LLM
+                # proposal into the original steps layout, scored 100 in QA, then
+                # failed the final monotony gate.  Prefer the generic safe column
+                # layout when the content-aware preset is a geometric no-op.
+                if getattr(tc.runtime, "repair_mode", "") == "deterministic":
+                    from app.agent.slide_rendering import semantic_geometry_hash
 
-                candidate = {"elements": list(layout.get("elements") or [])}
-                if semantic_geometry_hash(slide) == semantic_geometry_hash(candidate):
-                    alternate = (
-                        "bullet_flow"
-                        if str(layout.get("layout_type") or "") == "split_two_column"
-                        else "split_two_column"
-                    )
-                    layout = compile_layout(template_id, slide, {
-                        "slide_id": str(slide.get("id") or ""),
-                        "layout_type": alternate,
-                        "style": {"font_tier": "spacious", "gap_scale": 1.0},
-                        "rationale": "QA 确定性修复：避免回退到原页相同版式",
-                    })
+                    candidate = {"elements": list(layout.get("elements") or [])}
+                    if semantic_geometry_hash(slide) == semantic_geometry_hash(candidate):
+                        alternate = (
+                            "bullet_flow"
+                            if str(layout.get("layout_type") or "") == "split_two_column"
+                            else "split_two_column"
+                        )
+                        layout = compile_layout(template_id, slide, {
+                            "slide_id": slide_id,
+                            "layout_type": alternate,
+                            "style": {"font_tier": "spacious", "gap_scale": 1.0},
+                            "rationale": "QA 确定性修复：避免回退到原页相同版式",
+                        })
+            except LayoutCompileError as exc:
+                if getattr(tc.runtime, "repair_mode", "") != "deterministic":
+                    raise
+                # The edited copy can be denser than every safe preset.  A QA
+                # repair that cannot place it must revert this page to the
+                # immutable run baseline and finish as no_change/partial.  It
+                # must not abort the whole task or leave the overflowing edited
+                # text in the live builder.
+                baseline = next((
+                    item for item in source_slides
+                    if str(item.get("id") or "") == slide_id
+                ), slide)
+                if tc.builder is not None:
+                    for builder_index, builder_slide in enumerate(tc.builder.slides):
+                        if str(builder_slide.get("id") or "") == slide_id:
+                            tc.builder.slides[builder_index] = deepcopy(baseline)
+                            break
+                reverted = list(getattr(tc.runtime, "repair_reverted_slide_ids", []) or [])
+                if slide_id not in reverted:
+                    reverted.append(slide_id)
+                tc.runtime.repair_reverted_slide_ids = reverted
+                tc.runtime.affected_slide_ids = [
+                    value for value in (getattr(tc.runtime, "affected_slide_ids", []) or [])
+                    if value != slide_id
+                ]
+                layout = {
+                    "slide_id": slide_id,
+                    "layout_type": "preserve_original",
+                    "designRationale": "QA 安全修复无可行布局，已恢复该页原版本",
+                    "elements": deepcopy(list(baseline.get("elements") or [])),
+                    "render_mode": str(baseline.get("render_mode") or "absolute"),
+                    "compile_status": "preserved",
+                    "warnings": [f"{slide_id} 润色内容无法安全排布，已恢复原页"],
+                    "compile_attempts": list(exc.attempts)[-12:],
+                    "material_change": False,
+                    "requires_candidate_confirmation": False,
+                }
             layouts.append(layout)
         return AgentDecision(
             completed=True,

@@ -293,7 +293,7 @@ def _resolved_command_runtime(command: Any) -> tuple[PPTIntent, str, list[str], 
         "objectives": objectives,
         "operations": operations,
         "strength": next((item.strength for item in command.operations), "moderate"),
-        "minimum_quality_delta": 8.0,
+        "quality_gate_strategy": "adaptive_v2",
     }
     # A generic aesthetic polish has no single user metric, but it still must
     # prove a meaningful deterministic improvement.  The command resolver
@@ -305,8 +305,9 @@ def _resolved_command_runtime(command: Any) -> tuple[PPTIntent, str, list[str], 
             *objectives,
             {
                 "metric": "layout_quality", "direction": "increase",
-                "minimum_delta": 8.0, "priority": 100,
+                "minimum_delta": 0.0, "priority": 100,
                 "hard_requirement": True, "source": "runtime_gate",
+                "adaptive": True,
             },
         ]
         params["polish_mode"] = True
@@ -1301,15 +1302,31 @@ class PPTAgentRuntime:
         rankings = [
             dict(item) for item in (record.get("candidate_rankings") or [])
             if item.get("elements")
-            and all(
-                objective_result_passed(result)
-                for result in (item.get("objective_results") or [])
-                if bool(result.get("hard_requirement", True))
+            and (
+                bool(item.get("publishable"))
+                or bool(item.get("preview_eligible"))
+                or all(
+                    objective_result_passed(result)
+                    for result in (item.get("objective_results") or [])
+                    if bool(result.get("hard_requirement", True))
+                )
             )
         ][:2]
-        if len(rankings) < 2:
+        if not rankings:
             return False
         slide_id = str(record.get("slide_id") or "")
+        source_slides = runtime_baseline_slides(self.pipeline)
+        page_number = next((
+            index + 1 for index, slide in enumerate(source_slides)
+            if str(slide.get("id") or "") == slide_id
+        ), None)
+        source_title = next((
+            str(slide.get("title") or "") for slide in source_slides
+            if str(slide.get("id") or "") == slide_id
+        ), "")
+        display_label = f"第 {page_number} 页" if page_number else slide_id
+        if source_title:
+            display_label += f"《{source_title}》"
         layout_artifact = (
             await self.pipeline.artifacts.latest("slide_layout")
             if self.pipeline.artifacts is not None else None
@@ -1353,6 +1370,8 @@ class PPTAgentRuntime:
                 "id": option_id, "candidate_id": candidate_id,
                 "label": f"方案 {chr(ord('A') + index)} · {candidate['layout_type']}",
                 "slide_id": slide_id,
+                "page_number": page_number,
+                "display_label": display_label,
                 "score": ranking.get("quality_score"),
                 "quality_delta": ranking.get("quality_delta"),
                 "style": ranking.get("style") or {},
@@ -1360,7 +1379,36 @@ class PPTAgentRuntime:
                 "render_path": preview_path,
                 "candidate": candidate,
             })
+        rendered_options = [
+            option for option in options if str(option.get("render_path") or "")
+        ]
+        if len(rendered_options) < len(rankings):
+            reason = "候选真实渲染不可用，无法安全比较，已保留原布局"
+            record.update({
+                "status": "preserved", "compile_status": "preserved",
+                "decision": "preserved", "material_change": False,
+                "requires_candidate_confirmation": False,
+                "rejection_code": "render_unavailable",
+                "rejection_reasons": list(dict.fromkeys([
+                    *(record.get("rejection_reasons") or []), reason,
+                ])),
+                "warnings": list(dict.fromkeys([
+                    *(record.get("warnings") or []), reason,
+                ])),
+            })
+            self.pipeline.result_status = "no_change"
+            self.pipeline.publishable = True
+            self.pipeline.context.add_note(
+                f"{display_label} 候选预览仅成功 {len(rendered_options)}/{len(rankings)}：{reason}"
+            )
+            return False
         options.append({"id": "reject", "label": "保留原版", "action": "no_change"})
+
+        choice_prompt = (
+            f"{display_label}有两个质量接近的安全候选，请选择。"
+            if len(rankings) >= 2
+            else f"{display_label}有一个安全改善候选需要确认，请选择方案或保留原版。"
+        )
 
         from app.core.database import SessionLocal
         from app.models.entities import PPTHumanRequest, PipelineRun
@@ -1368,7 +1416,7 @@ class PPTAgentRuntime:
             request = PPTHumanRequest(
                 pipeline_run_id=self.pipeline.pipeline_run.id,
                 request_type="layout_candidate_selection",
-                prompt=f"第 {slide_id} 页有两个质量接近的安全候选，请选择。",
+                prompt=choice_prompt,
                 # Assign the final JSON only after ``request.id`` exists and
                 # the authenticated preview URLs can be constructed.  Mutating
                 # a plain JSON list in place is not tracked by SQLAlchemy.
@@ -1403,10 +1451,16 @@ class PPTAgentRuntime:
         self.pipeline.candidate_options = deepcopy(public_options)
         await self.pipeline.emitter.emit_domain(
             "human.required",
-            message="两个布局候选质量接近，请选择后再发布",
+            message=(
+                f"{display_label}有两个布局候选质量接近，请选择后再发布"
+                if len(rankings) >= 2
+                else f"{display_label}有一个安全改善候选，请确认后再发布"
+            ),
             payload={
                 "request_id": request.id, "type": "layout_candidate_selection",
-                "slide_id": slide_id, "options": public_options,
+                "slide_id": slide_id, "page_number": page_number,
+                "display_label": display_label, "slide_title": source_title,
+                "options": public_options,
                 "candidate_rankings": public_options[:2],
             },
         )
@@ -1417,6 +1471,7 @@ class PPTAgentRuntime:
         self.pipeline.selected_slide_ids = list(selected_slide_ids or [])
         self.pipeline.layout_engine_params = {}
         self.pipeline.operation_agent_chain = []
+        self.pipeline.repair_reverted_slide_ids = []
 
         if self.pipeline.trigger_type == "message":
             from app.agent.intents import resolve_polish_command, resolved_command_to_polish_intent

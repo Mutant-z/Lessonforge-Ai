@@ -16,9 +16,13 @@ from app.agents.generators import (
     make_task_sheet,
     make_verbatim,
     make_video_script,
+    make_seedance_verbatim,
+    make_seedance_video_script,
+    repair_video_script_subtitles,
     to_markdown,
 )
 from app.core.database import SessionLocal
+from app.core.config import get_settings
 from app.models.entities import (
     AgentMessage,
     AgentChatSession,
@@ -46,10 +50,14 @@ from app.schemas.artifact import (
     TaskSheetContent,
     VerbatimContent,
     VideoScriptContent,
+    SeedanceVideoScriptContent,
 )
-from app.schemas.video import VideoGenerationContent
-from app.schemas.agent_profile import ExerciseProfile, TaskSheetProfile, VideoScriptProfile
+from app.schemas.video import SeedanceVideoGenerationContent, VideoGenerationContent
+from app.schemas.agent_profile import ExerciseProfile, LessonPlanProfile, TaskSheetProfile, VerbatimProfile, VideoScriptProfile
 from app.schemas.blueprint import CourseBlueprintSchema
+from app.schemas.lesson_plan import LessonPlanContentV2, lesson_plan_to_markdown_v2
+from app.schemas.task_sheet import TASK_SHEET_V3, TaskSheetContentV3, task_sheet_v3_to_markdown
+from app.schemas.verbatim_v2 import VerbatimContentV2, verbatim_v2_to_markdown
 from app.services.model_config_service import resolve_provider, resolved_model_name
 from app.services.agent_prompt_service import (
     active_prompt_template,
@@ -62,30 +70,85 @@ from app.services.project_knowledge_service import build_project_knowledge_conte
 from app.services.exercise_review_service import degrade_unreviewed_visuals, review_and_repair_exercise
 from app.services.exercise_visual_service import process_exercise_visuals
 from app.services.quality_service import validate_exercise, validate_resources, validate_video_script
+from app.agent.agents.lesson_plan.qa import validate_lesson_plan
+from app.agent.core.error import AgentError
 from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, resolve_ppt_template
 from app.agent.pipeline import PipelinePaused  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+class TaskValidationError(RuntimeError):
+    """A safe, actionable artifact validation failure that may be shown to users."""
+
+
+def _task_failure_payload(exc: Exception) -> tuple[dict, str]:
+    """Normalize stable runtime failures without erasing domain AgentError codes."""
+    from app.agent.schemas import PPTAgentError
+
+    runtime_errors = (LLMProviderError, PPTAgentError, AgentError)
+    code = (
+        exc.code
+        if isinstance(exc, runtime_errors)
+        else "task_validation_failed"
+        if isinstance(exc, TaskValidationError)
+        else "task_generation_failed"
+    )
+    internal_detail = str(exc).strip()[:500]
+    safe_runtime_prefixes = (
+        "流水线", "页面内容 Agent", "LLM 布局", "PPT 编辑", "布局结果", "Agent ",
+    )
+    message = (
+        exc.user_message
+        if isinstance(exc, runtime_errors)
+        else internal_detail
+        if isinstance(exc, TaskValidationError)
+        else internal_detail
+        if isinstance(exc, RuntimeError) and internal_detail.startswith(safe_runtime_prefixes)
+        else "任务生成暂时失败，请重试或切换模型。"
+    )
+    retryable = exc.retryable if isinstance(exc, runtime_errors) else True
+    error = {"code": code, "message": message, "retryable": retryable}
+    if isinstance(exc, (PPTAgentError, AgentError)) and exc.details:
+        error["details"] = exc.details
+    return error, internal_detail
+
+
 TASK_SPECS = (
     ("lesson_plan", "教学设计", "教学设计 Agent", "lesson_plan_agent", []),
+    # 共享项目记忆架构：内容 Agent 之间不再有调度依赖，全部并行启动。
+    # 历史可选引用记录在 OPTIONAL_REFERENCE_TYPES 中，仅影响上下文快照，不阻塞启动。
     ("ppt", "PPT 课件", "PPT Agent", "ppt_agent", []),
     ("task_sheet", "学习任务单", "任务单 Agent", "task_sheet_agent", []),
     ("exercise", "课后练习", "练习 Agent", "exercise_agent", []),
-    ("video_script", "视频脚本", "视频脚本 Agent", "video_script_agent", ["lesson_plan", "ppt"]),
-    ("video_generation", "视频生成", "视频生成工作流", "video_generation_pipeline", ["video_script", "ppt"]),
-    ("verbatim", "教师逐字稿", "逐字稿 Agent", "verbatim_agent", ["ppt", "video_script"]),
+    ("video_script", "视频脚本", "视频脚本 Agent", "video_script_agent", []),
+    ("video_generation", "视频生成", "视频生成工作流", "video_generation_pipeline", ["video_script"]),
+    ("verbatim", "教师逐字稿", "逐字稿 Agent", "verbatim_agent", []),
 )
 TASK_SPEC_BY_TYPE = {item[0]: item for item in TASK_SPECS}
 CONTENT_TASK_TYPES = {"lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim"}
+
+#: 每个 Agent 在共享项目记忆中可读取的可选参考来源（不控制启动顺序）。
+OPTIONAL_REFERENCE_TYPES = {
+    "lesson_plan": ["task_sheet", "ppt", "exercise", "video_script", "verbatim"],
+    "ppt": ["lesson_plan", "task_sheet", "video_script", "verbatim", "exercise"],
+    "task_sheet": ["lesson_plan", "ppt", "exercise", "video_script", "verbatim"],
+    "exercise": ["lesson_plan", "task_sheet", "ppt", "video_script", "verbatim"],
+    "video_script": ["lesson_plan"],
+    "verbatim": ["video_script", "ppt"],
+}
+
+#: 运行输入契约：执行时必须满足的事实条件（video_generation 属于运行输入契约，
+#: 不是 Agent 拓扑依赖——缺少脚本只影响视频生成本身，不阻塞其他 Agent）。
+VIDEO_INPUT_CONTRACT = {"video_script": "执行前必须存在 Seedance V3/V4 视频脚本"}
 TASK_SCHEMAS = {
     "lesson_plan": LessonPlanContent,
     "ppt": PPTContent,
     "task_sheet": TaskSheetContent,
     "exercise": ExerciseContent,
-    "video_script": VideoScriptContent,
-    "video_generation": VideoGenerationContent,
-    "verbatim": VerbatimContent,
+    "video_script": SeedanceVideoScriptContent,
+    "video_generation": SeedanceVideoGenerationContent,
+    "verbatim": VerbatimContentV2,
 }
 
 task_jobs: dict[str, asyncio.Task] = {}
@@ -103,12 +166,12 @@ PHASE_LABELS = {
 }
 
 PHASE_DETAILS = {
-    "preparing": "正在加载当前任务的专属配置、课程蓝图和合法上游文件。",
+    "preparing": "正在加载当前任务的专属配置、课程蓝图和共享项目记忆快照。",
     "analyzing": "正在识别需要调整的内容范围，并确认必须保留的约束。",
     "generating": "正在依据项目专属配置生成结构化任务文件。",
     "validating": "正在检查输出结构、锁定内容、引用和版本一致性。",
     "replying": "文件内容已通过校验，正在生成简洁的修改说明。",
-    "saving": "正在原子保存文件、对话消息和依赖状态。",
+    "saving": "正在原子保存文件、对话消息并更新项目记忆。",
     "completed": "新版本已保存，旧版本仍可在版本历史中查看。",
 }
 
@@ -126,13 +189,26 @@ def artifact_payload(item: Artifact | None) -> dict | None:
             "id", "course_id", "artifact_type", "version", "blueprint_version",
             "content_json", "content_markdown", "status", "model_name", "prompt_version",
             "is_locked", "change_summary", "source_versions_json", "created_at", "approved_at",
-            "agent_profile_id",
+            "agent_profile_id", "memory_revision_created",
         )
     }
     for key in ("created_at", "approved_at"):
         if payload[key] is not None:
             payload[key] = payload[key].isoformat()
     return payload
+
+
+def is_publishable_video_artifact(item: Artifact | None) -> bool:
+    """Return true only after the native-audio renderer produced final media."""
+    if not item or item.artifact_type != "video_generation":
+        return False
+    content = item.content_json or {}
+    outputs = content.get("outputs") or {}
+    return bool(
+        content.get("schema_version") == "3.0"
+        and content.get("mode") == "seedance_native"
+        and outputs.get("final_asset_id")
+    )
 
 
 async def task_payload(db, item: CourseTask) -> dict:
@@ -174,6 +250,28 @@ async def task_payload(db, item: CourseTask) -> dict:
             ))
             if latest_version and (artifact.source_versions_json or {}).get(dependency) != latest_version:
                 stale_dependencies.append(dependency)
+    # 共享项目记忆：当前可读取的参考产物 + 缺失的可选来源（仅提示，不阻塞）。
+    available_sources: dict[str, dict] = {}
+    missing_optional_sources: list[str] = []
+    if item.task_type in CONTENT_TASK_TYPES:
+        sibling_types = OPTIONAL_REFERENCE_TYPES.get(item.task_type, [])
+        for reference_type in sibling_types:
+            sibling_task = await db.scalar(select(CourseTask).where(
+                CourseTask.course_id == item.course_id,
+                CourseTask.task_type == reference_type,
+            ))
+            sibling_artifact = (
+                await db.get(Artifact, sibling_task.current_artifact_id)
+                if sibling_task and sibling_task.current_artifact_id
+                else None
+            )
+            if sibling_artifact:
+                available_sources[reference_type] = {
+                    "version": sibling_artifact.version,
+                    "status": sibling_artifact.status,
+                }
+            else:
+                missing_optional_sources.append(reference_type)
     return {
         "id": item.id,
         "course_id": item.course_id,
@@ -186,6 +284,12 @@ async def task_payload(db, item: CourseTask) -> dict:
         "progress": item.progress,
         "dependency_types": item.dependency_types_json,
         "stale_dependencies": stale_dependencies,
+        "optional_reference_types": item.optional_reference_types_json,
+        "required_input_contract": item.required_input_contract_json,
+        "memory_revision": item.last_context_revision,
+        "last_context_revision": item.last_context_revision,
+        "available_sources": available_sources,
+        "missing_optional_sources": missing_optional_sources,
         "agent_profile_status": item.agent_profile_status,
         "agent_profile_version": profile.version if profile else 0,
         "agent_profile_template_version": profile.template_version if profile else None,
@@ -216,13 +320,29 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
                 current.agent_type = agent_type
             if current.dependency_types_json != dependencies:
                 current.dependency_types_json = dependencies
+            optional_refs = OPTIONAL_REFERENCE_TYPES.get(task_type, [])
+            if current.optional_reference_types_json != optional_refs:
+                current.optional_reference_types_json = optional_refs
+            if task_type == "video_generation" and current.required_input_contract_json != VIDEO_INPUT_CONTRACT:
+                current.required_input_contract_json = VIDEO_INPUT_CONTRACT
             if task_type == "video_generation":
                 current.agent_profile_status = "ready"
+                current_artifact = await db.get(Artifact, current.current_artifact_id) if current.current_artifact_id else None
+                if current_artifact and not is_publishable_video_artifact(current_artifact):
+                    # Keep legacy text/hybrid artifacts in version history, but
+                    # never expose them as the official stage-06 task file.
+                    current.current_artifact_id = None
+                    current.status = "waiting_dependency"
+                    current.progress = 0
+                    current.completed_at = None
+                    current.error_json = None
             continue
         artifact = await db.scalar(select(Artifact).where(
             Artifact.course_id == course_id,
             Artifact.artifact_type == task_type,
         ).order_by(Artifact.version.desc()))
+        if task_type == "video_generation" and not is_publishable_video_artifact(artifact):
+            artifact = None
         status = "approved" if artifact and artifact.status == "approved" else "review" if artifact else "waiting_dependency"
         task = CourseTask(
             course_id=course_id,
@@ -232,6 +352,8 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
             status=status,
             progress=100 if artifact else 0,
             dependency_types_json=dependencies,
+            optional_reference_types_json=OPTIONAL_REFERENCE_TYPES.get(task_type, []),
+            required_input_contract_json=VIDEO_INPUT_CONTRACT if task_type == "video_generation" else {},
             current_artifact_id=artifact.id if artifact else None,
             completed_at=artifact.created_at if artifact else None,
             agent_profile_status="ready" if task_type == "video_generation" else "pending",
@@ -239,6 +361,40 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
         db.add(task)
         by_type[task_type] = task
     await db.flush()
+
+    # 视频生成没有首稿 Artifact，不能靠 source_versions_json 判断上游是否仍然可用。
+    # 旧逻辑只检查“是否存在过”视频脚本和 PPT，因此旧版 V1 脚本或已经 stale 的
+    # 脚本也会把按钮错误地标成“可生成”，直到 Pydantic 在启动时抛出内部校验错误。
+    video_task = by_type.get("video_generation")
+    if (
+        video_task
+        and not video_task.current_artifact_id
+        and not video_task.active_run_id
+        and video_task.status in {"waiting_dependency", "ready_to_generate"}
+    ):
+        dependencies_ready = True
+        for dependency in video_task.dependency_types_json:
+            dependency_task = by_type.get(dependency)
+            dependency_artifact = (
+                await db.get(Artifact, dependency_task.current_artifact_id)
+                if dependency_task and dependency_task.current_artifact_id
+                else None
+            )
+            if (
+                not dependency_task
+                or dependency_task.status != "approved"
+                or not dependency_artifact
+            ):
+                dependencies_ready = False
+                break
+            if (
+                dependency == "video_script"
+                and (dependency_artifact.content_json or {}).get("schema_version") not in {"3.0", "4.0"}
+            ):
+                dependencies_ready = False
+                break
+        video_task.status = "ready_to_generate" if dependencies_ready else "waiting_dependency"
+        video_task.progress = 0
     return sorted(by_type.values(), key=lambda item: item.display_order)
 
 
@@ -373,8 +529,8 @@ async def _execute_dispatched_task_run(run_id: str):
         task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
         task_type = task.task_type if task else ""
     if task_type == "video_generation":
-        from app.services.video_generation_service import execute_video_generation_run
-        await execute_video_generation_run(run_id)
+        from app.services.seedance_video_generation_service import execute_seedance_video_run
+        await execute_seedance_video_run(run_id)
         return
     await execute_task_run(run_id)
 
@@ -392,6 +548,7 @@ async def schedule_ready_tasks(course_id: str):
 
 async def _schedule_ready_tasks(course_id: str):
     run_ids: list[str] = []
+    batch_id = ""
     async with SessionLocal() as db:
         course = await db.get(CourseProject, course_id)
         if not course:
@@ -403,21 +560,50 @@ async def _schedule_ready_tasks(course_id: str):
         if not blueprint or blueprint.status != "approved":
             return
         items = await ensure_course_tasks(db, course_id)
-        latest = {kind: await _latest_artifact(db, course_id, kind) for kind, *_ in TASK_SPECS}
-        for item in items:
-            if item.status != "waiting_dependency" or item.active_run_id or item.current_artifact_id:
-                continue
-            dependencies_ready = all(latest.get(dep) for dep in item.dependency_types_json)
-            if item.task_type == "video_generation":
-                if dependencies_ready:
-                    item.status = "ready_to_generate"
-                    item.progress = 0
-                continue
-            if item.agent_profile_status != "ready" or not item.current_agent_profile_id:
-                continue
-            if dependencies_ready:
-                run = await create_task_run(db, item, "initial")
-                run_ids.append(run.id)
+        tasks_by_type = {item.task_type: item for item in items}
+        # 共享项目记忆架构：内容 Agent 之间没有调度依赖。只要 Agent 初始化就绪、
+        # 没有正在运行的任务且还没有首稿 Artifact，就直接进入队列并行启动；
+        # 视频生成仍按运行输入契约（存在 V3/V4 脚本）决定是否可生成。
+        pending_content = [
+            item for item in items
+            if item.task_type in CONTENT_TASK_TYPES
+            and item.status == "waiting_dependency"
+            and not item.active_run_id
+            and not item.current_artifact_id
+            and item.agent_profile_status == "ready"
+            and item.current_agent_profile_id
+        ]
+        video_task = tasks_by_type.get("video_generation")
+        if pending_content:
+            batch_id = str(uuid4())[:8]
+        for item in pending_content:
+            run = await create_task_run(db, item, "initial")
+            run.batch_id = batch_id
+            run_ids.append(run.id)
+        if video_task and not video_task.current_artifact_id and not video_task.active_run_id and video_task.status in {"waiting_dependency", "ready_to_generate"}:
+            dependencies_ready = True
+            for dependency in video_task.dependency_types_json:
+                dependency_task = tasks_by_type.get(dependency)
+                dependency_artifact = (
+                    await db.get(Artifact, dependency_task.current_artifact_id)
+                    if dependency_task and dependency_task.current_artifact_id
+                    else None
+                )
+                if (
+                    not dependency_task
+                    or dependency_task.status != "approved"
+                    or not dependency_artifact
+                ):
+                    dependencies_ready = False
+                    break
+                if (
+                    dependency == "video_script"
+                    and (dependency_artifact.content_json or {}).get("schema_version") not in {"3.0", "4.0"}
+                ):
+                    dependencies_ready = False
+                    break
+            video_task.status = "ready_to_generate" if dependencies_ready else "waiting_dependency"
+            video_task.progress = 0
         if run_ids:
             course.status = "resource_generating"
         await db.commit()
@@ -442,7 +628,7 @@ async def _profile_provider(db, course: CourseProject, task: CourseTask):
 
 async def _ensure_current_task_profile(db, task: CourseTask) -> CourseTaskAgentProfile | None:
     profile = await db.get(CourseTaskAgentProfile, task.current_agent_profile_id) if task.current_agent_profile_id else None
-    if task.task_type not in {"task_sheet", "exercise", "video_script"} or not profile or profile.status != "ready":
+    if task.task_type not in {"task_sheet", "exercise", "video_script", "lesson_plan", "verbatim"} or not profile or profile.status != "ready":
         return profile
     await ensure_prompt_templates(db)
     template = await active_prompt_template(db, task.agent_type)
@@ -472,17 +658,27 @@ async def _ensure_current_task_profile(db, task: CourseTask) -> CourseTaskAgentP
         "review_and_repair_requirements": ["检查答案、干扰项、可解性和评分点；自动修复最多一次"],
     } if task.task_type == "exercise" else {
         "objective_alignment_requirements": ["每个分镜映射真实的课程目标、知识点与教学环节"],
-        "narrative_arc_requirements": ["按导入、建构、示范、检查和总结形成完整叙事闭环"],
-        "slide_mapping_requirements": ["只引用真实 PPT 页面并保持页面顺序"],
-        "scene_granularity_requirements": ["同一页面可拆分多个连续分镜"],
-        "visual_direction_requirements": ["明确页面状态、聚焦对象、常规动效与转场"],
-        "narration_requirements": ["输出可直接录制且不照读 PPT 的完整旁白"],
-        "subtitle_requirements": ["字幕忠实覆盖旁白并遵守行宽限制"],
-        "interaction_requirements": ["关键判断处设置问题、等待和反馈衔接"],
-        "timing_and_pacing_requirements": ["总时长、逐页时长、旁白容量、字幕和停顿守恒"],
-        "production_feasibility_requirements": ["仅使用 16:9 PPT 录屏和常规动效"],
-        "verbatim_handoff_requirements": ["向逐字稿交付稳定旁白、时间轴和页面映射"],
-        "review_and_repair_requirements": ["检查引用、时长、字幕覆盖和制作可执行性"],
+        "narrative_arc_requirements": ["章节目录是动态的：由 AI 根据课程内容与教师意图决定章节数量、标题、顺序与分镜归属，不固定为导入—建构—示范—检查—总结"],
+        "segmentation_requirements": ["一个教学动作、一个主要场景和一个完整口播单元组成 4–15 秒片段，且每段必须且只能属于一个章节"],
+        "continuity_requirements": ["同一人物和环境使用稳定连续性分组"],
+        "visual_prompt_requirements": ["明确主体、环境、动作、镜头和视觉风格，不引用 PPT"],
+        "native_audio_requirements": ["口播与声音指导交由 Seedance 原生音轨生成，不设计 TTS"],
+        "fact_qa_requirements": ["列出必需术语、数字、单位和不可改变的教学结论"],
+        "negative_constraint_requirements": ["禁止字幕、水印、乱码、幻灯片、界面和错误公式"],
+        "timing_and_pacing_requirements": ["不截断句子，过长拆分，过短同场景合并；同章分镜在时间轴上连续，总时长守恒"],
+        "cost_control_requirements": ["默认 720p 单候选，保持片段独立可复用"],
+        "verbatim_handoff_requirements": ["按 scene_id 交付稳定口播和时间轴"],
+        "review_and_repair_requirements": ["检查引用、时长、事实基准与原生生成可执行性；新章节/分镜 ID 由系统生成，禁止编造或批量改号"],
+    } if task.task_type == "video_script" else {
+        "scene_alignment_requirements": ["逐字稿每段对齐视频脚本场景（scene_id），时间轴为权威数值"],
+        "fact_preservation_requirements": ["改写口播必须保留源场景的必需术语/数字/教学结论"],
+        "speaking_style_requirements": ["必讲承载事实与结论，补充仅作时间允许时的举例；语气/重音/互动与该段教学动作匹配"],
+        "timing_requirements": ["口播字数按语速换算后不得超过段落时长，停顿用于时间轴适配"],
+        "deterministic_metrics_requirements": ["word_count 与 estimated_duration_seconds 由系统确定性计算，禁止伪造"],
+    } if task.task_type == "verbatim" else {
+        "alignment_requirements": ["每个目标必须对应教学活动和学习证据"],
+        "timeline_requirements": ["各环节时长之和等于课程总时长"],
+        "board_and_homework_requirements": ["板书突出核心关系", "作业直接覆盖课程目标"],
     })
     for key, value in upgrades.items():
         context.setdefault(key, value)
@@ -490,6 +686,8 @@ async def _ensure_current_task_profile(db, task: CourseTask) -> CourseTaskAgentP
         "task_sheet": TaskSheetProfile,
         "exercise": ExerciseProfile,
         "video_script": VideoScriptProfile,
+        "lesson_plan": LessonPlanProfile,
+        "verbatim": VerbatimProfile,
     }[task.task_type].model_validate(context)
     system_prompt, task_prompt, digest = prepare_profile_prompts(
         template, specialized.model_dump(), course, blueprint.content_json, blueprint.version,
@@ -750,13 +948,116 @@ async def _generate_ppt_revision(provider, profile, knowledge_context, base_inst
     )
 
 
-async def _generate_initial(db, course: CourseProject, task: CourseTask, blueprint: CourseBlueprint):
+def _basic_video_script_from_blueprint(bp: CourseBlueprintSchema) -> dict:
+    """无视频脚本时的 V2 逐字稿参考：从蓝图 timeline 生成基础场景结构。
+
+    仅用于"完全没有视频脚本"时的逐字稿兜底（不阻塞生成）；正常路径优先
+    使用真实视频脚本场景。
+    """
+    from app.schemas.verbatim_v2 import DEFAULT_SPEAKING_RATE_CPS
+
+    total = float(bp.course_identity.duration_minutes * 60)
+    scenes = []
+    for index, segment in enumerate(bp.timeline):
+        start = float(segment.start_minute * 60)
+        end = float(segment.end_minute * 60)
+        if end <= start:
+            end = start + max(10.0, total / max(1, len(bp.timeline)))
+        spoken = f"同学们好，接下来我们进入「{segment.name}」环节。{segment.purpose}"
+        scenes.append({
+            "id": f"SV-{index + 1:02d}",
+            "sequence": index + 1,
+            "title": segment.name,
+            "lesson_stage_id": segment.segment_id,
+            "start_seconds": round(start, 2),
+            "end_seconds": round(end, 2),
+            "spoken_text": spoken,
+            "pedagogical_role": "概念讲解",
+            "voice_direction": "自然、清晰、可信赖的中文教师讲解",
+            "required_terms": [],
+            "required_numbers": [],
+            "required_facts": [segment.purpose],
+            "production_notes": [segment.teacher_action],
+        })
+    return {
+        "schema_version": "3.0",
+        "course_info": {
+            "course_title": bp.course_identity.title,
+            "subject": bp.course_identity.subject,
+            "grade_level": bp.course_identity.grade_level,
+            "audience": bp.course_identity.audience,
+            "duration_seconds": round(total),
+        },
+        "speaking_rate_cps": DEFAULT_SPEAKING_RATE_CPS,
+        "scenes": scenes,
+    }
+
+
+def _basic_verbatim_from_blueprint(bp: CourseBlueprintSchema) -> VerbatimContentV2:
+    """无视频脚本时的逐字稿基础稿：从蓝图 timeline 生成 V2 结构。
+
+    共享项目记忆架构下，逐字稿不再强制等待视频脚本；缺失时先生成基础版本，
+    后续视频脚本存在时可按需读取并更新。
+    """
+    from app.schemas.verbatim_v2 import (
+        DEFAULT_SPEAKING_RATE_CPS,
+        VerbatimContentV2,
+        _pedagogical_action_from_role,
+        verbatim_section_seconds,
+        verbatim_speech_seconds,
+        verbatim_word_count,
+    )
+
+    total = float(bp.course_identity.duration_minutes * 60)
+    sections = []
+    for index, segment in enumerate(bp.timeline):
+        start = float(segment.start_minute * 60)
+        end = float(segment.end_minute * 60)
+        if end <= start:
+            end = start + max(10.0, total / max(1, len(bp.timeline)))
+        required_text = f"同学们好，接下来我们进入「{segment.name}」环节。{segment.purpose}"
+        pause = round(max(0.0, min(3.0, (end - start) - verbatim_speech_seconds(required_text, DEFAULT_SPEAKING_RATE_CPS))), 2)
+        sections.append({
+            "id": f"VB-{index + 1:02d}",
+            "scene_id": f"SV-{index + 1:02d}",
+            "slide_ids": [],
+            "start_seconds": round(start, 2),
+            "end_seconds": round(end, 2),
+            "pedagogical_action": _pedagogical_action_from_role(segment.name),
+            "delivery_tone": "自然、清晰、符合学习者水平",
+            "required_text": required_text,
+            "optional_text": f"如果时间允许，可以结合{bp.course_identity.audience}熟悉的情境补充说明。",
+            "key_emphasis": [segment.name],
+            "interaction": "邀请学生用一句话概括当前要点。",
+            "pause_seconds": pause,
+            "word_count": verbatim_word_count(required_text),
+            "estimated_duration_seconds": verbatim_section_seconds(required_text, DEFAULT_SPEAKING_RATE_CPS, pause),
+        })
+    return VerbatimContentV2.model_validate({
+        "schema_version": "2.0",
+        "course_info": {
+            "course_title": bp.course_identity.title,
+            "subject": bp.course_identity.subject,
+            "grade_level": bp.course_identity.grade_level,
+            "audience": bp.course_identity.audience,
+            "duration_seconds": round(total),
+        },
+        "speaking_rate_cps": DEFAULT_SPEAKING_RATE_CPS,
+        "source_versions": {},
+        "sections": sections,
+    })
+
+
+async def _generate_initial(db, course: CourseProject, task: CourseTask, blueprint: CourseBlueprint, run: GenerationRun):
     bp = CourseBlueprintSchema.model_validate(blueprint.content_json)
     kind = task.task_type
     profile, provider, config = await _profile_provider(db, course, task)
     if kind == "lesson_plan":
-        mock = make_lesson_plan(bp)
-        schema = LessonPlanContent
+        # 新生成教学设计直接写 V2（确定性示例）；V1 仅历史 Artifact 保留。
+        from app.schemas.lesson_plan import make_lesson_plan_v2
+
+        mock = make_lesson_plan_v2(bp)
+        schema = LessonPlanContentV2
     elif kind == "ppt":
         preferred_template = resolve_ppt_template(
             (config.preferences_json or {}).get("default_ppt_template") if config else None,
@@ -770,26 +1071,43 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         mock = make_exercises(bp)
         schema = ExerciseContent
     elif kind == "video_script":
+        # 共享项目记忆：教学设计是可选参考，缺失时用蓝图生成基础脚本（不阻塞）。
         lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
-        ppt_artifact = await _latest_artifact(db, course.id, "ppt")
-        if not lesson_artifact or not ppt_artifact:
-            raise RuntimeError("教学设计或 PPT 尚未生成")
-        lesson_plan = LessonPlanContent.model_validate(lesson_artifact.content_json)
-        ppt = PPTContent.model_validate(ppt_artifact.content_json)
-        mock = make_video_script(bp, lesson_plan, ppt)
-        schema = VideoScriptContent
+        from app.schemas.lesson_plan import lesson_plan_v1_from_any
+
+        if lesson_artifact:
+            lesson_plan = lesson_plan_v1_from_any(lesson_artifact.content_json)
+        else:
+            lesson_plan = make_lesson_plan(bp)
+        mock = make_seedance_video_script(bp, lesson_plan)
+        schema = SeedanceVideoScriptContent
     else:
-        ppt_artifact = await _latest_artifact(db, course.id, "ppt")
         script_artifact = await _latest_artifact(db, course.id, "video_script")
-        if not ppt_artifact or not script_artifact:
-            raise RuntimeError("PPT 或视频脚本尚未生成")
-        ppt = PPTContent.model_validate(ppt_artifact.content_json)
-        script = VideoScriptContent.model_validate(script_artifact.content_json)
-        mock = make_verbatim(bp, ppt, script)
-        schema = VerbatimContent
+        schema_version = (script_artifact.content_json or {}).get("schema_version") if script_artifact else None
+        if script_artifact and schema_version in {"3.0", "4.0"}:
+            from app.schemas.video_script_v4 import seedance_video_script_for_generation
+            from app.schemas.verbatim_v2 import make_seedance_verbatim_v2
+
+            script = seedance_video_script_for_generation(script_artifact.content_json)
+            script_data = script.model_dump() if hasattr(script, "model_dump") else script
+            mock = make_seedance_verbatim_v2(bp, script_data)
+        elif script_artifact:
+            # 旧版脚本：V1 逐字稿作为过渡，首次修改时由 Agent 升级为 V2。
+            ppt_artifact = await _latest_artifact(db, course.id, "ppt")
+            if ppt_artifact:
+                mock = make_verbatim(
+                    bp, PPTContent.model_validate(ppt_artifact.content_json),
+                    VideoScriptContent.model_validate(script_artifact.content_json),
+                )
+            else:
+                mock = make_seedance_verbatim_v2(bp, _basic_video_script_from_blueprint(bp))
+        else:
+            # 无视频脚本：基于蓝图生成基础逐字稿（不阻塞）。
+            mock = _basic_verbatim_from_blueprint(bp)
+        schema = VerbatimContentV2
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None,
+        config.context_window_tokens if config else None, run=run,
     )
     if isinstance(provider, MockProvider):
         value = mock
@@ -835,23 +1153,42 @@ async def _generate_revision(db, course: CourseProject, task: CourseTask, run: G
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None,
+        config.context_window_tokens if config else None, run=run,
     )
     version = source.version + 1
     if isinstance(provider, MockProvider):
-        if task.task_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
+        if task.task_type == "task_sheet" and source.content_json.get("schema_version") == "3.0":
+            # V3 动态任务单：旧单次路径原样保留（动态流水线负责 V3 修改）。
+            content = dict(source.content_json)
+        elif task.task_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
             factory = make_task_sheet if task.task_type == "task_sheet" else make_exercises
             content = factory(CourseBlueprintSchema.model_validate(blueprint.content_json)).model_dump()
-        elif task.task_type == "video_script" and source.content_json.get("schema_version") != "2.0":
+        elif task.task_type == "video_script" and source.content_json.get("schema_version") not in {"3.0", "4.0"}:
             lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
-            ppt_artifact = await _latest_artifact(db, course.id, "ppt")
-            if not lesson_artifact or not ppt_artifact:
-                raise RuntimeError("视频脚本 V2 升级时缺少教学设计或 PPT")
-            content = make_video_script(
+            from app.schemas.lesson_plan import lesson_plan_v1_from_any
+
+            # 共享项目记忆：教学设计缺失时用蓝图兜底（不阻塞升级）。
+            if lesson_artifact:
+                lesson_plan = lesson_plan_v1_from_any(lesson_artifact.content_json)
+            else:
+                lesson_plan = make_lesson_plan(CourseBlueprintSchema.model_validate(blueprint.content_json))
+            content = make_seedance_video_script(
                 CourseBlueprintSchema.model_validate(blueprint.content_json),
-                LessonPlanContent.model_validate(lesson_artifact.content_json),
-                PPTContent.model_validate(ppt_artifact.content_json),
+                lesson_plan,
             ).model_dump()
+        elif task.task_type == "video_script" and source.content_json.get("schema_version") == "3.0":
+            # 保持 V3 幂等：旧单次路径对 V3 原样保留（动态流水线负责 V4 升级）
+            content = dict(source.content_json)
+        elif task.task_type == "verbatim" and source.content_json.get("schema_version") != "2.0":
+            script_artifact = await _latest_artifact(db, course.id, "video_script")
+            script_raw = None
+            if script_artifact and (script_artifact.content_json or {}).get("schema_version") in {"3.0", "4.0"}:
+                from app.schemas.video_script_v4 import seedance_video_script_for_generation
+
+                script_raw = seedance_video_script_for_generation(script_artifact.content_json).model_dump()
+            from app.schemas.verbatim_v2 import upgrade_verbatim_v2
+
+            content = upgrade_verbatim_v2(source.content_json, script_raw).model_dump()
         else:
             content = dict(source.content_json)
         conflict_note = ""
@@ -900,30 +1237,47 @@ async def _generate_context_sync(
     task: CourseTask,
     source: Artifact,
     blueprint: CourseBlueprint,
+    run: GenerationRun | None = None,
 ):
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None,
+        config.context_window_tokens if config else None, run=run,
     )
     schema = TASK_SCHEMAS[task.task_type]
     locks = list(await db.scalars(select(ArtifactLock).where(ArtifactLock.artifact_id == source.id)))
-    if isinstance(provider, MockProvider):
+    # 历史脚本升级为 Seedance V3；只使用已确认蓝图和教学设计，绝不读取 PPT。
+    if task.task_type == "video_script" and source.content_json.get("schema_version") not in {"3.0", "4.0"}:
+        lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
+        from app.schemas.lesson_plan import lesson_plan_v1_from_any
+
+        # 共享项目记忆：教学设计缺失时用蓝图兜底（不阻塞升级）。
+        if lesson_artifact:
+            lesson_plan = lesson_plan_v1_from_any(lesson_artifact.content_json)
+        else:
+            lesson_plan = make_lesson_plan(CourseBlueprintSchema.model_validate(blueprint.content_json))
+        value = make_seedance_video_script(
+            CourseBlueprintSchema.model_validate(blueprint.content_json),
+            lesson_plan,
+        )
+        model_name = "deterministic-to-seedance-v3"
+    elif isinstance(provider, MockProvider):
         if task.task_type in {"task_sheet", "exercise"} and source.content_json.get("schema_version") != "2.0":
             factory = make_task_sheet if task.task_type == "task_sheet" else make_exercises
             value = factory(CourseBlueprintSchema.model_validate(blueprint.content_json))
-        elif task.task_type == "video_script" and source.content_json.get("schema_version") != "2.0":
-            lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
-            ppt_artifact = await _latest_artifact(db, course.id, "ppt")
-            if not lesson_artifact or not ppt_artifact:
-                raise RuntimeError("视频脚本 V2 升级时缺少教学设计或 PPT")
-            value = make_video_script(
-                CourseBlueprintSchema.model_validate(blueprint.content_json),
-                LessonPlanContent.model_validate(lesson_artifact.content_json),
-                PPTContent.model_validate(ppt_artifact.content_json),
-            )
+        elif task.task_type == "verbatim" and source.content_json.get("schema_version") != "2.0":
+            script_artifact = await _latest_artifact(db, course.id, "video_script")
+            script_raw = None
+            if script_artifact and (script_artifact.content_json or {}).get("schema_version") in {"3.0", "4.0"}:
+                from app.schemas.video_script_v4 import seedance_video_script_for_generation
+
+                script_raw = seedance_video_script_for_generation(script_artifact.content_json).model_dump()
+            from app.schemas.verbatim_v2 import upgrade_verbatim_v2
+
+            value = upgrade_verbatim_v2(source.content_json, script_raw)
         else:
             value = schema.model_validate(source.content_json)
+        model_name = resolved_model_name(provider, config)
     else:
         instruction = (
             "请在保留当前文件有效内容的基础上同步最新项目知识；不得无故改写未受影响字段。\n"
@@ -934,7 +1288,8 @@ async def _generate_context_sync(
             profile, schema.model_json_schema(), knowledge_context, instruction,
         )
         value = await provider.structured(system, prompt, schema)
-    return value, resolved_model_name(provider, config), profile, source_versions, locks
+        model_name = resolved_model_name(provider, config)
+    return value, model_name, profile, source_versions, locks
 
 
 async def _create_streaming_reply(run_id: str) -> str:
@@ -1097,7 +1452,14 @@ async def _mark_dependents_stale(db, source_task: CourseTask, source_version: in
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == source_task.course_id)))
     stale_tasks = []
     for task in tasks:
-        if source_task.task_type not in task.dependency_types_json or not task.current_artifact_id:
+        if source_task.task_type not in task.dependency_types_json:
+            continue
+        if not task.current_artifact_id:
+            if task.task_type == "video_generation" and task.status == "ready_to_generate":
+                task.status = "waiting_dependency"
+                task.progress = 0
+                task.error_json = None
+                stale_tasks.append(task)
             continue
         artifact = await db.get(Artifact, task.current_artifact_id)
         if artifact and (artifact.source_versions_json or {}).get(source_task.task_type) != source_version:
@@ -1115,6 +1477,12 @@ async def register_artifact_version(db, artifact: Artifact, invalidate_dependent
     ))
     if not task:
         return
+    if artifact.artifact_type == "video_generation" and not is_publishable_video_artifact(artifact):
+        task.current_artifact_id = None
+        task.status = "waiting_dependency"
+        task.progress = 0
+        task.error_json = None
+        return
     task.current_artifact_id = artifact.id
     if task.current_agent_profile_id and artifact.agent_profile_id != task.current_agent_profile_id:
         task.status = "stale"
@@ -1123,6 +1491,29 @@ async def register_artifact_version(db, artifact: Artifact, invalidate_dependent
     task.progress = 100
     task.error_json = None
     task.completed_at = utcnow()
+    # 共享项目记忆：教师/旧路径创建的新版本同样索引进项目记忆并推进版本。
+    if artifact.artifact_type in CONTENT_TASK_TYPES:
+        from app.services.project_knowledge_service import bump, index_artifact
+
+        await index_artifact(db, artifact, created_by="teacher")
+        memory_revision = await bump(
+            db, artifact.course_id, f"{TASK_SPEC_BY_TYPE[artifact.artifact_type][1]} 发布 V{artifact.version}",
+            source_type="artifact", source_id=artifact.id, created_by="teacher",
+        )
+        artifact.memory_revision_created = memory_revision
+        run = await db.scalar(select(GenerationRun).where(
+            GenerationRun.course_task_id == task.id,
+        ).order_by(GenerationRun.created_at.desc()).limit(1))
+        if run:
+            await _emit(
+                db, run, "artifact.published", task, status=task.status,
+                artifact=artifact_payload(artifact), memory_revision=memory_revision,
+            )
+            await _emit(
+                db, run, "project_memory.updated", task, status=task.status,
+                memory_revision=memory_revision,
+                change_reason=f"{TASK_SPEC_BY_TYPE[artifact.artifact_type][1]} 发布 V{artifact.version}",
+            )
     if invalidate_dependents:
         await _mark_dependents_stale(db, task, artifact.version)
 
@@ -1156,8 +1547,27 @@ async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint
     )
     db.add(report)
     await db.flush()
+    # 各校验器问题字典字段不完全一致（如任务单 V3 携带 path/id/target_role），
+    # 投影为 QualityIssue 的持久化字段，避免未知列导致整条任务失败。
+    quality_columns = {
+        "artifact_type", "severity", "location", "dimension", "description",
+        "evidence", "suggestion", "target_agent", "required_action",
+    }
     for issue in issues:
-        db.add(QualityIssue(report_id=report.id, **issue))
+        db.add(QualityIssue(report_id=report.id, **{
+            key: value for key, value in issue.items() if key in quality_columns
+        }))
+    # 共享项目记忆：QA 结论进入项目记忆（同一事务，先写后 bump）。
+    from app.services.project_knowledge_service import bump, index_qa
+
+    await index_qa(
+        db, course.id, report.id, report.score, report.summary,
+        issues=[{k: item.get(k) for k in ("artifact_type", "severity", "description")} for item in issues],
+        created_by="qa",
+    )
+    await bump(
+        db, course.id, "质量检查完成", source_type="qa", source_id=report.id, created_by="qa",
+    )
     for kind, content, markdown, model in (
         ("quality_report", {"score": report.score, "summary": report.summary, "issues": issues}, f"# 质量报告\n\n{report.summary}\n\n- 综合分数：{report.score}\n- 问题数量：{len(issues)}", "rules"),
         ("citation_report", {"source_refs": blueprint.content_json.get("source_refs", [])}, "# 引用来源\n\n" + ("\n".join(f"- {ref}" for ref in blueprint.content_json.get("source_refs", [])) or "本课程未引用上传材料片段。"), "deterministic"),
@@ -1224,12 +1634,45 @@ async def execute_task_run(run_id: str):
             await _publish_activity(run_id, "analyzing", 26, "completed")
             current_phase = "generating"
             await _publish_activity(run_id, "generating", 30)
-            if task.task_type == "ppt":
+            use_lesson_plan_pipeline = (
+                task.task_type == "lesson_plan" and get_settings().lesson_plan_agent_runtime_enabled
+            )
+            use_task_sheet_pipeline = (
+                task.task_type == "task_sheet" and get_settings().task_sheet_agent_runtime_enabled
+            )
+            use_video_script_pipeline = (
+                task.task_type == "video_script" and get_settings().video_script_agent_runtime_enabled
+            )
+            use_verbatim_pipeline = (
+                task.task_type == "verbatim" and get_settings().verbatim_agent_runtime_enabled
+            )
+            if task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline or use_verbatim_pipeline:
                 # PPT：多 Agent 流水线（多次 LLM 调用 + 工具调用 + QA 修订闭环）
-                from app.services.ppt_pipeline_service import run_ppt_pipeline
+                # 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2：动态工具化流水线（意图识别 +
+                # 工具修改候选稿 + QA 返修 + 流式时间线）
+                if task.task_type == "ppt":
+                    from app.services.ppt_pipeline_service import run_ppt_pipeline
+
+                    pipeline_runner = run_ppt_pipeline(db, course, task, run, blueprint)
+                elif use_lesson_plan_pipeline:
+                    from app.services.lesson_plan_pipeline_service import run_lesson_plan_pipeline
+
+                    pipeline_runner = run_lesson_plan_pipeline(db, course, task, run, blueprint)
+                elif use_video_script_pipeline:
+                    from app.services.video_script_pipeline_service import run_video_script_pipeline
+
+                    pipeline_runner = run_video_script_pipeline(db, course, task, run, blueprint)
+                elif use_verbatim_pipeline:
+                    from app.services.verbatim_pipeline_service import run_verbatim_pipeline
+
+                    pipeline_runner = run_verbatim_pipeline(db, course, task, run, blueprint)
+                else:
+                    from app.services.task_sheet_pipeline_service import run_task_sheet_pipeline
+
+                    pipeline_runner = run_task_sheet_pipeline(db, course, task, run, blueprint)
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
                     run_id,
-                    run_ppt_pipeline(db, course, task, run, blueprint),
+                    pipeline_runner,
                 )
                 result = generated
                 content = result.content
@@ -1258,7 +1701,7 @@ async def execute_task_run(run_id: str):
                     raise RuntimeError("任务文件尚未生成，无法同步项目上下文")
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
                     run_id,
-                    _generate_context_sync(db, course, task, source, blueprint),
+                    _generate_context_sync(db, course, task, source, blueprint, run),
                 )
                 value, model_name, profile, source_versions, locks = generated
                 content = value.model_dump()
@@ -1266,7 +1709,7 @@ async def execute_task_run(run_id: str):
             else:
                 generated, generation_elapsed = await _run_with_generation_heartbeat(
                     run_id,
-                    _generate_initial(db, course, task, blueprint),
+                    _generate_initial(db, course, task, blueprint, run),
                 )
                 value, model_name, profile, source_versions = generated
                 content = value.model_dump()
@@ -1277,6 +1720,18 @@ async def execute_task_run(run_id: str):
                     else "首次生成"
                 )
 
+            # 共享项目记忆：记录本次运行实际读取的上下文快照（版本 + 可用来源清单）。
+            # 新前端消费该事件展示"本次使用项目记忆 V{n}"；旧前端忽略未知事件。
+            await _emit(
+                db,
+                run,
+                "context.snapshot_created",
+                task,
+                status=task.status,
+                memory_revision=run.memory_revision or 0,
+                context_manifest=run.context_manifest_json or {},
+                context_hash=run.context_hash or "",
+            )
             # Close the read transaction before independently committed stream events
             # continue updating the same SQLite database.
             await db.commit()
@@ -1288,13 +1743,43 @@ async def execute_task_run(run_id: str):
                 elapsed_ms=generation_elapsed,
             )
 
-            if task.task_type == "ppt" and skip_publish:
+            if (task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline) and skip_publish:
                 # A safe no-op is a successful request resolution, not a new
                 # domain version. Keep the official Artifact pointer and close
                 # the run with an explicit no_change terminal result.
+                # 人工确认等待（needs_confirmation）：run 保持 paused，不终结；
+                # 确认接口从同一 GenerationRun 的 checkpoint 恢复。
+                if result.keep_paused:
+                    task.status = "paused"
+                    task.progress = 90
+                    run.status = "paused"
+                    run.progress = 90
+                    stored_user_message = await db.get(AgentMessage, user_message.id) if user_message else None
+                    if stored_user_message:
+                        stored_user_message.status = "completed"
+                    await db.commit()
+                    if pipeline_runtime is not None and getattr(pipeline_runtime, "emitter", None) is not None:
+                        await pipeline_runtime.emitter.task_paused(
+                            reason="等待教师人工确认", checkpoint_step=pipeline_runtime.current_agent_key or "confirmation",
+                        )
+                    return
                 await db.commit()
-                from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
-                await complete_ppt_pipeline_after_publish(
+                if task.task_type == "ppt":
+                    from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
+                    complete = complete_ppt_pipeline_after_publish
+                elif use_lesson_plan_pipeline:
+                    from app.services.lesson_plan_pipeline_service import complete_lesson_plan_pipeline_after_publish
+                    complete = complete_lesson_plan_pipeline_after_publish
+                elif use_video_script_pipeline:
+                    from app.services.video_script_pipeline_service import complete_video_script_pipeline_after_publish
+                    complete = complete_video_script_pipeline_after_publish
+                elif use_verbatim_pipeline:
+                    from app.services.verbatim_pipeline_service import complete_verbatim_pipeline_after_publish
+                    complete = complete_verbatim_pipeline_after_publish
+                else:
+                    from app.services.task_sheet_pipeline_service import complete_task_sheet_pipeline_after_publish
+                    complete = complete_task_sheet_pipeline_after_publish
+                await complete(
                     pipeline_runtime, source.id if source is not None else "",
                 )
                 await db.rollback()
@@ -1342,19 +1827,44 @@ async def execute_task_run(run_id: str):
                 content, _, pipeline_notes = await process_exercise_visuals(db, course, run, content)
                 content, degraded_notes = degrade_unreviewed_visuals(content)
                 visual_notes = [*pipeline_notes, *degraded_notes]
-            validated_model = TASK_SCHEMAS[task.task_type].model_validate(content)
+            if task.task_type == "lesson_plan":
+                # V1/V2 按 schema_version 分派校验；V2 候选稿在保存前再跑统一质量门禁。
+                lesson_issues = validate_lesson_plan(
+                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    content,
+                    [lock.json_path for lock in locks],
+                )
+                blocking = [item for item in lesson_issues if item["severity"] in {"critical", "major"}]
+                if blocking:
+                    raise TaskValidationError(f"教学设计校验未通过：{blocking[0]['description']}")
+            if task.task_type == "lesson_plan" and (content or {}).get("schema_version") == "2.0":
+                validated_model = LessonPlanContentV2.model_validate(content)
+            elif task.task_type == "task_sheet" and (content or {}).get("schema_version") == TASK_SHEET_V3:
+                # 结构安全校验（教学语义门禁已移除）：结构非法时保留原版。
+                validated_model = TaskSheetContentV3.model_validate(content)
+            elif task.task_type == "video_script" and (content or {}).get("schema_version") == "4.0":
+                from app.schemas.video_script_v4 import SeedanceVideoScriptContentV4
+
+                validated_model = SeedanceVideoScriptContentV4.model_validate(content)
+            else:
+                validated_model = TASK_SCHEMAS[task.task_type].model_validate(content)
             if task.task_type == "video_script":
+                if isinstance(validated_model, VideoScriptContent):
+                    validated_model = repair_video_script_subtitles(validated_model)
                 lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
-                ppt_artifact = await _latest_artifact(db, course.id, "ppt")
-                if not lesson_artifact or not ppt_artifact:
-                    raise RuntimeError("视频脚本校验时缺少教学设计或 PPT")
+                # 共享项目记忆：教学设计缺失时用蓝图兜底参与引用校验（不阻塞）。
+                lesson_raw = (
+                    lesson_artifact.content_json
+                    if lesson_artifact
+                    else make_lesson_plan(CourseBlueprintSchema.model_validate(blueprint.content_json)).model_dump()
+                )
                 video_issues = validate_video_script(
                     CourseBlueprintSchema.model_validate(blueprint.content_json),
-                    validated_model.model_dump(), lesson_artifact.content_json, ppt_artifact.content_json,
+                    validated_model.model_dump(), lesson_raw, None,
                 )
                 blocking = [item for item in video_issues if item["severity"] in {"critical", "major"}]
                 if blocking:
-                    raise RuntimeError(blocking[0]["description"])
+                    raise TaskValidationError(f"视频脚本校验未通过：{blocking[0]['description']}")
             if task.task_type == "exercise":
                 task_sheet_artifact = await _latest_artifact(db, course.id, "task_sheet")
                 exercise_issues = validate_exercise(
@@ -1364,7 +1874,7 @@ async def execute_task_run(run_id: str):
                 )
                 blocking = [item for item in exercise_issues if item["severity"] in {"critical", "major"}]
                 if blocking:
-                    raise RuntimeError(blocking[0]["description"])
+                    raise TaskValidationError(f"课后练习校验未通过：{blocking[0]['description']}")
                 _, review_provider, _ = await _profile_provider(db, course, task)
                 validated_model, _ = await review_and_repair_exercise(
                     review_provider,
@@ -1388,7 +1898,14 @@ async def execute_task_run(run_id: str):
                     review_data["review_summary"]["visual_review_status"] = "passed" if has_visual else "not_required"
                 validated_model = ExerciseContent.model_validate(review_data)
             validated = validated_model.model_dump()
-            markdown = to_markdown(task.task_type, validated_model)
+            if task.task_type == "lesson_plan" and validated.get("schema_version") == "2.0":
+                markdown = lesson_plan_to_markdown_v2(validated)
+            elif task.task_type == "task_sheet" and validated.get("schema_version") == TASK_SHEET_V3:
+                markdown = task_sheet_v3_to_markdown(validated)
+            elif task.task_type == "verbatim" and validated.get("schema_version") == "2.0":
+                markdown = verbatim_v2_to_markdown(validated)
+            else:
+                markdown = to_markdown(task.task_type, validated_model)
             if source:
                 for lock in locks:
                     if (
@@ -1406,9 +1923,14 @@ async def execute_task_run(run_id: str):
 
             reply_id = None
             streamed_reply = None
-            # PPT 的对话气泡生命周期由 pipeline emitter 拥有（agent_message_*），
-            # 这里跳过 _stream_verified_reply，避免创建第二条 assistant 消息。
-            if user_message and revision and provider and task.task_type != "ppt":
+            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2 的对话气泡生命周期由
+            # pipeline emitter 拥有（agent_message_*），这里跳过 _stream_verified_reply，
+            # 避免创建第二条 assistant 消息。
+            if user_message and revision and provider and (
+                task.task_type not in {"ppt", "lesson_plan", "video_script", "verbatim"}
+                and not use_task_sheet_pipeline
+                and not use_verbatim_pipeline
+            ):
                 current_phase = "replying"
                 await _publish_activity(run_id, "replying", 88)
                 reply_id, streamed_reply = await _stream_verified_reply(
@@ -1447,6 +1969,7 @@ async def execute_task_run(run_id: str):
                 change_summary=change_summary,
                 source_versions_json=source_versions,
                 agent_profile_id=profile.id,
+                memory_revision_created=run.memory_revision,
             )
             db.add(artifact)
             await db.flush()
@@ -1465,6 +1988,16 @@ async def execute_task_run(run_id: str):
                 for asset in generated_assets:
                     asset.artifact_id = artifact.id
             task.current_artifact_id = artifact.id
+            # 共享项目记忆：新 Artifact 在同一事务内索引进项目记忆并推进版本，
+            # 避免出现"产物已更新但记忆还没更新"的中间状态。
+            from app.services.project_knowledge_service import bump, index_artifact
+
+            await index_artifact(db, artifact, created_by="agent")
+            memory_revision = await bump(
+                db, course.id, f"{TASK_SPEC_BY_TYPE[task.task_type][1]} 发布 V{version}",
+                source_type="artifact", source_id=artifact.id, created_by="agent",
+            )
+            artifact.memory_revision_created = memory_revision
             # Commit the new Artifact, PPT revision, generated assets and official
             # pointer before the pipeline emits its sole success terminal event.
             # GenerationRun/CourseTask remain non-terminal until that event is done,
@@ -1474,6 +2007,22 @@ async def execute_task_run(run_id: str):
                 await db.commit()
                 from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
                 await complete_ppt_pipeline_after_publish(pipeline_runtime, artifact.id)
+            if task.task_type == "lesson_plan" and use_lesson_plan_pipeline:
+                await db.commit()
+                from app.services.lesson_plan_pipeline_service import complete_lesson_plan_pipeline_after_publish
+                await complete_lesson_plan_pipeline_after_publish(pipeline_runtime, artifact.id)
+            if task.task_type == "task_sheet" and use_task_sheet_pipeline:
+                await db.commit()
+                from app.services.task_sheet_pipeline_service import complete_task_sheet_pipeline_after_publish
+                await complete_task_sheet_pipeline_after_publish(pipeline_runtime, artifact.id)
+            if task.task_type == "video_script" and use_video_script_pipeline:
+                await db.commit()
+                from app.services.video_script_pipeline_service import complete_video_script_pipeline_after_publish
+                await complete_video_script_pipeline_after_publish(pipeline_runtime, artifact.id)
+            if task.task_type == "verbatim" and use_verbatim_pipeline:
+                await db.commit()
+                from app.services.verbatim_pipeline_service import complete_verbatim_pipeline_after_publish
+                await complete_verbatim_pipeline_after_publish(pipeline_runtime, artifact.id)
             final_status = "review" if task.current_agent_profile_id == profile.id else "stale"
             task.status = final_status
             task.progress = 100
@@ -1484,9 +2033,13 @@ async def execute_task_run(run_id: str):
             run.progress = 100
             run.finished_at = utcnow()
 
-            # PPT：assistant 消息已由 pipeline emitter 完成；跳过 reply 处理（reply_id 为空，
-            # 若不跳过会 raise "流式回复记录不存在"）。
-            if user_message and revision and task.task_type != "ppt":
+            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2：assistant 消息已由
+            # pipeline emitter 完成；跳过 reply 处理（reply_id 为空，若不跳过会 raise）。
+            if user_message and revision and (
+                task.task_type not in {"ppt", "lesson_plan", "video_script", "verbatim"}
+                and not use_task_sheet_pipeline
+                and not use_verbatim_pipeline
+            ):
                 stored_user_message = await db.get(AgentMessage, user_message.id)
                 if stored_user_message:
                     stored_user_message.status = "completed"
@@ -1539,6 +2092,26 @@ async def execute_task_run(run_id: str):
                 status=final_status,
                 progress=100,
                 artifact=artifact_payload(artifact),
+            )
+            # 共享项目记忆标准化事件：新前端消费，旧前端忽略。
+            await _emit(
+                db,
+                run,
+                "artifact.published",
+                task,
+                status=final_status,
+                progress=100,
+                artifact=artifact_payload(artifact),
+                memory_revision=memory_revision,
+            )
+            await _emit(
+                db,
+                run,
+                "project_memory.updated",
+                task,
+                status=final_status,
+                memory_revision=memory_revision,
+                change_reason=f"{TASK_SPEC_BY_TYPE[task.task_type][1]} 发布 V{version}",
             )
             await _emit(db, run, "task_status_changed", task, status=final_status, progress=100)
             await db.commit()
@@ -1618,23 +2191,9 @@ async def execute_task_run(run_id: str):
             pipeline = await db.scalar(select(PipelineRun).where(PipelineRun.generation_run_id == run_id))
             if not run or not task:
                 return
-            from app.agent.schemas import PPTAgentError
-            code = exc.code if isinstance(exc, (LLMProviderError, PPTAgentError)) else "task_generation_failed"
-            internal_detail = str(exc).strip()[:500]
-            safe_runtime_prefixes = (
-                "流水线", "页面内容 Agent", "LLM 布局", "PPT 编辑", "布局结果", "Agent ",
-            )
-            message = (
-                exc.user_message
-                if isinstance(exc, (LLMProviderError, PPTAgentError))
-                else internal_detail
-                if isinstance(exc, RuntimeError) and internal_detail.startswith(safe_runtime_prefixes)
-                else "任务生成暂时失败，请重试或切换模型。"
-            )
-            retryable = exc.retryable if isinstance(exc, (LLMProviderError, PPTAgentError)) else True
-            error = {"code": code, "message": message, "retryable": retryable}
-            if isinstance(exc, PPTAgentError) and exc.details:
-                error["details"] = exc.details
+            error, internal_detail = _task_failure_payload(exc)
+            code = str(error["code"])
+            message = str(error["message"])
             run.status = "failed"
             run.error_json = error
             run.finished_at = utcnow()
@@ -1681,8 +2240,16 @@ async def execute_task_run(run_id: str):
                 failure_emitter = await PipelineEventEmitter.for_run(run, pipeline)
                 await failure_emitter.pipeline_failed(error=message)
                 await failure_emitter.emit_domain("run.failed", message=message, payload={"error": error})
+                artifact_label = {
+                    "lesson_plan": "教学设计",
+                    "ppt": "PPT课件",
+                    "task_sheet": "学习任务单",
+                    "video_script": "视频脚本",
+                    "verbatim": "教师逐字稿",
+                    "exercise": "课后练习",
+                }.get(task.task_type, "任务文件")
                 await failure_emitter.emit_domain(
-                    "artifact.draft.cleared", message="本轮草稿已清除，继续显示原正式 PPT",
+                    "artifact.draft.cleared", message=f"本轮草稿已清除，继续显示原正式{artifact_label}",
                     payload={"run_id": run.id, "reason": code},
                 )
     finally:

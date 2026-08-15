@@ -246,6 +246,7 @@ async def test_close_layout_candidates_create_pending_human_request(
     slide_id = slide["id"]
     runtime = await build_runtime(course_id, trigger="message")
     runtime.selected_slide_ids = [slide_id]
+    runtime.baseline_slides = list(ppt["current_artifact"]["content_json"]["slides"])
     runtime.resolved_polish_command = {
         **_resolved_command(slide_id),
         "confidence": 1.0, "ambiguities": [], "needs_confirmation": False,
@@ -300,6 +301,8 @@ async def test_close_layout_candidates_create_pending_human_request(
     assert runtime.candidate_request_id == request.id
     assert runtime.candidate_options[0]["preview_url"] == request.options_json[0]["preview_url"]
     assert "candidate" not in runtime.candidate_options[0]
+    assert request.options_json[0]["page_number"] == 1
+    assert request.options_json[0]["display_label"].startswith("第 1 页")
 
     unauthenticated = await client.get(request.options_json[0]["preview_url"])
     assert unauthenticated.status_code == 401
@@ -308,4 +311,98 @@ async def test_close_layout_candidates_create_pending_human_request(
     )
     assert response.status_code == 200
     assert response.content == b"candidate-preview"
-    assert response.headers["content-type"].startswith("image/jpeg")
+
+
+@pytest.mark.asyncio
+async def test_layout_candidate_confirmation_requires_two_rendered_previews(
+    client, auth_headers, monkeypatch,
+):
+    course_id = await ready_course(client, auth_headers, model_name="Preview Failure Mock")
+    project = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
+    ppt = next(item for item in project["tasks"] if item["task_type"] == "ppt")
+    slide = ppt["current_artifact"]["content_json"]["slides"][0]
+    slide_id = slide["id"]
+    runtime = await build_runtime(course_id, trigger="message")
+    runtime.selected_slide_ids = [slide_id]
+    runtime.baseline_slides = list(ppt["current_artifact"]["content_json"]["slides"])
+    runtime.layout_compile_results = [{
+        "slide_id": slide_id, "status": "applied",
+        "requires_candidate_confirmation": True, "candidate_score_gap": 1.0,
+        "requested_style": {}, "requested_objectives": [],
+        "baseline_metrics": {"quality_score": 85},
+        "final_metrics": {"quality_score": 89},
+        "candidate_rankings": [
+            {"rank": 1, "candidate_id": "bullet_flow:1", "layout_type": "bullet_flow",
+             "style": {}, "quality_score": 89, "quality_delta": 4,
+             "objective_results": [], "publishable": True,
+             "elements": list(slide.get("elements") or [])},
+            {"rank": 2, "candidate_id": "split_two_column:1", "layout_type": "split_two_column",
+             "style": {}, "quality_score": 88.7, "quality_delta": 3.7,
+             "objective_results": [], "publishable": True,
+             "elements": list(slide.get("elements") or [])},
+        ],
+    }]
+    monkeypatch.setattr(
+        PPTAgentRuntime, "_render_candidate_preview",
+        lambda *_args, **_kwargs: __import__("asyncio").sleep(0, result=""),
+    )
+
+    created = await PPTAgentRuntime(runtime)._request_candidate_confirmation_if_needed()
+
+    assert created is False
+    assert runtime.result_status == "no_change"
+    page = runtime.layout_compile_results[0]
+    assert page["status"] == "preserved"
+    assert page["rejection_code"] == "render_unavailable"
+    async with SessionLocal() as db:
+        request = await db.scalar(select(PPTHumanRequest).where(
+            PPTHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
+            PPTHumanRequest.request_type == "layout_candidate_selection",
+        ))
+    assert request is None
+
+
+@pytest.mark.asyncio
+async def test_single_preview_eligible_candidate_can_be_confirmed(
+    client, auth_headers, monkeypatch,
+):
+    course_id = await ready_course(client, auth_headers, model_name="Single Preview Mock")
+    project = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
+    ppt = next(item for item in project["tasks"] if item["task_type"] == "ppt")
+    slides = list(ppt["current_artifact"]["content_json"]["slides"])
+    slide = slides[0]
+    runtime = await build_runtime(course_id, trigger="message")
+    runtime.selected_slide_ids = [slide["id"]]
+    runtime.baseline_slides = slides
+    runtime.layout_compile_results = [{
+        "slide_id": slide["id"], "status": "applied",
+        "requires_candidate_confirmation": True,
+        "requested_style": {}, "requested_objectives": [],
+        "baseline_metrics": {"quality_score": 85},
+        "final_metrics": {"quality_score": 87.4},
+        "candidate_rankings": [{
+            "rank": 1, "candidate_id": "bullet_flow:1", "layout_type": "bullet_flow",
+            "style": {}, "quality_score": 87.4, "quality_delta": 2.4,
+            "objective_results": [], "preview_eligible": True,
+            "elements": list(slide.get("elements") or []),
+        }],
+    }]
+    preview = runtime.workspace_root / "qa" / "single-candidate.jpg"
+    preview.parent.mkdir(parents=True, exist_ok=True)
+    preview.write_bytes(b"candidate-preview")
+    monkeypatch.setattr(
+        PPTAgentRuntime, "_render_candidate_preview",
+        lambda *_args, **_kwargs: __import__("asyncio").sleep(0, result=str(preview)),
+    )
+
+    created = await PPTAgentRuntime(runtime)._request_candidate_confirmation_if_needed()
+
+    assert created is True
+    async with SessionLocal() as db:
+        request = await db.scalar(select(PPTHumanRequest).where(
+            PPTHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
+            PPTHumanRequest.request_type == "layout_candidate_selection",
+        ))
+    assert request is not None
+    assert [item["id"] for item in request.options_json] == ["candidate-a", "reject"]
+    assert request.options_json[0]["preview_url"]

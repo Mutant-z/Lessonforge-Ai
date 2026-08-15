@@ -14,13 +14,13 @@ fi
 
 case "$TARGET" in
   backend)
-    FILES=("$BACKEND_LOG")
+    FILES=("$BACKEND_LAUNCH_LOG" "$BACKEND_LOG")
     ;;
   frontend)
-    FILES=("$FRONTEND_LOG")
+    FILES=("$FRONTEND_LAUNCH_LOG" "$FRONTEND_LOG")
     ;;
   all)
-    FILES=("$BACKEND_LOG" "$FRONTEND_LOG")
+    FILES=("$BACKEND_LAUNCH_LOG" "$FRONTEND_LAUNCH_LOG" "$BACKEND_LOG" "$FRONTEND_LOG")
     ;;
   *)
     echo "用法：$0 [all|backend|frontend]" >&2
@@ -47,4 +47,3 @@ else
   echo "正在持续查看日志，按 Ctrl+C 退出。"
   tail -n "$LINES" -F "${EXISTING[@]}"
 fi
-

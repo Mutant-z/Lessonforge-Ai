@@ -5,8 +5,8 @@ export const DEFAULT_PPT_TEMPLATE: PPTTemplate = {
   id: 'lessonforge_deck_academic',
   name: '学术科研·成品微课',
   short_name: '学术科研',
-  description: '沉稳蓝色学术版式，适合科研、论文与深度讲解型微课，内容直接填入成品版式。',
-  recommended_for: ['科研', '学术', '深度课程'],
+  description: '沉稳蓝色学术版式，专为科研课题、论文研讨与深度概念讲解微课打造。',
+  recommended_for: ['科研课题', '学术论文', '深度课程'],
   composition: 'deck',
   palette: {
     background: '#FFFFFF', surface: '#F4F7FB', primary: '#1F4E79', secondary: '#D6E4F0',

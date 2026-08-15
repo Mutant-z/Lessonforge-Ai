@@ -6,6 +6,14 @@ source "$(cd "$(dirname "$0")" && pwd)/_common.sh"
 stop_service() {
   local name="$1"
   local pid_file="$2"
+  local launch_label="$3"
+
+  # Removing the launchd job first is essential: killing only its current PID
+  # makes launchd immediately start a replacement process.
+  if launchd_service_exists "$launch_label"; then
+    echo "正在关闭由 launchd 托管的${name}…"
+    remove_launchd_service "$launch_label"
+  fi
 
   if ! is_running "$pid_file"; then
     remove_stale_pid "$pid_file"
@@ -32,8 +40,8 @@ stop_service() {
   echo "${name} 已关闭"
 }
 
-stop_service "前端" "$FRONTEND_PID_FILE"
-stop_service "后端" "$BACKEND_PID_FILE"
+stop_service "前端" "$FRONTEND_PID_FILE" "$FRONTEND_LAUNCH_LABEL"
+stop_service "后端" "$BACKEND_PID_FILE" "$BACKEND_LAUNCH_LABEL"
 
 # Recover processes started manually or left behind after a stale/missing PID
 # file. Only listeners that can be proven to belong to this project are stopped.

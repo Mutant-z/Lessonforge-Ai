@@ -274,7 +274,7 @@ onMounted(loadArtifacts);
             v-model="selectedModelConfigId"
             :disabled="chatSending || modelSwitching"
             compact
-            label=""
+            label="文本"
             @change="changeChatModel"
           />
           <el-input 

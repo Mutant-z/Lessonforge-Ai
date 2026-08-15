@@ -967,7 +967,18 @@ def resolve_polish_command(
     preservation = _preservation_for(operations)
     confidence = 0.93
     if generic_polish:
-        confidence = min(confidence, 0.86)
+        # A broad verb such as “润色” still leaves design latitude, but the
+        # page scope itself is high-confidence when UI selection and the
+        # natural-language page number resolve to the same canonical ID.
+        # This is the normal single-page polish flow and must not be treated as
+        # an ambiguous range merely because the internal ID is non-sequential.
+        aligned_explicit_scope = bool(
+            supplied_targets
+            and parsed_pages.target_page_numbers
+            and selected_targets
+            and set(selected_targets) == set(text_targets)
+        )
+        confidence = min(confidence, 0.90 if aligned_explicit_scope else 0.86)
     if scope.source == "inherited":
         confidence = min(confidence, 0.90)
     if ambiguities:

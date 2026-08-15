@@ -62,7 +62,7 @@ def test_merged_instruction_invalidates_builder_bound_qa_evidence():
     assert pipeline.publishable is False
 
 
-def test_generic_polish_gets_hard_eight_point_quality_gate():
+def test_generic_polish_gets_adaptive_quality_gate():
     from app.agent.polish_command import resolve_polish_command
 
     command = resolve_polish_command(
@@ -76,8 +76,31 @@ def test_generic_polish_gets_hard_eight_point_quality_gate():
     assert chain == ["layout", "ppt_editor", "visual_qa"]
     quality = next(item for item in params["objectives"] if item["metric"] == "layout_quality")
     assert quality["hard_requirement"] is True
-    assert quality["minimum_delta"] == pytest.approx(8.0)
+    assert quality["minimum_delta"] == pytest.approx(0.0)
+    assert quality["adaptive"] is True
+    assert quality["source"] == "runtime_gate"
+    assert params["quality_gate_strategy"] == "adaptive_v2"
     assert params["polish_mode"] is True
+
+
+def test_fifth_page_text_and_ui_scope_resolve_to_same_canonical_id():
+    from app.agent.polish_command import resolve_polish_command
+
+    canonical_ids = [
+        "slide_01", "slide_02", "slide_03", "slide_04", "slide_03_ki",
+        "slide_06",
+    ]
+    command = resolve_polish_command(
+        "润色一下第五页",
+        target_slide_ids=["slide_03_ki"],
+        active_slide_id="slide_03_ki",
+        canonical_ids=canonical_ids,
+    )
+
+    assert command.scope.target_slide_ids == ["slide_03_ki"]
+    assert "scope.selection_text_conflict" not in command.ambiguities
+    assert command.needs_confirmation is False
+    assert command.confidence >= 0.90
 
 
 def test_image_geometry_command_routes_without_media_and_sets_deterministic_scale():
@@ -427,6 +450,66 @@ async def test_edit_layout_reserves_visual_slot_for_preserved_image():
     body = next(el for el in layout["elements"] if str(el.get("content_ref") or "").startswith("body"))
     visual_right = float(layout["visual_region"]["x"])
     assert float(body["x"]) + float(body["w"]) <= visual_right - 0.1, "正文不得延伸到视觉槽下方"
+
+
+@pytest.mark.asyncio
+async def test_visual_slot_fallback_compile_failure_preserves_page_instead_of_raising(monkeypatch):
+    """A deterministic visual repair failure is per-page no_change, never a provider error."""
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.layouts.engine import LayoutCompileError
+    from app.agent.pipeline import _ensure_executable_layout
+
+    source = {
+        "id": "slide_01", "page_type": "cover", "title": "浮力探秘",
+        "purpose": "建立探究情境", "body": ["八年级物理", "核心问题"],
+        "blocks": [], "render_mode": "absolute",
+        "elements": [
+            {"kind": "textbox", "content_ref": "title", "text": "浮力探秘",
+             "x": 3.0, "y": 0.8, "w": 4.0, "h": 1.0, "style": {"size": 28}},
+            {"kind": "textbox", "content_ref": "body", "text": "八年级物理\n核心问题",
+             "x": 3.0, "y": 2.0, "w": 4.0, "h": 1.4, "style": {"size": 15}},
+            {"kind": "textbox", "content_ref": "purpose", "text": "建立探究情境",
+             "x": 3.0, "y": 4.0, "w": 4.0, "h": 0.7, "style": {"size": 14}},
+            {"kind": "image", "asset_id": "asset-1", "asset_path": "/tmp/img.png",
+             "x": 7.5, "y": 1.2, "w": 5.0, "h": 4.4, "role": "visual"},
+        ],
+    }
+    runtime = SimpleNamespace(
+        selected_slide_ids=["slide_01"], content_policy="preserve",
+        active_intent="LAYOUT_ONLY", baseline_slides=[source], artifacts=None,
+        emitter=None, preferred_template="lessonforge_deck_smart_ai",
+        expected_visual_requests=[], layout_engine_params={}, layout_compile_results=[],
+        builder=PresentationBuilder().from_ppt_content({
+            "theme": "lessonforge_deck_smart_ai", "slides": [source],
+        }),
+    )
+    proposal = AgentDecision(completed=True, output={"slides": [{
+        "slide_id": "slide_01", "layout_type": "cover_left",
+        "designRationale": "缺失视觉槽的模型候选", "render_mode": "absolute",
+        "elements": list(source["elements"][:-1]),
+    }]})
+
+    def fail_visual_fallback(*_args, **_kwargs):
+        raise LayoutCompileError([], ["purpose"], False, attempts=[{
+            "candidate_id": "cover_left:1", "layout_type": "cover_left",
+            "missing_refs": ["purpose"], "geometry_safe": False,
+        }])
+
+    monkeypatch.setattr(LAYOUT_AGENT, "_layout_slide", fail_visual_fallback)
+    normalized = await _ensure_executable_layout(runtime, LAYOUT_AGENT, proposal)
+    page = normalized.output["slides"][0]
+
+    assert page["compile_status"] == "preserved"
+    assert page["layout_type"] == "preserve_original"
+    assert page["material_change"] is False
+    assert [item.get("content_ref") or "" for item in page["elements"]] == [
+        item.get("content_ref") or "" for item in source["elements"]
+    ]
+    assert [item.get("kind") for item in page["elements"]] == [
+        item.get("kind") for item in source["elements"]
+    ]
+    assert next(item for item in page["elements"] if item.get("kind") == "image")["asset_id"] == "asset-1"
+    assert page["requires_candidate_confirmation"] is False
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 export type PipelineStatus =
   | 'queued' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
-export type PPTPolishResultStatus = 'applied' | 'partial' | 'no_change' | 'needs_confirmation';
+export type PPTPolishResultStatus = 'applied' | 'partial' | 'no_change' | 'needs_confirmation' | 'rejected' | 'answer_only';
 
 export interface PPTPolishObjectiveResult {
   metric?: string;
@@ -30,10 +30,17 @@ export interface PPTLayoutCandidateRanking {
   preview_url?: string;
   render_path?: string;
   candidate_png?: string;
+  publishable?: boolean;
+  preview_eligible?: boolean;
+  quality_component_regressions?: string[];
 }
 
 export interface PPTPolishPageResult {
   slide_id: string;
+  page_number?: number | null;
+  display_label?: string;
+  slide_title?: string;
+  decision?: 'applied' | 'preview_required' | 'preserved';
   status?: 'applied' | 'fallback' | 'preserved';
   compile_status?: 'applied' | 'fallback' | 'preserved';
   selected_candidate_id?: string | null;
@@ -41,7 +48,12 @@ export interface PPTPolishPageResult {
   effective_layout?: string;
   baseline_metrics?: Record<string, number>;
   final_metrics?: Record<string, number>;
+  best_candidate_id?: string | null;
+  best_candidate_metrics?: Record<string, number>;
+  best_candidate_quality_delta?: number;
   quality_delta?: number;
+  rejection_code?: string;
+  rejection_reasons?: string[];
   qa_level?: 'geometry' | 'raster' | 'vision';
   degraded?: boolean;
   warnings?: string[];
@@ -99,7 +111,10 @@ export interface PipelineToolCall {
   output: Record<string, unknown>;
   status: 'started' | 'completed' | 'failed';
   duration_ms: number;
-  error: { message?: string } | null;
+  error: { code?: string; message?: string; retryable?: boolean } | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  retryable?: boolean;
   created_at: string;
 }
 
@@ -137,6 +152,9 @@ export interface ToolCallView {
   output: Record<string, unknown>;
   ok: boolean;
   error: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  retryable?: boolean;
   duration_ms: number;
   created_at: string;
   expanded?: boolean;

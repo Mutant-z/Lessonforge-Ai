@@ -16,16 +16,20 @@ from app.providers.llm.anthropic import AnthropicProvider
 from app.providers.llm.mock import MockProvider
 from app.providers.llm.openai_compatible import OpenAICompatibleProvider
 from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, get_ppt_template, resolve_ppt_template
+from app.services.media_provider_service import media_transport_supports
 
 router = APIRouter(prefix="/settings", tags=["设置"])
 ModelCapability = Literal[
     "text_generation", "structured_output", "vision_review", "image_generation",
-    "video_generation", "speech_generation", "media_composition",
+    "video_generation", "native_audio_video_generation", "speech_generation",
+    "speech_recognition", "media_composition",
 ]
 ALLOWED_API_MODES = {
     "text_chat", "openai_images", "google_gemini_image", "google_vision",
     "anthropic_vision", "custom_image_http", "custom_video_async_http",
-    "custom_speech_http", "local_ffmpeg", "mock_media",
+    "custom_speech_http", "volcengine_ark_video", "volcengine_asr",
+    "gemini_interactions_video",
+    "local_ffmpeg", "mock_media",
 }
 ALLOWED_ADAPTER_FIELDS = {
     "endpoint_path", "auth_mode", "model_field", "prompt_field", "size_field",
@@ -35,6 +39,13 @@ ALLOWED_ADAPTER_FIELDS = {
     "result_base64_path", "poll_endpoint_path", "cancel_endpoint_path",
     "success_values", "failed_values", "error_path", "poll_interval_seconds",
     "health_path", "extra_payload", "max_concurrency", "max_duration_seconds", "max_file_mb",
+    "usage_path", "usage_tokens_path", "transcript_path", "segments_path",
+    "price_per_million_tokens_cny", "tokens_per_second_720p", "idempotency_header",
+    "model_family", "capability_probe_endpoint_path", "probe_model_path",
+    "probe_native_audio_path", "probe_resolutions_path", "probe_min_duration_path",
+    "probe_max_duration_path",
+    "interactions_path", "interaction_status_path", "file_status_path",
+    "file_download_path", "delivery", "price_per_second_cny",
 }
 
 
@@ -95,7 +106,7 @@ class TestConnectionRequest(BaseModel):
     api_key: str = ""
     timeout_seconds: int = 15
     test_capability: Literal[
-        "text_generation", "image_generation", "video_generation", "speech_generation",
+        "text_generation", "image_generation", "video_generation", "speech_generation", "speech_recognition",
     ] = "text_generation"
     api_mode: str | None = None
     adapter_config: dict[str, Any] | None = None
@@ -142,7 +153,11 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
     media_mode = api_mode != "text_chat"
     if media_mode and get_settings().environment == "production" and parsed.scheme != "https":
         raise HTTPException(422, "生产环境中的媒体接口必须使用 HTTPS")
-    if api_mode not in {"custom_image_http", "custom_video_async_http", "custom_speech_http"}:
+    if api_mode not in {
+        "custom_image_http", "custom_video_async_http", "custom_speech_http",
+        "volcengine_ark_video", "volcengine_asr",
+        "gemini_interactions_video",
+    }:
         return
     unknown = set(adapter) - ALLOWED_ADAPTER_FIELDS
     if unknown:
@@ -151,13 +166,21 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
         "custom_image_http": "/images/generations",
         "custom_video_async_http": "/videos/generations",
         "custom_speech_http": "/audio/speech",
+        "volcengine_ark_video": "/contents/generations/tasks",
+        "volcengine_asr": "/audio/transcriptions",
+        "gemini_interactions_video": "/v1beta/interactions",
     }
     endpoint_path = str(adapter.get("endpoint_path") or defaults[api_mode])
     if not endpoint_path.startswith("/") or "://" in endpoint_path or ".." in endpoint_path:
         raise HTTPException(422, "自定义媒体 Endpoint path 必须是安全的站内绝对路径")
     if adapter.get("auth_mode", "bearer") not in {"bearer", "x_api_key"}:
         raise HTTPException(422, "自定义媒体接口只支持 Bearer 或 X-API-Key 认证")
-    for path_key in ("poll_endpoint_path", "cancel_endpoint_path", "health_path"):
+    if api_mode == "gemini_interactions_video" and adapter.get("delivery", "uri") != "uri":
+        raise HTTPException(422, "Gemini Interactions 视频当前只支持 uri delivery")
+    for path_key in (
+        "poll_endpoint_path", "cancel_endpoint_path", "health_path", "interactions_path",
+        "interaction_status_path", "file_status_path", "file_download_path",
+    ):
         path_value = adapter.get(path_key)
         if path_value and (not str(path_value).startswith("/") or "://" in str(path_value) or ".." in str(path_value)):
             raise HTTPException(422, f"{path_key} 必须是安全的站内绝对路径")
@@ -170,6 +193,9 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
         "max_duration_seconds": (1, 7200),
         "max_file_mb": (1, 4096),
         "poll_interval_seconds": (0.5, 60),
+        "price_per_million_tokens_cny": (0.000001, 100000),
+        "tokens_per_second_720p": (1, 100000000),
+        "price_per_second_cny": (0, 100000),
     }
     for key, (minimum, maximum) in numeric_limits.items():
         if key not in adapter:
@@ -185,9 +211,33 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
         "custom_image_http": {"image/png", "image/jpeg", "image/webp"},
         "custom_video_async_http": {"video/mp4", "video/webm", "video/quicktime"},
         "custom_speech_http": {"audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac"},
+        "volcengine_ark_video": {"video/mp4", "video/webm", "video/quicktime"},
+        "volcengine_asr": {"application/json"},
+        "gemini_interactions_video": {"video/mp4", "video/webm", "video/quicktime"},
     }
     if mime and mime not in allowed_mimes[api_mode]:
         raise HTTPException(422, "自定义媒体响应 MIME 类型不受支持")
+
+
+def _validate_model_capabilities(provider: str, api_mode: str, capabilities: list[str]) -> None:
+    labels = {
+        "image_generation": "图片生成",
+        "video_generation": "视频生成",
+        "native_audio_video_generation": "原生有声视频生成",
+        "speech_recognition": "语音识别",
+        "speech_generation": "语音生成",
+        "media_composition": "媒体合成",
+    }
+    incompatible = [
+        labels[capability]
+        for capability in labels
+        if capability in capabilities and not media_transport_supports(provider, api_mode, capability)
+    ]
+    if incompatible:
+        raise HTTPException(
+            422,
+            f"接口模式 {api_mode} 不支持已勾选的能力：{'、'.join(incompatible)}；请拆分为独立模型配置或选择匹配的媒体接口模式",
+        )
 
 
 def _format_config(c: ModelConfig) -> ModelConfigItem:
@@ -268,6 +318,7 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
 @router.post("/models", response_model=ModelConfigItem)
 async def create_model_config(payload: ModelConfigCreate, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     _validate_model_transport(payload.provider, payload.api_mode, payload.base_url, payload.adapter_config)
+    _validate_model_capabilities(payload.provider, payload.api_mode, payload.capabilities)
     if payload.is_active:
         # 如果新设为激活，则取消其他配置的激活
         existing = await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == user.id, ModelConfig.is_active.is_(True)))
@@ -275,11 +326,15 @@ async def create_model_config(payload: ModelConfigCreate, user: User = Depends(c
             item.is_active = False
 
     name = payload.name.strip() if payload.name else f"{payload.provider.upper()} - {payload.model_name}"
+    normalized_base_url = payload.base_url
+    if payload.api_mode == "gemini_interactions_video":
+        from app.services.gemini_interactions_video_service import normalize_gateway_origin
+        normalized_base_url = normalize_gateway_origin(payload.base_url)
     config = ModelConfig(
         owner_id=user.id,
         name=name,
         provider=payload.provider,
-        base_url=payload.base_url,
+        base_url=normalized_base_url,
         model_name=payload.model_name,
         timeout_seconds=payload.timeout_seconds,
         context_window_tokens=payload.context_window_tokens,
@@ -309,11 +364,18 @@ async def update_model_config(
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
 
+    resolved_provider = payload.provider if payload.provider is not None else config.provider
+    resolved_api_mode = payload.api_mode if payload.api_mode is not None else config.api_mode
     _validate_model_transport(
-        payload.provider if payload.provider is not None else config.provider,
-        payload.api_mode if payload.api_mode is not None else config.api_mode,
+        resolved_provider,
+        resolved_api_mode,
         payload.base_url if payload.base_url is not None else config.base_url,
         payload.adapter_config if payload.adapter_config is not None else (config.adapter_config_json or {}),
+    )
+    _validate_model_capabilities(
+        resolved_provider,
+        resolved_api_mode,
+        payload.capabilities if payload.capabilities is not None else (config.capabilities_json or []),
     )
 
     if payload.name is not None:
@@ -336,6 +398,9 @@ async def update_model_config(
         config.api_mode = payload.api_mode
     if payload.adapter_config is not None:
         config.adapter_config_json = payload.adapter_config
+    if config.api_mode == "gemini_interactions_video":
+        from app.services.gemini_interactions_video_service import normalize_gateway_origin
+        config.base_url = normalize_gateway_origin(config.base_url)
     if payload.api_key is not None and payload.api_key != "":
         config.encrypted_api_key = encrypt_secret(payload.api_key)
 
@@ -431,15 +496,75 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
     if not api_key:
         api_key = settings.openai_api_key
 
-    if payload.test_capability in {"video_generation", "speech_generation"}:
+    if payload.test_capability in {"video_generation", "speech_generation", "speech_recognition"}:
         resolved_mode = api_mode or (
-            "custom_video_async_http" if payload.test_capability == "video_generation" else "custom_speech_http"
+            "custom_video_async_http" if payload.test_capability == "video_generation"
+            else "volcengine_asr" if payload.test_capability == "speech_recognition"
+            else "custom_speech_http"
         )
         resolved_adapter = adapter_config or {}
         _validate_model_transport(provider_type, resolved_mode, base_url, resolved_adapter)
+        if resolved_mode == "volcengine_ark_video":
+            from app.services.seedance_provider_service import ArkSeedanceAdapter
+
+            probe = ModelConfig(
+                owner_id=user.id,
+                name="seedance-capability-probe",
+                provider=provider_type,
+                base_url=base_url,
+                model_name=model_name,
+                encrypted_api_key=encrypt_secret(api_key) if api_key else "",
+                timeout_seconds=timeout,
+                capabilities_json=["video_generation", "native_audio_video_generation"],
+                api_mode=resolved_mode,
+                adapter_config_json=resolved_adapter,
+                is_active=False,
+            )
+            try:
+                await ArkSeedanceAdapter(probe).probe_capabilities()
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "success": False,
+                    "message": str(exc),
+                    "provider": provider_type,
+                    "model_name": model_name,
+                    "test_capability": payload.test_capability,
+                }
+        if resolved_mode == "gemini_interactions_video":
+            from app.services.gemini_interactions_video_service import GeminiInteractionsVideoAdapter
+
+            probe = ModelConfig(
+                owner_id=user.id,
+                name="gemini-interactions-capability-probe",
+                provider=provider_type,
+                base_url=base_url,
+                model_name=model_name,
+                encrypted_api_key=encrypt_secret(api_key) if api_key else "",
+                timeout_seconds=timeout,
+                capabilities_json=["video_generation", "native_audio_video_generation"],
+                api_mode=resolved_mode,
+                adapter_config_json=resolved_adapter,
+                is_active=False,
+            )
+            try:
+                await GeminiInteractionsVideoAdapter(probe).probe_capabilities()
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "success": False,
+                    "message": str(exc),
+                    "provider": provider_type,
+                    "model_name": model_name,
+                    "test_capability": payload.test_capability,
+                }
         return {
             "success": True,
-            "message": "媒体模型配置与传输映射校验通过。正式生成时将执行异步任务和结果文件校验。",
+            "message": (
+                "Seedance 2.5 模型身份、720p、8–15 秒与原生音频能力校验通过。"
+                if resolved_mode == "volcengine_ark_video"
+                else "Gemini Interactions 与 Files 网关端点探测通过。"
+                if resolved_mode == "gemini_interactions_video"
+                else "媒体模型配置与传输映射校验通过。正式生成时将执行异步任务和结果文件校验。"
+            ),
             "provider": provider_type,
             "model_name": model_name,
             "test_capability": payload.test_capability,

@@ -7,7 +7,7 @@ export type AgentStreamNode =
   | { kind: 'user'; id: string; content: string; status?: ProjectAgentMessage['status'] } // > 教师指令
   | { kind: 'session'; id: string; runId: string }                                  // ◈ 教学 Agent 会话头
   | { kind: 'thought'; id: string; runId: string; agentKey: string; thoughtKey: string; content: string; active: boolean }  // 灰色可见执行摘要
-  | { kind: 'tool'; id: string; runId: string; toolName: string; input: Record<string, any>; output: Record<string, any>; ok: boolean; running: boolean; error?: string | null; durationMs?: number }
+  | { kind: 'tool'; id: string; runId: string; toolName: string; input: Record<string, any>; output: Record<string, any>; ok: boolean; running: boolean; error?: string | null; errorCode?: string | null; retryable?: boolean; durationMs?: number }
   | { kind: 'event'; id: string; runId: string; type: string; data: Record<string, any> }
   | { kind: 'reply'; id: string; runId: string; content: string; streaming: boolean };
 
@@ -33,6 +33,10 @@ const EVENT_TYPES = new Set([
   'human.required', 'run.instruction.queued', 'run.instruction.merged', 'run.failed', 'run.cancelled',
   'layout.compile.result', 'polish.result',
   'task_paused', 'task_resumed', 'run.paused', 'run.resumed',
+  // 学习任务单 V3：意图识别 / 计划 / 澄清 / 差异
+  'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
+  // 教学设计：执行前上下文快照 / 拒绝结果
+  'context.snapshot.created', 'result.rejected',
 ]);
 
 interface StreamSession {
@@ -66,6 +70,11 @@ export function buildAgentTurns(
   items: PipelineTimelineItem[],
   _thoughts: Record<string, string>,
   messages: ProjectAgentMessage[],
+  historicalToolCalls: Array<{
+    id: string; tool_name: string; input: Record<string, any>; output: Record<string, any>;
+    status: string; duration_ms: number; error: any; error_code?: string | null;
+    error_message?: string | null; retryable?: boolean;
+  }> = [],
 ): AgentStreamTurn[] {
   const sessions: StreamSession[] = [];
   const byRun = new Map<string, StreamSession>();
@@ -174,6 +183,7 @@ export function buildAgentTurns(
         node.ok = item.data?.ok !== false;
         node.output = (item.data?.output_json as Record<string, any>) || {};
         node.error = item.data?.error ?? null;
+        node.errorCode = item.data?.error_code ?? null;
         node.durationMs = typeof item.data?.duration_ms === 'number' ? item.data.duration_ms : undefined;
       }
       continue;
@@ -181,6 +191,42 @@ export function buildAgentTurns(
     if (EVENT_TYPES.has(item.type)) {
       current.nodes.push({ kind: 'event', id: `event-${item.id}`, runId, type: item.type, data: item.data });
     }
+  }
+
+  // 刷新后的详情接口以 tool_calls 为权威来源。它和 SSE 使用相同的扁平
+  // 错误字段，既可补齐被裁剪的历史事件，也能覆盖旧事件里的嵌套 error。
+  for (const call of historicalToolCalls) {
+    const errorObject = call.error && typeof call.error === 'object' ? call.error : {};
+    let node = toolMap.get(String(call.id));
+    if (!node) {
+      let session = sessions[sessions.length - 1];
+      if (!session) {
+        session = {
+          runId: 'legacy', fallbackOrder: 0, sortAt: null,
+          nodes: [{ kind: 'session', id: 'session-legacy', runId: 'legacy' }],
+        };
+        sessions.push(session);
+        byRun.set(session.runId, session);
+      }
+      node = {
+        kind: 'tool', id: `tool-${call.id}`, runId: session.runId,
+        toolName: call.tool_name, input: call.input || {}, output: call.output || {},
+        ok: call.status !== 'failed', running: call.status === 'started',
+      };
+      session.nodes.push(node);
+      toolMap.set(String(call.id), node);
+    }
+    node.toolName = call.tool_name || node.toolName;
+    node.input = call.input || node.input;
+    node.output = call.output || node.output;
+    node.running = call.status === 'started';
+    node.ok = call.status !== 'failed';
+    node.error = call.error_message
+      || (typeof call.error === 'string' ? call.error : errorObject.message)
+      || null;
+    node.errorCode = call.error_code || errorObject.code || null;
+    node.retryable = call.retryable ?? errorObject.retryable ?? false;
+    node.durationMs = call.duration_ms ?? node.durationMs;
   }
 
   // 对话消息严格归入自己的 run。没有 run_id 的历史消息按相邻 user/assistant 配成独立 Turn。

@@ -36,6 +36,58 @@ export interface LessonPlanContent {
   reflection_notes: string;
 }
 
+/** 教学设计 V2：稳定教学内核 + 动态展示目录（schema_version === '2.0'）。 */
+export interface LessonPlanContentV2 {
+  schema_version: '2.0';
+  course_info: {
+    title: string;
+    subject: string;
+    grade_level: string;
+    audience: string;
+    duration_minutes: number;
+    scenario: string;
+    language: string;
+  };
+  pedagogical_core: {
+    objectives: Array<{
+      id: string;
+      statement: string;
+      behavior: string;
+      criterion: string;
+      blueprint_objective_id: string;
+      evidence: string;
+    }>;
+    knowledge_points: Array<{ id: string; name: string }>;
+    key_points: string[];
+    difficulty_points: string[];
+    methods: string[];
+    resources: string[];
+    stages: Array<{
+      id: string;
+      title: string;
+      duration_minutes: number;
+      teacher_activity: string;
+      learner_activity: string;
+      design_intent: string;
+      assessment: string;
+      objective_ids: string[];
+      knowledge_point_ids: string[];
+    }>;
+    assessment_plan: Array<{
+      objective_id: string;
+      method: string;
+      evidence: string;
+      criterion: string;
+    }>;
+    homework: string;
+    board_design: string;
+    reflection: string;
+  };
+  outline: {
+    sections: Array<Record<string, any>>;
+  };
+}
+
 export interface PPTBulletItem {
   text: string;
   emphasize?: boolean;
@@ -351,40 +403,10 @@ export interface ExerciseContent {
 }
 
 export type VideoPedagogicalRole = '导入' | '目标' | '情境' | '概念讲解' | '示范' | '练习' | '检查点' | '总结' | '过渡';
-export type VideoPedagogicalAction =
-  | 'hook' | 'objective_guide' | 'scenario_connect' | 'metaphor_explain'
-  | 'misconception_alert' | 'step_demonstration' | 'check_in' | 'summary_recap';
-export type VideoAnimationAction = '显示' | '高亮' | '缩放' | '平移' | '标注' | '转场';
-
-export interface VideoAnimationCue {
-  offset_seconds: number;
-  target: string;
-  action: VideoAnimationAction;
-  instruction: string;
-}
-
-export interface VideoPauseCue {
-  offset_seconds: number;
-  duration_seconds: number;
-  purpose: string;
-}
-
-export interface VideoSoundCue {
-  offset_seconds: number;
-  description: string;
-}
-
-export interface VideoSubtitleChunk {
+export interface SeedanceCameraBeat {
   start_offset_seconds: number;
   end_offset_seconds: number;
-  text: string;
-}
-
-export interface VideoInteraction {
-  prompt: string;
-  wait_seconds: number;
-  expected_response: string;
-  feedback_transition: string;
+  instruction: string;
 }
 
 export interface VideoScene {
@@ -393,35 +415,25 @@ export interface VideoScene {
   title: string;
   pedagogical_role: VideoPedagogicalRole;
   lesson_stage_id: string;
-  slide_id: string;
   objective_ids: string[];
   knowledge_point_ids: string[];
   start_seconds: number;
   end_seconds: number;
-  learning_purpose: string;
-  visual_track: {
-    composition: string;
-    animation_cues: VideoAnimationCue[];
-  };
-  audio_track: {
-    narration_text: string;
-    delivery_tone: string;
-    pedagogical_action?: VideoPedagogicalAction;
-    speaking_rate_cps?: number;
-    emphasis_terms: string[];
-    pause_cues: VideoPauseCue[];
-    sound_cues: VideoSoundCue[];
-  };
-  text_track: {
-    on_screen_text: string[];
-    subtitle_chunks: VideoSubtitleChunk[];
-  };
-  interaction?: VideoInteraction | null;
+  continuity_group: string;
+  visual_prompt: string;
+  camera_beats: SeedanceCameraBeat[];
+  spoken_text: string;
+  required_terms: string[];
+  required_numbers: string[];
+  required_facts: string[];
+  voice_direction: string;
+  sound_design: string[];
+  negative_constraints: string[];
   production_notes: string[];
 }
 
 export interface VideoScriptContent {
-  schema_version: '2.0';
+  schema_version: '3.0';
   course_info: {
     course_title: string;
     subject: string;
@@ -430,22 +442,57 @@ export interface VideoScriptContent {
     duration_seconds: number;
   };
   production_settings: {
-    mode: 'ppt_screen_recording';
+    mode: 'seedance_native';
     aspect_ratio: '16:9';
     target_duration_seconds: number;
-    narration_chars_per_minute: number;
-    subtitle_max_chars_per_line: number;
-    subtitle_max_lines: number;
+    target_clip_seconds: number;
+    min_clip_seconds: number;
+    max_clip_seconds: number;
+    global_visual_style: string;
+    global_voice_direction: string;
   };
   scenes: VideoScene[];
 }
 
+/** V4 动态章节：章节数量、标题、顺序与分镜归属由 AI 动态决定，无固定目录。 */
+export interface VideoScriptSection {
+  id: string;
+  sequence: number;
+  title: string;
+  purpose: string;
+  objective_ids: string[];
+  knowledge_point_ids: string[];
+}
+
+/** V4 分镜：在 V3 基础上绑定所属动态章节。 */
+export interface VideoSceneV4 extends VideoScene {
+  section_id: string;
+}
+
+/** V4 视频脚本：outline.sections（动态章节）+ scenes（每镜归属章节）。 */
+export interface VideoScriptContentV4 {
+  schema_version: '4.0';
+  course_info: VideoScriptContent['course_info'];
+  production_settings: VideoScriptContent['production_settings'];
+  outline: {
+    sections: VideoScriptSection[];
+  };
+  scenes: VideoSceneV4[];
+}
+
 export interface VideoGenerationSettings {
   aspect_ratio: '16:9';
-  resolution: '1920x1080' | '1280x720' | '640x360';
+  resolution: '1280x720';
   subtitle_enabled: boolean;
-  voice_style: string;
-  background_music_enabled: boolean;
+  native_audio: true;
+  continuity_policy: 'grouped';
+  model_config_id: string;
+  model_name: string;
+  quote_id: string;
+  approved_max_cost_fen: number;
+  provider?: string | null;
+  api_mode?: string | null;
+  interaction_ids?: string[];
 }
 
 export interface VideoGenerationScene {
@@ -454,22 +501,34 @@ export interface VideoGenerationScene {
   sequence: number;
   start_seconds: number;
   end_seconds: number;
+  continuity_group: string;
   visual_prompt: string;
-  visual_style: string;
-  narration_text: string;
-  subtitle_text: string;
-  production_notes: string[];
-  status: 'pending' | 'generating' | 'ready' | 'failed';
+  spoken_text: string;
+  voice_direction: string;
+  sound_design: string[];
+  required_terms: string[];
+  required_numbers: string[];
+  required_facts: string[];
+  request_hash: string;
+  reference_scene_ids: string[];
+  status: 'pending' | 'generating' | 'ready' | 'failed' | 'qa_failed';
   video_asset_id?: string | null;
-  audio_asset_id?: string | null;
   thumbnail_asset_id?: string | null;
-  provider_job_id?: string | null;
+  provider_job_id: string;
+  actual_transcript: string;
+  subtitle_segments: Array<Record<string, any>>;
+  qa: Record<string, any>;
+  usage: Record<string, any>;
+  estimated_tokens: number;
+  actual_tokens: number;
+  estimated_cost_fen: number;
+  actual_cost_fen: number;
   error?: Record<string, unknown> | null;
 }
 
 export interface VideoGenerationContent {
-  schema_version: '1.0';
-  mode: 'hybrid';
+  schema_version: '3.0';
+  mode: 'seedance_native';
   production_settings: VideoGenerationSettings;
   source_versions: Record<string, number>;
   scenes: VideoGenerationScene[];
@@ -480,6 +539,34 @@ export interface VideoGenerationContent {
     thumbnail_asset_id?: string | null;
     duration_seconds: number;
   };
+  cost_summary: Record<string, number | string>;
+  generation_warnings?: string[];
+}
+
+export interface VideoGenerationQuote {
+  quote_id: string;
+  expires_at: string;
+  script_version: number;
+  model_config_id: string;
+  model_name: string;
+  provider: string;
+  api_mode: string;
+  resolution: '1280x720';
+  scene_count: number;
+  reusable_scene_count: number;
+  duration_seconds: number;
+  estimated_tokens: number;
+  estimated_cost_fen: number;
+  maximum_cost_fen: number;
+  currency: 'CNY';
+  scenes: Array<{
+    scene_id: string;
+    duration_seconds: number;
+    request_hash: string;
+    reusable: boolean;
+    estimated_tokens: number;
+    estimated_cost_fen: number;
+  }>;
 }
 
 export interface VerbatimSegment {
@@ -510,4 +597,147 @@ export interface QualityReportContent {
   summary: string;
   issues: QualityIssue[];
   dimensions?: Record<string, number>;
+}
+
+// ===================== 学习任务单 V3：动态目录 + 强类型 Block =====================
+export interface TaskSheetCourseInfoV3 {
+  course_title: string;
+  subject: string;
+  grade_level: string;
+  audience: string;
+  duration_minutes: number;
+}
+
+export interface TaskSheetObjectiveCatalogItem {
+  id: string;
+  statement: string;
+  success_criterion: string;
+}
+
+export interface TaskSheetTaskRecordTable {
+  title: string;
+  instructions: string;
+  columns: string[];
+  blank_rows: number;
+}
+
+export interface TaskSheetTextBlock {
+  kind: 'text';
+  id: string;
+  text: string;
+}
+
+export interface TaskSheetObjectiveListBlock {
+  kind: 'objective_list';
+  id: string;
+  title?: string;
+  objective_ids: string[];
+}
+
+export interface TaskSheetLearningTaskBlock {
+  kind: 'learning_task';
+  id: string;
+  title: string;
+  action: string;
+  object: string;
+  steps: string[];
+  student_output: string;
+  completion_criterion: string;
+  estimated_minutes: number;
+  collaboration_mode: TaskSheetCollaboration;
+  objective_ids: string[];
+  knowledge_point_ids: string[];
+  stage_id?: string | null;
+  scaffolds: string[];
+  record_table?: TaskSheetTaskRecordTable | null;
+}
+
+export interface TaskSheetRecordTableBlock {
+  kind: 'record_table';
+  id: string;
+  title: string;
+  instructions: string;
+  columns: string[];
+  blank_rows: number;
+}
+
+export interface TaskSheetQuestionItem {
+  id: string;
+  prompt: string;
+  objective_ids: string[];
+  stage_id?: string | null;
+}
+
+export interface TaskSheetQuestionSetBlock {
+  kind: 'question_set';
+  id: string;
+  title?: string;
+  questions: TaskSheetQuestionItem[];
+}
+
+export interface TaskSheetAssessmentItem {
+  id: string;
+  statement: string;
+  objective_ids: string[];
+}
+
+export interface TaskSheetAssessmentBlock {
+  kind: 'assessment';
+  id: string;
+  title?: string;
+  scale: string[];
+  items: TaskSheetAssessmentItem[];
+}
+
+export interface TaskSheetChecklistItem {
+  text: string;
+}
+
+export interface TaskSheetChecklistBlock {
+  kind: 'checklist';
+  id: string;
+  title?: string;
+  items: TaskSheetChecklistItem[];
+}
+
+export type TaskSheetBlock =
+  | TaskSheetTextBlock
+  | TaskSheetObjectiveListBlock
+  | TaskSheetLearningTaskBlock
+  | TaskSheetRecordTableBlock
+  | TaskSheetQuestionSetBlock
+  | TaskSheetAssessmentBlock
+  | TaskSheetChecklistBlock;
+
+export interface TaskSheetSectionV3 {
+  id: string;
+  parent_id: string;
+  order: number;
+  title: string;
+  purpose: string;
+  objective_ids: string[];
+  blocks: TaskSheetBlock[];
+}
+
+export interface TaskSheetContentV3 {
+  schema_version: '3.0';
+  course_info: TaskSheetCourseInfoV3;
+  objective_catalog: TaskSheetObjectiveCatalogItem[];
+  sections: TaskSheetSectionV3[];
+}
+
+/** V2 / V3 判别 */
+export function isTaskSheetV3(value: unknown): value is TaskSheetContentV3 {
+  return Boolean(value) && typeof value === 'object' && (value as any).schema_version === '3.0';
+}
+
+/** V3 深度优先有序章节（parent_id + order） */
+export function orderTaskSheetSections(sections: TaskSheetSectionV3[]): Array<TaskSheetSectionV3 & { depth: number }> {
+  const depthMap: Record<string, number> = {};
+  for (const section of sections) {
+    depthMap[section.id] = section.parent_id ? (depthMap[section.parent_id] || 0) + 1 : 0;
+  }
+  return [...sections]
+    .sort((a, b) => `${a.parent_id || ''}:${a.order}`.localeCompare(`${b.parent_id || ''}:${b.order}`, undefined, { numeric: true }))
+    .map(section => ({ ...section, depth: depthMap[section.id] || 0 }));
 }

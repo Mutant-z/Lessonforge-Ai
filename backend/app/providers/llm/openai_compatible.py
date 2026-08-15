@@ -68,6 +68,7 @@ def _retryable_provider_error(exc: BaseException) -> bool:
 
 class OpenAICompatibleProvider(LLMProvider):
     name = "openai_compatible"
+    supports_native_tools = True
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model_name: str | None = None, timeout_seconds: int | None = None):
         settings = get_settings()
@@ -339,6 +340,92 @@ class OpenAICompatibleProvider(LLMProvider):
                 "模型返回的需求结构不完整，请重试或切换支持结构化输出的模型。",
                 response,
             ) from exc
+
+    async def native_agent_decision(
+        self,
+        system: str,
+        prompt: str,
+        tools: list[dict[str, Any]],
+    ):
+        """原生 tool calling（方案 §3.1）：模型原生返回工具调用或完成决策。
+
+        OpenAI-compatible 的 function calling：响应中的 ``message.tool_calls``
+        转换为 AgentDecision.tool_calls；模型直接返回完成 JSON 时按 AgentDecision
+        结构化解析。任何协议错误（HTTP 4xx/5xx、缺失 tools 支持、解析失败）
+        返回 None，由调用方回退结构化协议并发 fallback 事件。
+        """
+        from app.agent.schemas import AgentDecision, ToolCall
+
+        if not self.api_key:
+            return None
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": get_settings().llm_max_tokens,
+        }
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema") or {},
+                    },
+                }
+                for tool in tools
+                if tool.get("name")
+            ]
+        try:
+            data, response = await self._post_chat(payload)
+        except LLMProviderError:
+            # 上游错误（含 404 不支持 tools 的网关）→ 回退结构化协议。
+            return None
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            return None
+        raw_content = message.get("content") or ""
+        if isinstance(raw_content, list):
+            raw_content = "".join(
+                str(block.get("text", ""))
+                for block in raw_content if isinstance(block, dict)
+            )
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            parsed: list[ToolCall] = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function") or {}
+                name = function.get("name") or ""
+                if not name:
+                    continue
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                parsed.append(ToolCall(id=str(call.get("id") or ""), tool_name=name, input=arguments))
+            if not parsed:
+                return None
+            return AgentDecision(
+                thinking=raw_content[:2000] if raw_content else "",
+                tool_calls=parsed,
+                message="已调用工具继续执行。",
+            )
+        # 模型直接完成：按 AgentDecision 结构化解析。
+        content = self._strip_json_fence(self._sanitize_control_chars(raw_content))
+        try:
+            decoded = json.loads(content)
+            return AgentDecision.model_validate(decoded)
+        except (json.JSONDecodeError, ValidationError):
+            return None
 
     async def structured(self, system: str, prompt: str, schema: type[T]) -> T:
         try:

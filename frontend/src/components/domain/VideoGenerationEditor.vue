@@ -1,102 +1,32 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue';
-import { Lock, RefreshRight, VideoCamera } from '@element-plus/icons-vue';
+import { RefreshRight } from '@element-plus/icons-vue';
 import type { VideoGenerationContent, VideoGenerationScene } from '../../types';
 
-const props = defineProps<{
-  content: VideoGenerationContent;
-  selectedSceneId?: string;
-  busy?: boolean;
-}>();
-
-const emit = defineEmits<{
-  close: [];
-  lock: [scene: VideoGenerationScene];
-  regenerate: [sceneId: string, payload: Record<string, unknown>];
-}>();
-
-const selectedId = computed(() => props.selectedSceneId || props.content.scenes[0]?.id || '');
-const draft = reactive({
-  visual_prompt: '', visual_style: '', narration_text: '', subtitle_text: '',
-  production_notes: '', instruction: '', duration_seconds: 1, visual: true, audio: false, subtitle: false,
-});
-
-const scene = computed(() => props.content.scenes.find(item => item.id === selectedId.value) || props.content.scenes[0]);
-
-function hydrate() {
-  if (!scene.value) return;
-  draft.visual_prompt = scene.value.visual_prompt;
-  draft.visual_style = scene.value.visual_style;
-  draft.narration_text = scene.value.narration_text;
-  draft.subtitle_text = scene.value.subtitle_text;
-  draft.production_notes = scene.value.production_notes.join('\n');
-  draft.duration_seconds = Math.max(1, scene.value.end_seconds - scene.value.start_seconds);
-  draft.instruction = '';
-  draft.visual = true;
-  draft.audio = false;
-  draft.subtitle = false;
-}
-
-function submit() {
-  if (!scene.value) return;
-  emit('regenerate', scene.value.id, {
-    instruction: draft.instruction.trim() || '按当前编辑内容重新生成该分镜',
-    visual_prompt: draft.visual_prompt.trim(),
-    visual_style: draft.visual_style.trim(),
-    narration_text: draft.narration_text.trim(),
-    subtitle_text: draft.subtitle_text.trim(),
-    production_notes: draft.production_notes.split('\n').map(item => item.trim()).filter(Boolean),
-    duration_seconds: draft.duration_seconds,
-    regenerate_visual: draft.visual,
-    regenerate_audio: draft.audio,
-    regenerate_subtitle: draft.subtitle,
-    preserve_locked_content: true,
-  });
-}
-
-watch(selectedId, hydrate, { immediate: true });
+const props = defineProps<{ content: VideoGenerationContent; selectedSceneId?: string; busy?: boolean }>();
+const emit = defineEmits<{ close: []; regenerate: [sceneId: string, payload: Record<string, unknown>] }>();
+const scene = computed(() => props.content.scenes.find(item => item.id === props.selectedSceneId) || props.content.scenes[0]);
+const draft = reactive({ visual_prompt:'',spoken_text:'',voice_direction:'',instruction:'',duration_seconds:8,include_dependents:false });
+function hydrate(){if(!scene.value)return;draft.visual_prompt=scene.value.visual_prompt;draft.spoken_text=scene.value.spoken_text;draft.voice_direction=scene.value.voice_direction;draft.duration_seconds=scene.value.end_seconds-scene.value.start_seconds;draft.instruction='';draft.include_dependents=false}
+function submit(){if(!scene.value)return;emit('regenerate',scene.value.id,{instruction:draft.instruction.trim()||'按当前编辑内容重新生成完整原生音视频片段',visual_prompt:draft.visual_prompt.trim(),spoken_text:draft.spoken_text.trim(),voice_direction:draft.voice_direction.trim(),duration_seconds:draft.duration_seconds,include_dependents:draft.include_dependents})}
+watch(()=>props.selectedSceneId,hydrate,{immediate:true});
 </script>
 
 <template>
-  <div v-if="scene" class="video-generation-editor">
-    <header>
-      <div><span>{{ scene.id }} · {{ scene.script_scene_id }}</span><h2>调整分镜 {{ String(scene.sequence).padStart(2, '0') }}</h2></div>
-      <div><el-button :icon="Lock" :disabled="busy" @click="emit('lock', scene)">锁定分镜</el-button><el-button @click="emit('close')">关闭</el-button></div>
-    </header>
+  <div v-if="scene" class="native-editor">
+    <header><div><span>{{ scene.id }} / {{ scene.script_scene_id }}</span><h2>调整完整原生音视频片段</h2></div><el-button @click="emit('close')">关闭</el-button></header>
+    <div class="notice"><b>计费边界</b><p>保存前会重新报价。仅当前片段生成新的 Seedance 任务；画面与语音必须一起重生，字幕会从新音轨重新转写。</p></div>
     <main>
-      <section class="edit-section visual-section">
-        <h3><el-icon><VideoCamera /></el-icon>画面生成</h3>
-        <label><span>画面提示词</span><el-input v-model="draft.visual_prompt" type="textarea" :rows="7" /></label>
-        <label><span>视觉风格</span><el-input v-model="draft.visual_style" /></label>
-        <label><span>制作备注（每行一项）</span><el-input v-model="draft.production_notes" type="textarea" :rows="4" /></label>
-        <label><span>分镜时长（秒）</span><el-input-number v-model="draft.duration_seconds" :min="1" :max="600" :step="1" /></label>
-      </section>
-      <section class="edit-section voice-section">
-        <h3>旁白与字幕</h3>
-        <label><span>旁白</span><el-input v-model="draft.narration_text" type="textarea" :rows="6" /></label>
-        <label><span>字幕</span><el-input v-model="draft.subtitle_text" type="textarea" :rows="4" /></label>
-        <label><span>补充调整要求</span><el-input v-model="draft.instruction" type="textarea" :rows="3" placeholder="例如：画面改成实验室近景，保持原旁白" /></label>
-      </section>
+      <label><span>画面提示词</span><el-input v-model="draft.visual_prompt" type="textarea" :rows="7" /></label>
+      <label><span>模型原生口播</span><el-input v-model="draft.spoken_text" type="textarea" :rows="6" /></label>
+      <label><span>声音指导</span><el-input v-model="draft.voice_direction" type="textarea" :rows="3" /></label>
+      <div class="row"><label><span>片段时长</span><el-input-number v-model="draft.duration_seconds" :min="4" :max="15" :step="1" /></label><label><span>连续性</span><el-checkbox v-model="draft.include_dependents">同时重生同组后续依赖片段</el-checkbox></label></div>
+      <label><span>补充要求</span><el-input v-model="draft.instruction" type="textarea" :rows="3" placeholder="例如：教师动作更克制，数字和单位必须清楚说出" /></label>
     </main>
-    <footer>
-      <div class="generation-options">
-        <el-checkbox v-model="draft.visual">重新生成画面</el-checkbox>
-        <el-checkbox v-model="draft.audio">重新生成语音</el-checkbox>
-        <el-checkbox v-model="draft.subtitle">重新生成字幕</el-checkbox>
-      </div>
-      <el-button type="primary" :icon="RefreshRight" :loading="busy" :disabled="!draft.visual && !draft.audio && !draft.subtitle" @click="submit">生成新版本</el-button>
-    </footer>
+    <footer><span>原资源会保留，可从版本历史回滚。</span><el-button type="primary" :icon="RefreshRight" :loading="busy" @click="submit">估算本次修改费用</el-button></footer>
   </div>
 </template>
 
 <style scoped>
-.video-generation-editor { min-height: 100%; padding: 22px; color: #111827; background: #f7f7f8; font-family: Helvetica Neue, Helvetica, Arial, sans-serif; }
-.video-generation-editor > header { display: flex; justify-content: space-between; align-items: flex-start; padding: 20px 22px; border: 1px solid #cfd2d9; background: #fff; }
-.video-generation-editor > header > div:last-child { display: flex; gap: 8px; }.video-generation-editor header span { color: #002fa7; font-size: 11px; font-weight: 800; letter-spacing: .06em; }
-.video-generation-editor h2 { margin: 7px 0 0; font-size: 25px; letter-spacing: -.03em; }.video-generation-editor main { display: grid; grid-template-columns: 1.1fr .9fr; margin-top: 14px; border: 1px solid #cfd2d9; background: #fff; }
-.edit-section { padding: 20px; }.edit-section + .edit-section { border-left: 1px solid #cfd2d9; }.edit-section h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 18px; padding-bottom: 10px; border-bottom: 1px solid #cfd2d9; font-size: 14px; }
-.edit-section label { display: grid; gap: 6px; margin-bottom: 14px; }.edit-section label > span { color: #555d68; font-size: 11px; font-weight: 800; }
-.video-generation-editor > footer { display: flex; justify-content: space-between; align-items: center; padding: 15px 18px; border: 1px solid #cfd2d9; border-top: 0; background: #fff; }.generation-options { display: flex; flex-wrap: wrap; gap: 14px; }
-:deep(.el-input__wrapper), :deep(.el-textarea__inner), :deep(.el-button) { border-radius: 0 !important; }
-@media (max-width: 900px) { .video-generation-editor main { grid-template-columns: 1fr; }.edit-section + .edit-section { border-left: 0; border-top: 1px solid #cfd2d9; }.video-generation-editor > header, .video-generation-editor > footer { gap: 12px; flex-direction: column; align-items: stretch; } }
+.native-editor{min-height:100%;padding:22px;box-sizing:border-box;color:#111318;background:#f5f5f3;font-family:Helvetica Neue,Helvetica,Arial,sans-serif}.native-editor>header{display:flex;justify-content:space-between;align-items:flex-start;padding:20px;border:1px solid #b9bdc5;background:#fff}.native-editor header span,.native-editor label>span,.notice b{color:#002fa7;font-size:10px;font-weight:800;letter-spacing:.09em;text-transform:uppercase}.native-editor h2{margin:7px 0 0;font-size:24px}.notice{display:grid;grid-template-columns:110px 1fr;margin-top:12px;padding:13px 16px;border:1px solid #9eb2e9;background:#eef3ff}.notice p{margin:0;color:#33425f;font-size:12px;line-height:1.6}.native-editor main{display:grid;gap:15px;margin-top:12px;padding:20px;border:1px solid #b9bdc5;background:#fff}.native-editor label{display:grid;gap:6px}.row{display:grid;grid-template-columns:1fr 1fr;gap:16px}.native-editor>footer{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border:1px solid #b9bdc5;border-top:0;background:#fff}.native-editor>footer span{color:#656a73;font-size:11px}:deep(.el-input__wrapper),:deep(.el-textarea__inner),:deep(.el-button),:deep(.el-input-number){border-radius:0!important}.el-input-number{width:100%}@media(max-width:720px){.row{grid-template-columns:1fr}.native-editor>footer{align-items:stretch;flex-direction:column;gap:10px}}
 </style>

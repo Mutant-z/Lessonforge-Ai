@@ -64,11 +64,12 @@ def build_course_package(course_id: str, title: str, blueprint: dict, blueprint_
         add(markdown_path, "video_script_markdown", video["version"], schema_version=schema_version, source_versions=source_versions)
     if "task_sheet" in artifacts:
         task_sheet = artifacts["task_sheet"]
-        if task_sheet["content_json"].get("schema_version") == "2.0":
+        schema_version = task_sheet["content_json"].get("schema_version")
+        if schema_version in {"2.0", "3.0"}:
             path = render_task_sheet_docx("学习任务单", task_sheet["content_json"], folder / "03_学习任务单.docx", f"V{task_sheet['version']}")
         else:
             path = render_markdown_docx("学习任务单", task_sheet["content_markdown"], folder / "03_学习任务单.docx", f"V{task_sheet['version']}")
-        add(path, "task_sheet", task_sheet["version"])
+        add(path, "task_sheet", task_sheet["version"], schema_version=schema_version)
         markdown_path = folder / "03_学习任务单.md"
         markdown_path.write_text(task_sheet["content_markdown"], encoding="utf-8")
         add(markdown_path, "task_sheet_markdown", task_sheet["version"])

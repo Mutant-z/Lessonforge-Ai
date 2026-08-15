@@ -32,6 +32,8 @@ import {
   Loading,
   Paperclip,
   VideoPlay,
+  VideoCamera,
+  ChatDotSquare,
   Bell
 } from '@element-plus/icons-vue';
 
@@ -56,10 +58,11 @@ onMounted(async () => {
 });
 
 const counts = computed(() => {
-  const total = store.items.length;
-  const running = store.items.filter(x => ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(x.status)).length;
-  const review = store.items.filter(x => ['blueprint_review', 'teacher_review', 'requirement_review', 'draft'].includes(x.status)).length;
-  const done = store.items.filter(x => x.status === 'completed').length;
+  const items = store.items || [];
+  const total = items.length;
+  const running = items.filter(x => ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(x.status)).length;
+  const review = items.filter(x => ['blueprint_review', 'teacher_review', 'requirement_review', 'draft'].includes(x.status)).length;
+  const done = items.filter(x => x.status === 'completed').length;
   const completionRate = total > 0 ? Math.round((done / total) * 100) : 0;
   const savedHours = Math.round(total * 4.5);
   return { all: total, running, review, done, completionRate, savedHours };
@@ -67,7 +70,8 @@ const counts = computed(() => {
 
 const pendingActionItems = computed(() => {
   const list: any[] = [];
-  store.items.forEach(course => {
+  const items = store.items || [];
+  items.forEach(course => {
     if (['blueprint_review', 'teacher_review'].includes(course.status)) {
       list.push({
         id: course.id,
@@ -101,12 +105,13 @@ const pendingActionItems = computed(() => {
 });
 
 const recentEditedCourse = computed(() => {
-  if (!store.items.length) return null;
-  return store.items[0];
+  const items = store.items || [];
+  if (!items.length) return null;
+  return items[0];
 });
 
 const filteredCourses = computed(() => {
-  let list = store.items;
+  let list = store.items || [];
 
   if (activeStatusFilter.value !== 'all') {
     if (activeStatusFilter.value === 'running') {
@@ -228,14 +233,16 @@ function getDeliverableStates(status: string) {
   const isDone = status === 'completed';
   const isReview = ['blueprint_review', 'teacher_review'].includes(status);
   const isRunning = ['blueprint_generating', 'resource_generating', 'quality_checking'].includes(status);
+  const isResourceGen = status === 'resource_generating';
 
   return [
-    { label: '教学设计', ready: isDone || isReview, statusText: isReview ? '待确认' : (isDone ? '完成' : (isRunning ? '生成中' : '未开始')), ic: Document, icClass: 'doc' },
+    { label: '教学设计', ready: isDone || isReview || isResourceGen, statusText: isReview ? '待确认' : (isDone ? '完成' : (isResourceGen ? '已就绪' : (isRunning ? '生成中' : '未开始'))), ic: Document, icClass: 'doc' },
     { label: '16:9 PPT', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Files, icClass: 'ppt' },
     { label: '任务单', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: CircleCheck, icClass: 'sheet' },
     { label: '课后练习', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Operation, icClass: 'quiz' },
     { label: '视频脚本', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Cpu, icClass: 'script' },
-    { label: '教师逐字稿', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Document, icClass: 'voice' }
+    { label: '教师逐字稿', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: ChatDotSquare, icClass: 'voice' },
+    { label: '视频生成', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: VideoCamera, icClass: 'video' }
   ];
 }
 </script>
@@ -505,31 +512,56 @@ function getDeliverableStates(status: string) {
             <div v-else-if="filteredCourses.length === 1" class="wide-project-card" @click="router.push(getProjectCta(filteredCourses[0]).target)">
               <div class="w-header">
                 <div class="w-left">
+                  <h2 class="w-title">{{ filteredCourses[0].title }}</h2>
                   <div class="w-tags">
                     <span class="tag-pill subject">{{ filteredCourses[0].subject }}</span>
                     <span class="tag-pill grade">{{ filteredCourses[0].grade_level }}</span>
                     <span class="tag-pill duration">{{ filteredCourses[0].duration_minutes }} 分钟</span>
                   </div>
-                  <h2 class="w-title">{{ filteredCourses[0].title }}</h2>
                 </div>
                 <StatusBadge :status="filteredCourses[0].status" size="default" />
               </div>
 
               <div class="w-stage-strip" :class="getProjectStageInfo(filteredCourses[0].status).type">
-                <span>当前阶段：<strong>{{ getProjectStageInfo(filteredCourses[0].status).text }}</strong></span>
+                <div class="stage-strip-left">
+                  <span class="stage-dot-indicator"></span>
+                  <span class="stage-label">当前阶段：</span>
+                  <span class="stage-val">{{ getProjectStageInfo(filteredCourses[0].status).text }}</span>
+                </div>
                 <div v-if="['blueprint_generating', 'resource_generating'].includes(filteredCourses[0].status)" class="stage-live">
-                  <el-icon class="is-loading"><Loading /></el-icon>
-                  <span>Agent 团队生成中</span>
+                  <span class="live-pulse-dot animate-pulse"></span>
+                  <span>AI 并发执行中</span>
                 </div>
               </div>
 
-              <!-- 6 Deliverables Readiness Grid -->
+              <!-- 7 Deliverables Readiness Grid -->
               <div class="w-deliv-grid">
-                <div v-for="(deliv, idx) in getDeliverableStates(filteredCourses[0].status)" :key="idx" class="deliv-cell" :class="{ ready: deliv.ready }">
+                <div 
+                  v-for="(deliv, idx) in getDeliverableStates(filteredCourses[0].status)" 
+                  :key="idx" 
+                  class="deliv-cell" 
+                  :class="{ 
+                    ready: deliv.ready && deliv.statusText !== '生成中', 
+                    'needs-action': deliv.statusText === '待确认',
+                    generating: deliv.statusText === '生成中'
+                  }"
+                >
                   <div class="deliv-ic" :class="deliv.icClass"><component :is="deliv.ic" /></div>
                   <div class="deliv-info">
                     <span class="deliv-name">{{ deliv.label }}</span>
-                    <span class="deliv-status" :class="{ ready: deliv.ready }">{{ deliv.statusText }}</span>
+                    <span 
+                      class="deliv-status" 
+                      :class="{ 
+                        ready: deliv.ready && deliv.statusText !== '生成中', 
+                        warning: deliv.statusText === '待确认',
+                        generating: deliv.statusText === '生成中'
+                      }"
+                    >
+                      <span v-if="deliv.statusText === '待确认'" class="deliv-status-dot pulse"></span>
+                      <span v-else-if="deliv.statusText === '生成中'" class="deliv-status-dot generating"></span>
+                      <span v-else-if="deliv.ready" class="deliv-status-dot ready"></span>
+                      {{ deliv.statusText }}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -614,7 +646,8 @@ function getDeliverableStates(status: string) {
 /* Outer Single-Screen Workbench Canvas */
 .teacher-dashboard-workbench {
   width: 100%;
-  height: calc(100vh - var(--header-height));
+  height: 100%;
+  flex: 1;
   min-height: 0;
   overflow: hidden;
   padding: 16px 28px 16px;
@@ -946,8 +979,7 @@ function getDeliverableStates(status: string) {
   flex: 3;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -978,23 +1010,27 @@ function getDeliverableStates(status: string) {
 .p-badge.warning {
   font-size: 11.5px;
   font-weight: 800;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: var(--radius-pill);
   background: var(--accent-amber-soft);
   color: var(--accent-amber);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .p-badge.success {
   font-size: 11.5px;
   font-weight: 800;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: var(--radius-pill);
   background: var(--accent-mint-soft);
   color: var(--accent-mint);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .p-empty-state {
-  padding: 12px;
+  padding: 14px;
   background: var(--surface-secondary);
   border: 1px dashed var(--border-default);
   border-radius: var(--radius-control);
@@ -1015,25 +1051,26 @@ function getDeliverableStates(status: string) {
 .p-items-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .p-card-row {
-  background: var(--surface-secondary);
-  border: 1px solid var(--border-default);
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
   border-radius: var(--radius-control);
-  padding: 8px 10px;
+  padding: 10px 12px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   transition: all var(--motion-fast);
 }
 
 .p-card-row:hover {
-  background: var(--surface-primary);
+  background: #ffffff;
   border-color: var(--color-primary-border);
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.08);
 }
 
 .p-row-main {
@@ -1045,31 +1082,40 @@ function getDeliverableStates(status: string) {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
 .type-pill {
   font-size: 11px;
   font-weight: 800;
-  padding: 1px 6px;
+  padding: 2px 7px;
   border-radius: var(--radius-pill);
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
 }
-.type-pill.blueprint { background: var(--accent-amber-soft); color: var(--accent-amber); }
+.type-pill.blueprint { background: var(--accent-amber-soft); color: var(--accent-amber); border: 1px solid #fef3c7; }
 .type-pill.draft { background: var(--surface-tertiary); color: var(--text-secondary); }
 .type-pill.failed { background: var(--color-danger-soft); color: var(--danger); }
 
 .p-row-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13.5px;
   font-weight: 800;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
 }
 
 .p-row-desc {
-  margin: 2px 0 0;
-  font-size: 12.5px;
+  margin: 3px 0 0;
+  font-size: 12px;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1080,7 +1126,7 @@ function getDeliverableStates(status: string) {
   border: none;
   background: var(--color-primary-soft);
   color: var(--color-primary);
-  padding: 4px 10px;
+  padding: 5px 12px;
   border-radius: var(--radius-pill);
   font-size: 12.5px;
   font-weight: 800;
@@ -1089,6 +1135,7 @@ function getDeliverableStates(status: string) {
   gap: 3px;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* Integrated Live Metrics Bar */
@@ -1340,18 +1387,25 @@ function getDeliverableStates(status: string) {
 
 .w-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 14px;
 }
 
-.w-left { flex: 1; min-width: 0; }
+.w-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
 
 .w-tags {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 4px;
+  margin-bottom: 0;
 }
 
 .w-tags.compact { gap: 4px; margin-bottom: 3px; }
@@ -1380,70 +1434,237 @@ function getDeliverableStates(status: string) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 12px;
+  padding: 8px 14px;
   border-radius: var(--radius-control);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 700;
+  border-left: 3.5px solid transparent;
+  transition: all var(--motion-fast);
 }
 
-.w-stage-strip.warning { background: var(--accent-amber-soft); color: var(--accent-amber); border: 1px solid rgba(217, 119, 6, 0.2); }
-.w-stage-strip.running { background: var(--accent-violet-soft); color: var(--accent-violet); border: 1px solid rgba(124, 58, 237, 0.2); }
-.w-stage-strip.success { background: var(--color-success-soft); color: var(--success); border: 1px solid rgba(22, 163, 74, 0.2); }
-.w-stage-strip.danger { background: var(--color-danger-soft); color: var(--danger); border: 1px solid rgba(220, 38, 38, 0.2); }
-.w-stage-strip.info { background: var(--surface-tertiary); color: var(--text-secondary); border: 1px solid var(--border-default); }
-
-.stage-live { display: flex; align-items: center; gap: 5px; font-size: 12.5px; }
-
-.w-deliv-grid {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 8px;
-}
-
-.deliv-cell {
-  background: var(--surface-secondary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
-  padding: 8px 10px;
+.stage-strip-left {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
+.stage-dot-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.stage-label {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.stage-val {
+  font-weight: 800;
+}
+
+.w-stage-strip.warning {
+  background: #fffbeb;
+  color: #b45309;
+  border: 1px solid #fef3c7;
+  border-left: 3.5px solid #f59e0b;
+}
+
+.w-stage-strip.warning .stage-val {
+  color: #d97706;
+}
+
+.w-stage-strip.running {
+  background: #f5f3ff;
+  color: #6d28d9;
+  border: 1px solid #ede9fe;
+  border-left: 3.5px solid #7c3aed;
+}
+
+.w-stage-strip.running .stage-val {
+  color: #7c3aed;
+}
+
+.w-stage-strip.success {
+  background: #f0fdf4;
+  color: #15803d;
+  border: 1px solid #dcfce7;
+  border-left: 3.5px solid #16a34a;
+}
+
+.w-stage-strip.success .stage-val {
+  color: #16a34a;
+}
+
+.w-stage-strip.danger {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fee2e2;
+  border-left: 3.5px solid #dc2626;
+}
+
+.w-stage-strip.info {
+  background: var(--surface-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-left: 3.5px solid var(--text-muted);
+}
+
+.stage-live { 
+  display: flex; 
+  align-items: center; 
+  gap: 6px; 
+  font-size: 12.5px;
+  font-weight: 800;
+  color: var(--accent-violet);
+}
+
+.w-deliv-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+}
+
+.deliv-cell {
+  background: #f8fafc;
+  border: 1.5px solid #e2e8f0;
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all var(--motion-fast);
+  min-width: 0;
+}
+
+.deliv-cell:hover {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+.deliv-cell.needs-action {
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.deliv-cell.needs-action:hover {
+  border-color: #f59e0b;
+  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.12);
+}
+
 .deliv-cell.ready {
-  background: var(--surface-primary);
-  border-color: var(--border-active);
+  background: #ffffff;
+  border-color: #e2e8f0;
+}
+
+.deliv-cell.generating {
+  background: #faf5ff;
+  border-color: #c7d2fe;
+}
+
+.deliv-cell.generating:hover {
+  border-color: #818cf8;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.12);
+}
+
+.deliv-status.generating {
+  color: #7c3aed;
+  font-weight: 800;
+}
+
+.deliv-status-dot.generating {
+  background: #7c3aed;
+  box-shadow: 0 0 6px rgba(124, 58, 237, 0.6);
+  animation: pulse-ring 1.5s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}
+
+.live-pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-violet);
+  box-shadow: 0 0 8px rgba(124, 58, 237, 0.6);
 }
 
 .deliv-ic {
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: grid;
   place-items: center;
   font-size: 15px;
   flex-shrink: 0;
-  background: var(--surface-primary);
-  border: 1px solid var(--border-soft);
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
 }
 
-.deliv-ic.doc { color: var(--primary-600); }
-.deliv-ic.ppt { color: var(--accent-amber); }
-.deliv-ic.sheet { color: var(--accent-mint); }
-.deliv-ic.quiz { color: var(--accent-cyan); }
-.deliv-ic.script { color: var(--accent-violet); }
-.deliv-ic.voice { color: var(--accent-blue); }
+.deliv-ic.doc { color: #2563eb; background: #eff6ff; border-color: #dbeafe; }
+.deliv-ic.ppt { color: #ea580c; background: #fff7ed; border-color: #ffedd5; }
+.deliv-ic.sheet { color: #059669; background: #ecfdf5; border-color: #d1fae5; }
+.deliv-ic.quiz { color: #0284c7; background: #f0f9ff; border-color: #e0f2fe; }
+.deliv-ic.script { color: #7c3aed; background: #f5f3ff; border-color: #ede9fe; }
+.deliv-ic.voice { color: #4f46e5; background: #eef2ff; border-color: #e0e7ff; }
+.deliv-ic.video { color: #e11d48; background: #fff1f2; border-color: #ffe4e6; }
 
 .deliv-info {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 
-.deliv-name { font-size: 13px; font-weight: 800; color: var(--text-primary); white-space: nowrap; }
-.deliv-status { font-size: 12px; font-weight: 700; color: var(--text-muted); }
-.deliv-status.ready { color: var(--accent-mint); }
+.deliv-name { 
+  font-size: 13px; 
+  font-weight: 800; 
+  color: #1e293b; 
+  white-space: nowrap; 
+}
+
+.deliv-status { 
+  font-size: 11.5px; 
+  font-weight: 700; 
+  color: #94a3b8; 
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.deliv-status.warning { 
+  color: #d97706; 
+  font-weight: 800;
+}
+
+.deliv-status.ready { 
+  color: #059669; 
+  font-weight: 800;
+}
+
+.deliv-status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.deliv-status-dot.pulse {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.6);
+  animation: pulse-ring 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+}
+
+.deliv-status-dot.ready {
+  background: #10b981;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.4); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
 
 .w-footer {
   display: flex;

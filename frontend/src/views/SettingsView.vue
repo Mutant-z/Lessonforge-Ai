@@ -147,6 +147,9 @@
           <button class="mini-preset-btn chip-claude" @click="handleOpenCreateDialog('claude')">
             <span class="btn-dot bg-purple-500"></span> Claude 3.5
           </button>
+          <button class="mini-preset-btn chip-openai" @click="handleOpenCreateDialog('gemini-video')">
+            <span class="btn-dot bg-emerald-500"></span> Gemini 有声视频
+          </button>
         </div>
       </div>
 
@@ -424,7 +427,12 @@
                         <el-icon><Check /></el-icon> 当前选中
                       </span>
                     </div>
-                    <p class="slide-desc">{{ item.description }}适用于{{ item.recommended_for.join('、') }}。</p>
+                    <p class="slide-desc">{{ item.description }}</p>
+                    <div v-if="item.recommended_for?.length" class="slide-tags">
+                      <span v-for="tag in item.recommended_for" :key="tag" class="recommended-tag-pill">
+                        {{ tag }}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -541,6 +549,7 @@
             <el-select v-model="configForm.provider" class="w-full" @change="handleProviderChange">
               <el-option label="OpenAI 兼容协议" value="openai_compatible" />
               <el-option label="Anthropic 协议" value="anthropic" />
+              <el-option label="火山方舟（官方）" value="volcengine_ark" />
               <el-option label="Mock 模拟服务" value="mock" />
             </el-select>
           </el-form-item>
@@ -583,7 +592,9 @@
               <el-checkbox value="vision_review">视觉复核</el-checkbox>
               <el-checkbox value="image_generation">图片生成</el-checkbox>
               <el-checkbox value="video_generation">视频生成</el-checkbox>
+              <el-checkbox value="native_audio_video_generation">原生有声视频</el-checkbox>
               <el-checkbox value="speech_generation">语音生成</el-checkbox>
+              <el-checkbox value="speech_recognition">语音识别 / ASR</el-checkbox>
               <el-checkbox value="media_composition">媒体合成</el-checkbox>
             </el-checkbox-group>
           </el-form-item>
@@ -601,7 +612,10 @@
             <el-option v-if="hasImageCapability" label="Anthropic Vision" value="anthropic_vision" />
             <el-option v-if="hasImageCapability" label="自定义图片 HTTP" value="custom_image_http" />
             <el-option v-if="configForm.capabilities.includes('video_generation')" label="自定义异步视频 HTTP" value="custom_video_async_http" />
+            <el-option v-if="configForm.capabilities.includes('native_audio_video_generation')" label="火山方舟 Seedance 原生有声视频" value="volcengine_ark_video" />
+            <el-option v-if="configForm.capabilities.includes('native_audio_video_generation')" label="Gemini Interactions 原生有声视频" value="gemini_interactions_video" />
             <el-option v-if="configForm.capabilities.includes('speech_generation')" label="自定义语音 HTTP" value="custom_speech_http" />
+            <el-option v-if="configForm.capabilities.includes('speech_recognition')" label="豆包 ASR" value="volcengine_asr" />
             <el-option v-if="configForm.capabilities.includes('media_composition')" label="本地 FFmpeg" value="local_ffmpeg" />
             <el-option v-if="hasMediaCapability" label="Mock 媒体服务" value="mock_media" />
           </el-select>
@@ -761,7 +775,9 @@ const hasImageCapability = computed(() => (
 ));
 const hasMediaCapability = computed(() => (
   configForm.capabilities.includes('video_generation')
+  || configForm.capabilities.includes('native_audio_video_generation')
   || configForm.capabilities.includes('speech_generation')
+  || configForm.capabilities.includes('speech_recognition')
   || configForm.capabilities.includes('media_composition')
 ));
 const hasSpecializedTransport = computed(() => hasImageCapability.value || hasMediaCapability.value);
@@ -769,8 +785,20 @@ const isCustomMediaTransport = computed(() => [
   'custom_image_http',
   'custom_video_async_http',
   'custom_speech_http',
+  'volcengine_ark_video',
+  'gemini_interactions_video',
+  'volcengine_asr',
 ].includes(configForm.api_mode));
 const adapterConfigPlaceholder = computed(() => {
+  if (configForm.api_mode === 'gemini_interactions_video') {
+    return '{"interactions_path":"/v1beta/interactions","interaction_status_path":"/v1beta/interactions/{id}","file_status_path":"/v1beta/files/{file_id}","file_download_path":"/v1beta/files/{file_id}:download?alt=media","delivery":"uri","auth_mode":"bearer","max_concurrency":2,"max_file_mb":500}';
+  }
+  if (configForm.api_mode === 'volcengine_ark_video') {
+    return '{"model_family":"doubao-seedance-2.5","endpoint_path":"/contents/generations/tasks","poll_endpoint_path":"/contents/generations/tasks/{job_id}","cancel_endpoint_path":"/contents/generations/tasks/{job_id}","result_url_path":"content.video_url","usage_path":"usage","price_per_million_tokens_cny":0,"tokens_per_second_720p":0,"max_concurrency":2}';
+  }
+  if (configForm.api_mode === 'volcengine_asr') {
+    return '{"endpoint_path":"/audio/transcriptions","transcript_path":"text","segments_path":"segments"}';
+  }
   if (configForm.api_mode === 'custom_video_async_http') {
     return '{"endpoint_path":"/videos/generations","poll_endpoint_path":"/videos/generations/{job_id}","cancel_endpoint_path":"/videos/generations/{job_id}/cancel","job_id_path":"id","status_path":"status","progress_path":"progress","result_url_path":"output.url"}';
   }
@@ -782,6 +810,7 @@ const adapterConfigPlaceholder = computed(() => {
 
 function preferredTestCapability(capabilities: ModelCapability[]) {
   if (capabilities.includes('video_generation')) return 'video_generation' as const;
+  if (capabilities.includes('speech_recognition')) return 'speech_recognition' as const;
   if (capabilities.includes('speech_generation')) return 'speech_generation' as const;
   if (capabilities.includes('image_generation')) return 'image_generation' as const;
   return 'text_generation' as const;
@@ -807,6 +836,7 @@ function formatContextWindow(value: number): string {
 function getProviderLabel(provider: string): string {
   if (provider === 'openai_compatible') return 'OpenAI 兼容协议';
   if (provider === 'anthropic') return 'Anthropic 协议';
+  if (provider === 'volcengine_ark') return '火山方舟';
   if (provider === 'mock') return 'Mock 模拟模式';
   return provider;
 }
@@ -830,7 +860,7 @@ function cleanBaseUrl() {
   configForm.base_url = configForm.base_url.replace(/\/chat\/completions\/?$/, '').trim();
 }
 
-function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude') {
+function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude' | 'gemini-video') {
   configForm.context_window_tokens = 1_000_000;
   configForm.supports_multimodal = false;
   configForm.capabilities = ['text_generation', 'structured_output'];
@@ -840,7 +870,26 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude') {
   configForm.media_poll_interval_seconds = 2;
   configForm.media_max_duration_seconds = 1800;
   configForm.media_max_file_mb = 500;
-  if (presetType === 'deepseek') {
+  if (presetType === 'gemini-video') {
+    configForm.name = '本地 Gemini Omni 原生有声视频';
+    configForm.provider = 'openai_compatible';
+    configForm.base_url = 'http://127.0.0.1:8045';
+    configForm.model_name = 'gemini-omni-flash-preview';
+    configForm.timeout_seconds = 600;
+    configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+    configForm.api_mode = 'gemini_interactions_video';
+    configForm.adapter_config_json_text = JSON.stringify({
+      interactions_path: '/v1beta/interactions',
+      interaction_status_path: '/v1beta/interactions/{id}',
+      file_status_path: '/v1beta/files/{file_id}',
+      file_download_path: '/v1beta/files/{file_id}:download?alt=media',
+      delivery: 'uri',
+      auth_mode: 'bearer',
+      max_concurrency: 2,
+      max_file_mb: 500,
+    }, null, 2);
+    configForm.media_max_duration_seconds = 10;
+  } else if (presetType === 'deepseek') {
     configForm.name = 'DeepSeek V3 官方';
     configForm.provider = 'openai_compatible';
     configForm.base_url = 'https://api.deepseek.com/v1';
@@ -887,6 +936,12 @@ function handleProviderChange(val: string) {
   } else if (val === 'anthropic' && configForm.base_url.includes('openai')) {
     configForm.base_url = 'https://api.anthropic.com';
     configForm.model_name = 'claude-3-5-sonnet-20241022';
+  } else if (val === 'volcengine_ark') {
+    configForm.base_url = 'https://ark.cn-beijing.volces.com/api/v3';
+    configForm.model_name = '';
+    configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+    configForm.api_mode = 'volcengine_ark_video';
+    configForm.media_max_duration_seconds = 15;
   } else if (val === 'mock') {
     configForm.base_url = 'mock://local';
     configForm.model_name = 'mock-model';
@@ -939,7 +994,7 @@ async function handleCardCommand(command: string, config: ModelConfigItem) {
   }
 }
 
-function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'claude') {
+function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'claude' | 'gemini-video') {
   editingConfigId.value = null;
   currentEditingMaskedKey.value = '';
   testResult.value = null;
@@ -1739,8 +1794,8 @@ onMounted(() => {
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-start;
+  gap: 14px;
   border: 1.5px solid #e2e8f0;
   border-radius: 16px;
   background: #ffffff;
@@ -2023,6 +2078,31 @@ onMounted(() => {
   color: #64748b;
   margin: 0;
   line-height: 1.45;
+}
+
+.slide-tags {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.recommended-tag-pill {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  padding: 1px 7px;
+  border-radius: 6px;
+  transition: all 150ms ease;
+}
+
+.visual-tpl-card-compact.selected .recommended-tag-pill {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
 }
 
 /* Tab 3: 协议 Grid */

@@ -8,7 +8,7 @@ const props = defineProps<{ courseId: string; tasks: CourseTask[]; activeType?: 
 const router = useRouter();
 
 const statusMeta = computed(() => ({
-  waiting_dependency: { label: '等待依赖', icon: Clock },
+  waiting_dependency: { label: '待生成', icon: Clock },
   ready_to_generate: { label: '可生成', icon: VideoCamera },
   queued: { label: '排队中', icon: Clock },
   running: { label: '生成中', icon: Loading },
@@ -16,7 +16,7 @@ const statusMeta = computed(() => ({
   paused: { label: '已暂停', icon: Clock },
   review: { label: '待确认', icon: CircleCheck },
   approved: { label: '已确认', icon: CircleCheck },
-  stale: { label: '上游已更新', icon: RefreshRight },
+  stale: { label: '记忆已更新', icon: RefreshRight },
   failed: { label: '需要重试', icon: Warning },
   cancelled: { label: '已取消', icon: Warning },
 }));
@@ -49,10 +49,6 @@ function taskStatusLabel(task: CourseTask) {
       >
         <span class="step-num">{{ String(task.display_order).padStart(2, '0') }}</span>
         <span class="step-name">{{ task.display_name }}</span>
-        <span class="step-badge" :class="[task.status, { active: activeType === task.task_type }]">
-          <el-icon :class="{ spinning: ['running', 'pausing'].includes(task.status) }"><component :is="statusMeta[task.status].icon" /></el-icon>
-          <span>{{ task.agent_profile_status === 'initializing' ? '专属化中' : task.agent_profile_status === 'failed' ? '失败' : taskStatusLabel(task) }}</span>
-        </span>
         <span v-if="['running', 'queued', 'pausing'].includes(task.status) && task.progress" class="step-mini-bar" aria-hidden="true">
           <i :style="{ width: `${task.progress}%` }" />
         </span>

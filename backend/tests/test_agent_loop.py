@@ -137,6 +137,48 @@ async def test_agent_loop_preserves_original_exception_without_shadowing_ppt_err
         await run_agent_loop(runtime, plan, start_step=0)
 
 
+@pytest.mark.asyncio
+async def test_agent_loop_does_not_retry_deterministic_layout_compile_error(monkeypatch):
+    """A local layout failure must not be reported as a retryable model error."""
+    from types import SimpleNamespace
+
+    from app.agent import pipeline as pipeline_module
+    from app.agent.layouts.engine import LayoutCompileError
+    from app.agent.schemas import AgentSpec, PipelinePlan
+
+    calls = 0
+
+    async def fail_agent_call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise LayoutCompileError(
+            [], ["purpose"], True,
+            attempts=[{"layout_type": "bullet_flow", "missing_refs": ["purpose"]}],
+        )
+
+    class Emitter:
+        async def agent_started(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(pipeline_module, "_agent_call", fail_agent_call)
+    runtime = SimpleNamespace(
+        tool_context=SimpleNamespace(ctx=None), pause_requested=lambda: False,
+        current_agent_key="", context=SimpleNamespace(
+            current_agent="", to_prompt=lambda _key: "",
+        ),
+        emitter=Emitter(), _steps=0,
+    )
+    plan = PipelinePlan(agents=[AgentSpec(key="layout", role="layout", max_steps=1)])
+
+    with pytest.raises(PPTAgentError) as caught:
+        await run_agent_loop(runtime, plan, start_step=0)
+
+    assert calls == 1
+    assert caught.value.code == "layout_compile_failed"
+    assert caught.value.retryable is False
+    assert caught.value.details["missing_refs"] == ["purpose"]
+
+
 async def _create_course(client, headers):
     await client.post("/api/v1/settings/models", headers=headers, json={
         "name": "循环 Mock", "provider": "mock", "base_url": "mock://loop",

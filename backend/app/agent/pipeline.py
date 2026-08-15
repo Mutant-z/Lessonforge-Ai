@@ -113,6 +113,7 @@ class PipelineRuntime:
     baseline_slides: list[dict[str, Any]] | None = None
     repair_mode: str = ""
     repair_issue_fingerprint: str = ""
+    repair_reverted_slide_ids: list[str] = field(default_factory=list)
     layout_engine_params: dict[str, Any] = field(default_factory=dict)
     layout_compile_results: list[dict[str, Any]] = field(default_factory=list)
     result_status: str = "applied"
@@ -629,6 +630,10 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
                     "effective_style": {},
                     "warnings": [f"{slide_id} 内容密度较高，已保留原布局"],
                     "compile_attempts": list(getattr(exc, "attempts", []) or [])[-12:],
+                    "material_change": False,
+                    "candidate_rankings": [],
+                    "candidate_score_gap": None,
+                    "requires_candidate_confirmation": False,
                 }
             if result.get("compile_status") != "preserved" and _size_goal_regressed(runtime, canonical, result):
                 result = {
@@ -660,6 +665,14 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
                 "objective_results": list(result.get("objective_results") or []),
                 "requested_objectives": list(result.get("requested_objectives") or []),
                 "candidate_rankings": list(result.get("candidate_rankings") or []),
+                "decision": str(result.get("decision") or (
+                    "preserved" if result.get("compile_status") == "preserved" else "applied"
+                )),
+                "best_candidate_id": result.get("best_candidate_id"),
+                "best_candidate_metrics": dict(result.get("best_candidate_metrics") or {}),
+                "best_candidate_quality_delta": float(result.get("best_candidate_quality_delta") or 0),
+                "rejection_code": str(result.get("rejection_code") or ""),
+                "rejection_reasons": list(result.get("rejection_reasons") or []),
                 "material_change": bool(result.get("material_change", True)),
                 "candidate_score_gap": result.get("candidate_score_gap"),
                 "requires_candidate_confirmation": bool(result.get("requires_candidate_confirmation", False)),
@@ -817,6 +830,14 @@ async def _finalize_executable_layout(
                 "objective_results": list(item.get("objective_results") or []),
                 "requested_objectives": list(item.get("requested_objectives") or []),
                 "candidate_rankings": [],
+                "decision": "applied",
+                "best_candidate_id": item.get("best_candidate_id") or confirmed_candidate_id,
+                "best_candidate_metrics": dict(item.get("best_candidate_metrics") or item.get("final_metrics") or {}),
+                "best_candidate_quality_delta": float(
+                    item.get("best_candidate_quality_delta") or item.get("quality_delta") or 0
+                ),
+                "rejection_code": "",
+                "rejection_reasons": [],
                 "material_change": bool(item.get("material_change", True)),
                 "candidate_score_gap": None,
                 "requires_candidate_confirmation": False,
@@ -945,8 +966,30 @@ async def _finalize_executable_layout(
         ):
             canonical = canonical_by_id.get(slide_id) or baseline
             visual = {"visualType": "image", "placement": _existing_visual_region(runtime, slide_id)}
-            fallback = agent._layout_slide(canonical, visual, runtime.preferred_template)
-            if fallback.get("visual_region"):
+            try:
+                fallback = agent._layout_slide(canonical, visual, runtime.preferred_template)
+            except ValueError as exc:
+                # A visual-slot repair is a per-page fallback, not a provider
+                # failure.  Never let the same deterministic compiler escape
+                # here after its primary candidate was rejected: preserve the
+                # immutable baseline page and allow the run to finish as
+                # no_change/partial with concrete diagnostics.
+                fallback = None
+                data = {
+                    **data,
+                    "layout_type": "preserve_original",
+                    "designRationale": "视觉槽安全版式不可行，按页保留原布局",
+                    "elements": list((baseline or {}).get("elements") or []),
+                    "render_mode": str((baseline or {}).get("render_mode") or "absolute"),
+                    "compile_status": "preserved",
+                    "requested_style": dict(data.get("requested_style") or {}),
+                    "effective_style": {},
+                    "warnings": [f"{slide_id} 视觉槽安全版式不可行，已保留原布局"],
+                    "compile_attempts": list(getattr(exc, "attempts", []) or [])[-12:],
+                    "material_change": False,
+                    "requires_candidate_confirmation": False,
+                }
+            if fallback and fallback.get("visual_region"):
                 # Keep V2 objectives/diagnostics so the transformed fallback is
                 # re-scored below instead of inheriting the discarded
                 # candidate's success result.
@@ -1037,6 +1080,7 @@ async def _finalize_executable_layout(
         from app.agent.layouts.engine import _evaluate_objectives
         from app.agent.layouts.zones import zones_for
         from app.agent.slide_rendering import semantic_visual_hash
+        from app.agent.tools.editing_tools import compose_layout_elements
 
         rescored: list[dict[str, Any]] = []
         compile_by_id = {
@@ -1062,11 +1106,14 @@ async def _finalize_executable_layout(
             )
             baseline_elements = list(canonical.get("elements") or [])
             final_elements = list(item.get("elements") or [])
+            composed_final_elements = compose_layout_elements(
+                canonical, item, preserve_visuals=True,
+            )
             baseline_metrics = analyze_layout(
                 baseline_elements, zones, slide=canonical, layout_type="baseline",
             )
             final_metrics = analyze_layout(
-                final_elements, zones, slide=canonical,
+                composed_final_elements, zones, slide=canonical,
                 layout_type=str(item.get("layout_type") or ""),
             )
             objectives = list(
@@ -1077,7 +1124,7 @@ async def _finalize_executable_layout(
             objective_results, objectives_passed = _evaluate_objectives(
                 objectives, baseline_metrics, final_metrics,
                 baseline_elements=baseline_elements,
-                candidate_elements=final_elements,
+                candidate_elements=composed_final_elements,
                 zones=zones,
             )
             quality_delta = round(
@@ -1085,7 +1132,7 @@ async def _finalize_executable_layout(
                 - float(baseline_metrics.get("quality_score") or 0), 2,
             )
             material_change = semantic_visual_hash(
-                {"elements": final_elements}
+                {"elements": composed_final_elements}
             ) != semantic_visual_hash({"elements": baseline_elements})
             item.update({
                 "requested_objectives": objectives,
@@ -1110,6 +1157,14 @@ async def _finalize_executable_layout(
                     "final_metrics": baseline_metrics,
                     "quality_delta": 0.0,
                     "material_change": False,
+                    "decision": "preserved",
+                    "rejection_code": (
+                        "objective_unmet" if objectives and not objectives_passed
+                        else "identical_to_baseline"
+                    ),
+                    "rejection_reasons": list(dict.fromkeys([
+                        *(item.get("rejection_reasons") or []), warning,
+                    ])),
                 })
             record = compile_by_id.get(slide_id)
             if record is not None:
@@ -1123,6 +1178,14 @@ async def _finalize_executable_layout(
                     "quality_delta": float(item.get("quality_delta") or 0),
                     "objective_results": list(item.get("objective_results") or []),
                     "material_change": bool(item.get("material_change", False)),
+                    "decision": str(item.get("decision") or (
+                        "preserved" if item.get("compile_status") == "preserved" else "applied"
+                    )),
+                    "best_candidate_id": item.get("best_candidate_id"),
+                    "best_candidate_metrics": dict(item.get("best_candidate_metrics") or {}),
+                    "best_candidate_quality_delta": float(item.get("best_candidate_quality_delta") or 0),
+                    "rejection_code": str(item.get("rejection_code") or ""),
+                    "rejection_reasons": list(item.get("rejection_reasons") or []),
                 })
             rescored.append(item)
         verified_slides = rescored
@@ -1351,6 +1414,14 @@ def _compile_layout_from_analysis(
                 "objective_results": list(fallback.get("objective_results") or []),
                 "requested_objectives": list(fallback.get("requested_objectives") or []),
                 "candidate_rankings": list(fallback.get("candidate_rankings") or []),
+                "decision": str(fallback.get("decision") or (
+                    "preserved" if fallback.get("compile_status") == "preserved" else "applied"
+                )),
+                "best_candidate_id": fallback.get("best_candidate_id"),
+                "best_candidate_metrics": dict(fallback.get("best_candidate_metrics") or {}),
+                "best_candidate_quality_delta": float(fallback.get("best_candidate_quality_delta") or 0),
+                "rejection_code": str(fallback.get("rejection_code") or ""),
+                "rejection_reasons": list(fallback.get("rejection_reasons") or []),
                 "material_change": bool(fallback.get("material_change", True)),
                 "candidate_score_gap": fallback.get("candidate_score_gap"),
                 "requires_candidate_confirmation": bool(fallback.get("requires_candidate_confirmation", False)),
@@ -1582,6 +1653,24 @@ async def run_agent_loop(runtime: PipelineRuntime, plan: PipelinePlan, start_ste
                     decision = await _agent_call(runtime, spec.key, agent, tool_rounds)
                     break
                 except Exception as exc:  # noqa: BLE001
+                    # LayoutCompileError is a local deterministic result, not
+                    # a transient provider failure.  Any path that forgot to
+                    # degrade the individual page must still avoid a second
+                    # identical LLM call and must never surface the misleading
+                    # "switch model" task error.
+                    from app.agent.layouts.engine import LayoutCompileError
+                    if isinstance(exc, LayoutCompileError):
+                        raise PPTAgentError(
+                            "layout_compile_failed",
+                            "页面布局无法安全覆盖全部必要内容，已保留原 PPT 版本。",
+                            retryable=False,
+                            details={
+                                "unresolved_content_refs": list(exc.unresolved),
+                                "missing_refs": list(exc.missing_refs),
+                                "geometry_safe": exc.geometry_safe,
+                                "attempts": list(exc.attempts)[-12:],
+                            },
+                        ) from exc
                     if isinstance(exc, PPTAgentError) and exc.code == "slide_content_invalid":
                         # _agent_call already performed the single protocol
                         # correction retry required by SlideContentPatch.

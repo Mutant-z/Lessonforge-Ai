@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app/backend
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg espeak-ng libreoffice-impress poppler-utils fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 COPY backend/pyproject.toml ./
 COPY backend/app ./app

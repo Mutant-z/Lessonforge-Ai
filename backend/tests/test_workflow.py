@@ -1,22 +1,27 @@
 import pytest
 
-from app.agents.generators import make_blueprint
+from app.core.database import create_schema
 from app.models.entities import CourseProject
-from app.workflows.course_graph import build_course_graph, route_quality
+from app.schemas.blueprint import CourseBlueprintSchema
+from app.workflows.course_graph import build_blueprint_graph
 
 
 @pytest.mark.asyncio
-async def test_langgraph_generates_six_resources():
+async def test_blueprint_graph_generates_blueprint():
+    await create_schema()
     course = CourseProject(owner_id="u", title="Python 异步编程", subject="计算机", grade_level="高校", audience="具备 Python 基础的学生", duration_minutes=20, scenario="课堂讲解", language="中文", settings_json={})
-    bp = make_blueprint(course)
-    graph = build_course_graph()
-    result = await graph.ainvoke({"course_id": "c", "run_id": "r", "thread_id": "t", "blueprint": bp.model_dump(), "blueprint_version": 1, "blueprint_approved": True, "completed_nodes": [], "locked_paths": [], "retry_counts": {}, "status": "running"}, config={"configurable": {"thread_id": "t"}})
-    for key in ("lesson_plan", "ppt", "task_sheet", "exercise", "video_script", "verbatim", "quality_report"):
-        assert key in result
-    assert len(result["completed_nodes"]) == 9
-
-
-def test_qa_rework_route_is_bounded():
-    issue = [{"severity": "critical"}]
-    assert route_quality({"quality_issues": issue, "retry_counts": {}}) == "rework"
-    assert route_quality({"quality_issues": issue, "retry_counts": {"targeted_rework": 2}}) == "human"
+    graph = build_blueprint_graph()
+    result = await graph.ainvoke(
+        {
+            "course_id": "c", "run_id": "r", "thread_id": "t",
+            "requirements": {"title": course.title, "subject": course.subject, "grade_level": course.grade_level, "audience": course.audience, "duration_minutes": course.duration_minutes, "scenario": course.scenario, "language": course.language, "settings_json": course.settings_json},
+            "material_refs": [], "completed_nodes": [], "status": "running",
+        },
+        config={"configurable": {"thread_id": "t"}},
+    )
+    blueprint = CourseBlueprintSchema.model_validate(result["blueprint"])
+    assert blueprint.course_identity.title == "Python 异步编程"
+    assert len(blueprint.timeline) == 3
+    assert result["completed_nodes"] == ["requirement_analysis_agent", "material_analysis_agent", "pedagogy_blueprint_agent"]
+    assert result["status"] == "waiting_human"
+    assert result["requirement_issues"] == []

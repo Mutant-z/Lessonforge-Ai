@@ -180,6 +180,8 @@ def _normalized_objectives(
             "minimum_delta": item.get("minimum_delta"),
             "priority": item.get("priority", 1),
             "hard_requirement": bool(item.get("hard_requirement", True)),
+            "source": str(item.get("source") or "explicit"),
+            "adaptive": bool(item.get("adaptive", False)),
         })
 
     target = str(
@@ -221,8 +223,9 @@ def _normalized_objectives(
     generic_polish = bool(directive.get("polish_mode")) or target in {"polish", "layout_polish"}
     if generic_polish and not objectives and not image_geometry_only:
         objectives.append({
-            "metric": "layout_quality", "direction": "increase", "minimum_delta": 8.0,
-            "priority": 1, "hard_requirement": True,
+            "metric": "layout_quality", "direction": "increase", "minimum_delta": 0.0,
+            "priority": 1, "hard_requirement": True, "source": "runtime_gate",
+            "adaptive": True,
         })
     if image_geometry_only and image_geometry_action == "resize" and not any(
         item["metric"] == "image_scale" for item in objectives
@@ -349,10 +352,9 @@ def _evaluate_objectives(
             )
             evidence = {"vertical_delta": delta, "blank_region_reduction": blank_delta, "quality_delta": round(quality_delta, 2)}
             passed = (
-                (delta >= float(minimum or 0.12) or blank_delta >= 0.10)
-                and quality_delta >= 5.0
+                delta >= float(minimum or 0.12) or blank_delta >= 0.10
             ) if baseline_available else float(candidate_value) >= 0.60
-            reason = "纵向利用率提高 12 个百分点或最大空白区降低 10 个百分点，且质量提高 5 分"
+            reason = "纵向利用率提高 12 个百分点或最大空白区降低 10 个百分点"
         elif metric == "horizontal_utilization":
             baseline_value = baseline_metrics.get("body_horizontal_utilization", 0)
             candidate_value = candidate_metrics.get("body_horizontal_utilization", 0)
@@ -436,8 +438,13 @@ def _evaluate_objectives(
             baseline_value = baseline_metrics.get("quality_score", 0)
             candidate_value = candidate_metrics.get("quality_score", 0)
             delta = round(float(candidate_value) - float(baseline_value), 2)
-            passed = float(candidate_value) >= 75 and (delta >= float(minimum or 8) if baseline_available else True)
-            reason = "质量达到 75 分且比原页提高至少 8 分"
+            threshold = (
+                adaptive_quality_delta(float(baseline_value or 0))
+                if objective.get("adaptive") else float(minimum if minimum is not None else 8)
+            )
+            evidence = {"quality_gate_threshold": threshold, "adaptive": bool(objective.get("adaptive"))}
+            passed = float(candidate_value) >= 75 and (delta >= threshold if baseline_available else True)
+            reason = f"质量达到 75 分且比原页提高至少 {threshold:g} 分"
         elif metric == "contrast":
             baseline_value = float(
                 (baseline_metrics.get("quality_components") or {}).get("visual_hierarchy") or 0
@@ -472,6 +479,7 @@ def _evaluate_objectives(
         results.append({
             "metric": metric, "direction": direction, "passed": bool(passed),
             "hard_requirement": bool(objective.get("hard_requirement", True)),
+            "source": str(objective.get("source") or "explicit"),
             "baseline_value": baseline_value, "candidate_value": candidate_value,
             "delta": delta, "evidence": evidence, "requirement": reason,
         })
@@ -480,6 +488,38 @@ def _evaluate_objectives(
     if objectives and baseline_available and not objective_metrics <= {"image_scale"}:
         hard_pass = hard_pass and float(candidate_metrics.get("quality_score") or 0) >= 75.0
     return results, hard_pass
+
+
+def adaptive_quality_delta(baseline_score: float) -> float:
+    """Return the perceptible-improvement threshold for the baseline tier."""
+    if baseline_score < 75.0:
+        return 8.0
+    if baseline_score < 85.0:
+        return 5.0
+    return 3.0
+
+
+def _quality_component_regressions(
+    baseline_metrics: dict[str, Any], candidate_metrics: dict[str, Any], *, tolerance: float = 1.5,
+) -> list[str]:
+    baseline = dict(baseline_metrics.get("quality_components") or {})
+    candidate = dict(candidate_metrics.get("quality_components") or {})
+    regressions = []
+    for key, before in baseline.items():
+        try:
+            delta = float(candidate.get(key, before)) - float(before)
+        except (TypeError, ValueError):
+            continue
+        if delta < -tolerance:
+            regressions.append(str(key))
+    try:
+        before_font = float(baseline_metrics.get("font_median") or 0)
+        after_font = float(candidate_metrics.get("font_median") or 0)
+    except (TypeError, ValueError):
+        before_font = after_font = 0.0
+    if before_font and after_font < before_font * 0.95:
+        regressions.append("body_font_size")
+    return list(dict.fromkeys(regressions))
 
 
 def _candidate_signature(elements: list[dict[str, Any]]) -> str:
@@ -1093,11 +1133,21 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         candidate_coverage = render_coverage(
             {**slide, "render_mode": "absolute", "elements": candidate_bound}, baseline=slide,
         )
+        from app.agent.tools.editing_tools import compose_layout_elements
+        composed_elements = compose_layout_elements(
+            slide,
+            {
+                "elements": candidate_bound,
+                "visual_region": visual_region,
+                "visual_type": directive.get("visual_type"),
+            },
+            preserve_visuals=True,
+        )
         max_bottom = max(
-            (float(item.get("y") or 0) + float(item.get("h") or 0) for item in candidate_bound),
+            (float(item.get("y") or 0) + float(item.get("h") or 0) for item in composed_elements),
             default=0.0,
         )
-        geometry_failures = _geometry_failures(candidate_bound)
+        geometry_failures = _geometry_failures(composed_elements)
         if any(
             item.get("kind") in {"textbox", "note"}
             and item.get("content_ref")
@@ -1107,12 +1157,17 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             geometry_failures = list(dict.fromkeys([*geometry_failures, "template_rail"]))
         return (
             candidate_bound, candidate_unresolved, candidate_coverage,
-            not geometry_failures, max_bottom, geometry_failures,
+            not geometry_failures, max_bottom, geometry_failures, composed_elements,
         )
 
     preferred = "split_two_column" if len(semantic_body_refs(slide)) > 4 else "bullet_flow"
     block_kinds = {str(block.get("kind") or "") for block in (slide.get("blocks") or [])}
     candidate_types = [requested_layout_type]
+    # ``purpose`` is a required visible semantic ref on cover pages.  Generic
+    # flow recipes intentionally render only body refs, so a model-selected
+    # generic recipe must still compete with a purpose-aware cover recipe.
+    if page_type == "cover":
+        candidate_types.append("cover_left" if has_visual else "cover_center")
     if {"quote", "compare"} <= block_kinds:
         candidate_types.append("quote_compare")
     elif "compare" in block_kinds:
@@ -1151,22 +1206,39 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             unique_styles.append(style)
 
     attempts: list[dict[str, Any]] = []
-    failures: list[tuple[list[dict[str, Any]], list[str], dict[str, Any], bool, float, list[str]]] = []
+    failures: list[tuple[list[dict[str, Any]], list[str], dict[str, Any], bool, float, list[str], list[dict[str, Any]]]] = []
     viable: list[dict[str, Any]] = []
     viable_signatures: set[str] = set()
 
     def record_candidate(candidate_type: str, candidate_style: dict[str, Any], result):
-        candidate_bound, candidate_unresolved, candidate_coverage, candidate_safe, max_bottom, geometry_failures = result
+        (
+            candidate_bound, candidate_unresolved, candidate_coverage,
+            candidate_safe, max_bottom, geometry_failures, composed_elements,
+        ) = result
         failures.append(result)
         complete_safe = not candidate_unresolved and not candidate_coverage["missing_refs"] and candidate_safe
-        metrics = analyze_layout(candidate_bound, zones, slide=slide, layout_type=candidate_type)
+        metrics = analyze_layout(composed_elements, zones, slide=slide, layout_type=candidate_type)
         objective_results, objectives_passed = _evaluate_objectives(
             objectives, baseline_metrics, metrics,
-            baseline_elements=source_elements, candidate_elements=candidate_bound, zones=zones,
+            baseline_elements=source_elements, candidate_elements=composed_elements, zones=zones,
         )
         quality_delta = round(
             float(metrics.get("quality_score") or 0)
             - float(baseline_metrics.get("quality_score") or 0), 2,
+        )
+        regressions = _quality_component_regressions(baseline_metrics, metrics)
+        explicit_hard_pass = all(
+            item.get("passed")
+            for item in objective_results
+            if item.get("hard_requirement") and item.get("source") != "runtime_gate"
+        )
+        publishable = bool(objectives_passed and not regressions)
+        preview_eligible = bool(
+            complete_safe
+            and float(metrics.get("quality_score") or 0) >= 75.0
+            and quality_delta >= 2.0
+            and explicit_hard_pass
+            and not regressions
         )
         candidate_id = f"{candidate_type}:{len(attempts) + 1}"
         fingerprint = json.dumps({
@@ -1199,6 +1271,9 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             "quality_delta": quality_delta,
             "objective_results": objective_results,
             "objectives_passed": objectives_passed,
+            "publishable": publishable,
+            "preview_eligible": preview_eligible,
+            "quality_component_regressions": regressions,
             "viable": complete_safe,
             "rank_score": round(rank_score, 2),
             "fingerprint": fingerprint,
@@ -1206,7 +1281,7 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         attempts.append(attempt)
         if not complete_safe:
             return None
-        signature = _candidate_signature(candidate_bound)
+        signature = _candidate_signature(composed_elements)
         if signature in viable_signatures:
             attempt["viable"] = False
             attempt["rejection_reason"] = "duplicate_geometry_and_style"
@@ -1220,6 +1295,9 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             "metrics": metrics,
             "objective_results": objective_results,
             "objectives_passed": objectives_passed,
+            "publishable": publishable,
+            "preview_eligible": preview_eligible,
+            "quality_component_regressions": regressions,
             "rank_score": rank_score,
             "quality_delta": quality_delta,
             "attempt": attempt,
@@ -1298,7 +1376,7 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
                 max(0.0, item[4] - 7.01),
             ),
         )
-        _, unresolved, coverage, geometry_safe, _, _ = best
+        _, unresolved, coverage, geometry_safe, _, _, _ = best
         raise LayoutCompileError(
             unresolved, coverage["missing_refs"], geometry_safe, attempts=attempts,
         )
@@ -1314,6 +1392,9 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             "quality_delta": candidate["quality_delta"],
             "rank_score": round(float(candidate["rank_score"]), 2),
             "objective_results": candidate["objective_results"],
+            "publishable": bool(candidate.get("publishable")),
+            "preview_eligible": bool(candidate.get("preview_eligible")),
+            "quality_component_regressions": list(candidate.get("quality_component_regressions") or []),
             # The top three are sufficient for staging previews.  Lower-ranked
             # candidates retain diagnostics without bloating the artifact.
             "elements": candidate["result"][0] if rank <= 3 else [],
@@ -1322,9 +1403,17 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
     ]
 
     baseline_signature = _candidate_signature(source_elements) if source_elements else ""
-    selectable = [candidate for candidate in viable if candidate["objectives_passed"] or not objectives]
+    selectable = [
+        candidate for candidate in viable
+        if candidate.get("publishable") or (not objectives and not candidate.get("quality_component_regressions"))
+    ]
     if baseline_signature:
         selectable = [candidate for candidate in selectable if candidate["signature"] != baseline_signature]
+    previewable = [
+        candidate for candidate in viable
+        if candidate.get("preview_eligible")
+        and (not baseline_signature or candidate["signature"] != baseline_signature)
+    ]
     warnings: list[str] = []
     if invalid_allocations:
         warnings.append(
@@ -1335,6 +1424,10 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
     # No objective winner is a successful per-page no-change.  Returning a
     # preserved spec lets the existing staging/publish policy keep other pages
     # while avoiding an empty version for this one.
+    force_confirmation = False
+    if not selectable and previewable:
+        selectable = previewable
+        force_confirmation = True
     if not selectable and source_elements:
         near = max(viable, key=lambda candidate: candidate["rank_score"])
         failed_metrics = [
@@ -1346,6 +1439,15 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             if failed_metrics else "候选与原页没有可感知差异，已保留原布局"
         )
         warnings.append(warning)
+        rejection_code = (
+            "quality_gate_not_met" if "layout_quality" in failed_metrics
+            else "objective_unmet" if failed_metrics
+            else "identical_to_baseline"
+        )
+        rejection_reasons = [
+            *(f"未达到目标：{metric}" for metric in failed_metrics),
+            *(f"质量分项退化：{metric}" for metric in near.get("quality_component_regressions") or []),
+        ] or [warning]
         return {
             "slide_id": slide_id,
             "layout_type": "preserve_original",
@@ -1359,6 +1461,12 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             "content_allocation": allocation,
             "compile_attempts": attempts,
             "selected_candidate_id": None,
+            "decision": "preserved",
+            "best_candidate_id": near["candidate_id"],
+            "best_candidate_metrics": near["metrics"],
+            "best_candidate_quality_delta": near["quality_delta"],
+            "rejection_code": rejection_code,
+            "rejection_reasons": rejection_reasons,
             "requested_objectives": objectives,
             "objective_results": near["objective_results"],
             "baseline_metrics": baseline_metrics,
@@ -1416,9 +1524,13 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
     # A close but unpublishable candidate must not trigger a user choice.
     # Compare only candidates that passed all hard objectives (``selectable``
     # already applies that gate and removes the unchanged baseline).
+    confirmation_pool = list({
+        candidate["candidate_id"]: candidate
+        for candidate in [*selectable, *previewable]
+    }.values())
     competing_candidates = sorted(
         (
-            candidate for candidate in selectable
+            candidate for candidate in confirmation_pool
             if candidate["candidate_id"] != selected["candidate_id"]
         ),
         key=lambda candidate: candidate["rank_score"], reverse=True,
@@ -1429,7 +1541,15 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         if item["candidate_id"] == candidate["candidate_id"]
     ]
     candidate_score_gap = (
-        round(float(selected["rank_score"]) - float(competing[0]["rank_score"]), 2)
+        # Human choice is based on the visible 100-point quality score.  The
+        # internal rank score also contains recipe/style preference bonuses;
+        # using it here could make two equally good pages look far apart and
+        # bypass the required side-by-side preview.
+        round(
+            float(selected["metrics"].get("quality_score") or 0)
+            - float(competing[0].get("quality_score") or 0),
+            2,
+        )
         if competing else None
     )
     fallback_reason = ""
@@ -1447,6 +1567,18 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         warnings.append(
             f"{requested_layout_type} {fallback_reason}，已选择 {layout_type} / {effective_style['font_tier']}"
         )
+    requires_candidate_confirmation = bool(
+        source_elements
+        and selected_ranking
+        and (
+            force_confirmation
+            or (competing and abs(float(candidate_score_gap or 0)) < 5.0)
+        )
+        and any(item["metric"] in {
+            "layout_quality", "vertical_utilization", "whitespace_balance",
+            "horizontal_utilization", "contrast",
+        } for item in objectives)
+    )
     out: dict[str, Any] = {
         "slide_id": slide_id,
         "layout_type": layout_type,
@@ -1464,6 +1596,10 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         "content_allocation": allocation,
         "compile_attempts": attempts,
         "selected_candidate_id": selected["candidate_id"],
+        "decision": "preview_required" if requires_candidate_confirmation else "applied",
+        "best_candidate_id": selected["candidate_id"],
+        "best_candidate_metrics": selected["metrics"],
+        "best_candidate_quality_delta": selected["quality_delta"],
         "requested_objectives": objectives,
         "objective_results": selected["objective_results"],
         "baseline_metrics": baseline_metrics,
@@ -1472,16 +1608,7 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         "candidate_rankings": candidate_rankings,
         "material_change": not bool(baseline_signature) or selected["signature"] != baseline_signature,
         "candidate_score_gap": candidate_score_gap,
-        "requires_candidate_confirmation": bool(
-            source_elements
-            and selected_ranking
-            and competing
-            and abs(float(candidate_score_gap or 0)) < 5.0
-            and any(item["metric"] in {
-                "layout_quality", "vertical_utilization", "whitespace_balance",
-                "horizontal_utilization", "contrast",
-            } for item in objectives)
-        ),
+        "requires_candidate_confirmation": requires_candidate_confirmation,
     }
     if has_visual and zones.visual_slot is not None:
         vs = zones.visual_slot

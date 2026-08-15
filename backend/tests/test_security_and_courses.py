@@ -80,6 +80,49 @@ async def test_model_capabilities_defaults_and_updates(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_media_capabilities_require_matching_transport(client, auth_headers):
+    mismatched = await client.post(
+        "/api/v1/settings/models",
+        headers=auth_headers,
+        json={
+            "name": "错误的视频能力配置",
+            "provider": "openai_compatible",
+            "base_url": "https://media.example/v1",
+            "model_name": "chat-only-model",
+            "capabilities": ["text_generation", "video_generation"],
+            "api_mode": "text_chat",
+            "is_active": False,
+        },
+    )
+    assert mismatched.status_code == 422
+    assert "不支持已勾选的能力：视频生成" in mismatched.json()["detail"]
+
+    video = await client.post(
+        "/api/v1/settings/models",
+        headers=auth_headers,
+        json={
+            "name": "视频接口配置",
+            "provider": "openai_compatible",
+            "base_url": "https://media.example/v1",
+            "model_name": "video-model",
+            "capabilities": ["video_generation"],
+            "api_mode": "custom_video_async_http",
+            "adapter_config": {"endpoint_path": "/videos/generations"},
+            "is_active": False,
+        },
+    )
+    assert video.status_code == 200, video.text
+
+    incompatible_update = await client.patch(
+        f"/api/v1/settings/models/{video.json()['id']}",
+        headers=auth_headers,
+        json={"capabilities": ["video_generation", "speech_generation"]},
+    )
+    assert incompatible_update.status_code == 422
+    assert "语音生成" in incompatible_update.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_model_selection_rejects_another_users_config(client, auth_headers):
     config = (await client.post(
         "/api/v1/settings/models",

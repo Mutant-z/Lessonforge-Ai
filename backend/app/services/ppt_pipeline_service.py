@@ -125,6 +125,8 @@ class PipelineRunResult:
     change_summary: str = "首次生成"
     runtime: PipelineRuntime | None = None
     skip_publish: bool = False
+    #: 人工确认等待：run 保持 paused，不终结；确认后从同一 GenerationRun 恢复。
+    keep_paused: bool = False
 
 
 async def _latest_artifact(db, course_id: str, kind: str) -> Artifact | None:
@@ -327,15 +329,66 @@ async def _run_pipeline_message_agentic(runtime: PipelineRuntime, message: Agent
     await _pause_at_safe_boundary(runtime, "revision")
     content = finalize_content(runtime)
     results = list(runtime.layout_compile_results)
+    page_metadata = {
+        str(slide.get("id") or ""): {
+            "page_number": index + 1,
+            "slide_title": str(slide.get("title") or ""),
+        }
+        for index, slide in enumerate(source_slides)
+    }
+    for result in results:
+        metadata = page_metadata.get(str(result.get("slide_id") or ""), {})
+        page_number = metadata.get("page_number")
+        title = str(metadata.get("slide_title") or "")
+        result["page_number"] = page_number
+        result["slide_title"] = title
+        result["display_label"] = (
+            f"第 {page_number} 页《{title}》" if page_number and title
+            else f"第 {page_number} 页" if page_number
+            else str(result.get("slide_id") or "页面")
+        )
+        result.setdefault(
+            "decision",
+            "preserved" if result.get("status") == "preserved" else "applied",
+        )
     preserved = [item["slide_id"] for item in results if item.get("status") == "preserved"]
-    applied = [item["slide_id"] for item in results if item.get("status") != "preserved"]
+    applied = (
+        [] if runtime.result_status == "needs_confirmation"
+        else [item["slide_id"] for item in results if item.get("status") != "preserved"]
+    )
     if runtime.result_status in {"no_change", "needs_confirmation"}:
         content = dict(getattr(runtime.source_artifact, "content_json", {}) or content)
-        assistant_reply = (
-            "修改范围或目标存在歧义，请确认解析摘要后再执行；本轮未创建新版本。"
-            if runtime.result_status == "needs_confirmation"
-            else "当前页面没有获得可验证的安全改善，本轮未创建空转版本；原 PPT 保持不变。"
-        )
+        if runtime.result_status == "needs_confirmation":
+            pending_page = next((
+                item for item in results if item.get("requires_candidate_confirmation")
+            ), None)
+            assistant_reply = (
+                f"{pending_page.get('display_label')}已有安全改善候选等待确认，"
+                "请选择预览方案或保留原版；确认前不会创建新版本。"
+                if pending_page and runtime.candidate_request_id
+                else "修改范围或目标存在歧义，请确认解析摘要后再执行；本轮未创建新版本。"
+            )
+        else:
+            best_attempt = max(
+                results,
+                key=lambda item: float(item.get("best_candidate_quality_delta") or 0),
+                default=None,
+            )
+            if best_attempt and (
+                best_attempt.get("best_candidate_id")
+                or best_attempt.get("rejection_code")
+            ):
+                delta = float(best_attempt.get("best_candidate_quality_delta") or 0)
+                reason = next(iter(best_attempt.get("rejection_reasons") or []), "未通过最终发布门禁")
+                assistant_reply = (
+                    f"{best_attempt.get('display_label') or '当前页面'}最佳候选质量"
+                    f"提升 {delta:+.2f}，但{reason}；本轮未创建空转版本，原 PPT 保持不变。"
+                )
+            else:
+                assistant_reply = (
+                    "当前页面没有获得可验证的安全改善，本轮未创建空转版本；"
+                    "原 PPT 保持不变。"
+                )
     else:
         await _write_final_pptx(runtime, content, version=version)
         if runtime.result_status == "partial":
@@ -480,7 +533,7 @@ async def run_ppt_pipeline(db, course, task, run: GenerationRun, blueprint) -> P
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None,
+        config.context_window_tokens if config else None, run=run,
     )
     locks: list[ArtifactLock] = []
     if source:

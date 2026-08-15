@@ -43,10 +43,10 @@ function handleSearch() {
     <div class="header-left">
       <el-breadcrumb separator="/">
         <el-breadcrumb-item :to="{ path: '/' }">
-          <span class="bc-home">{{ auth.user ? '教师工作台' : 'LessonForge AI' }}</span>
+          <span class="bc-home" :class="{ 'is-active-root': route.path === '/' }">{{ auth.user ? '教师工作台' : 'LessonForge AI' }}</span>
         </el-breadcrumb-item>
-        <el-breadcrumb-item v-if="currentCourseTitle">
-          <span class="bc-course">课程编辑工作台</span>
+        <el-breadcrumb-item v-if="currentCourseTitle && route.path.startsWith('/courses/') && route.path !== '/courses/new'">
+          <span class="bc-course">{{ currentCourseTitle.length > 18 ? currentCourseTitle.slice(0, 18) + '...' : currentCourseTitle }}</span>
         </el-breadcrumb-item>
         <el-breadcrumb-item v-else-if="route.path === '/courses/new'">
           <span class="bc-curr">新建微课项目</span>

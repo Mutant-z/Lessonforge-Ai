@@ -34,7 +34,12 @@ def _number(value: Any, default: float = 0.0) -> float:
 def _is_title(element: dict[str, Any], zones: LayoutZones) -> bool:
     role = str(element.get("role") or "").lower()
     ref = str(element.get("content_ref") or "")
-    return role in {"title", "subtitle"} or ref == "title" or (
+    # Semantic binding is authoritative.  Cover recipes legitimately use the
+    # visual role ``subtitle`` for the canonical body aggregate; excluding it
+    # made a full cover look like it had no body content at all.
+    if ref:
+        return ref == "title"
+    return role in {"title", "subtitle"} or (
         _number(element.get("y")) + _number(element.get("h")) <= zones.body_column.y - 0.04
     )
 
@@ -215,6 +220,11 @@ def _reading_order_score(
 def _structure_fit(slide: dict[str, Any] | None, layout_type: str) -> float:
     if not slide:
         return 0.8
+    if str(slide.get("page_type") or "") == "cover":
+        return {
+            "cover_left": 1.0, "cover_center": 1.0,
+            "left_text_right_visual": 0.78, "bullet_flow": 0.55,
+        }.get(layout_type, 0.62)
     kinds = {str(block.get("kind") or "") for block in (slide.get("blocks") or [])}
     if {"quote", "compare"} <= kinds:
         return {"quote_compare": 1.0, "split_two_column": 0.72, "bullet_flow": 0.55}.get(layout_type, 0.45)

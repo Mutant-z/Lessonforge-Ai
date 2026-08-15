@@ -9,7 +9,7 @@ import { settingsApi } from '../api/settings';
 import { pipelineApi } from '../api/pipeline';
 import { useProjectStore } from '../stores/project';
 import { useAutoScroll } from '../composables/useAutoScroll';
-import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationScene, VideoScriptContent } from '../types';
+import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationQuote, VideoGenerationScene, VideoScriptContent } from '../types';
 import ProjectShell from '../components/project/ProjectShell.vue';
 import ModelSelector from '../components/agent/ModelSelector.vue';
 import MarkdownRenderer from '../components/content-renderers/MarkdownRenderer.vue';
@@ -17,6 +17,10 @@ import SlidePreview from '../components/domain/SlidePreview.vue';
 import SlideThumbnail from '../components/domain/SlideThumbnail.vue';
 import TaskSheetEditor from '../components/domain/TaskSheetEditor.vue';
 import TaskSheetPreview from '../components/domain/TaskSheetPreview.vue';
+import TaskSheetDraftPreview from '../components/domain/TaskSheetDraftPreview.vue';
+import TaskSheetOutlineEditor from '../components/domain/TaskSheetOutlineEditor.vue';
+import { isTaskSheetV3 } from '../types/artifact';
+import type { TaskSheetContentV3 } from '../types/artifact';
 import ExerciseEditor from '../components/domain/ExerciseEditor.vue';
 import ExercisePreview from '../components/domain/ExercisePreview.vue';
 import VideoScriptEditor from '../components/domain/VideoScriptEditor.vue';
@@ -25,13 +29,20 @@ import VideoGenerationPreview from '../components/domain/VideoGenerationPreview.
 import VideoGenerationEditor from '../components/domain/VideoGenerationEditor.vue';
 import VersionSelector from '../components/domain/VersionSelector.vue';
 import AgentPipelineWorkbench from '../components/agent/pipeline/AgentPipelineWorkbench.vue';
+import LessonPlanWorkbench from '../components/agent/pipeline/LessonPlanWorkbench.vue';
+import VideoScriptWorkbench from '../components/agent/pipeline/VideoScriptWorkbench.vue';
+import TaskSheetWorkbench from '../components/agent/pipeline/TaskSheetWorkbench.vue';
+import VerbatimWorkbench from '../components/agent/pipeline/VerbatimWorkbench.vue';
 import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
+import { isWholeVideoGenerationIntent } from '../utils/videoGenerationIntent';
 
 const route = useRoute();
 const store = useProjectStore();
 const courseId = computed(() => route.params.id as string);
 const taskType = computed(() => route.params.taskType as string);
 const isPpt = computed(() => taskType.value === 'ppt');
+const isLessonPlan = computed(() => taskType.value === 'lesson_plan');
+const isVideoScript = computed(() => taskType.value === 'video_script');
 const isVideoGeneration = computed(() => taskType.value === 'video_generation');
 const input = ref('');
 const sending = ref(false);
@@ -45,13 +56,23 @@ const showVersions = ref(false);
 const editing = ref(false);
 const draftMarkdown = ref('');
 const taskSheetDraft = ref<TaskSheetContent | null>(null);
+const taskSheetV3Draft = ref<TaskSheetContentV3 | null>(null);
+const blueprintRef = ref<{
+  objectives: Array<{ id: string; statement: string; criterion?: string }>;
+  knowledge_points: Array<{ id: string; name: string }>;
+  stages: Array<{ id: string; name: string; duration_minutes?: number }>;
+} | null>(null);
 const exerciseDraft = ref<ExerciseContent | null>(null);
 const videoScriptDraft = ref<VideoScriptContent | null>(null);
 const selectedVideoSceneId = ref('');
-const videoResolution = ref<'1920x1080' | '1280x720' | '640x360'>('1920x1080');
-const videoVoiceStyle = ref('natural');
+const videoResolution = ref<'1280x720'>('1280x720');
 const videoSubtitleEnabled = ref(true);
 const regeneratingScene = ref(false);
+const videoQuote = ref<VideoGenerationQuote | null>(null);
+const quoteDialogVisible = ref(false);
+const quoteLoading = ref(false);
+const pendingSceneRegeneration = ref<{ sceneId: string; payload: Record<string, unknown> } | null>(null);
+const pendingVideoAction = ref<'initial' | 'retry' | 'sync_dependencies'>('initial');
 const showProfile = ref(false);
 const showActivities = ref(false);
 const pptTemplates = ref<PPTTemplate[]>([]);
@@ -92,6 +113,13 @@ let mobileMedia: MediaQueryList | null = null;
 
 const task = computed(() => store.currentTask);
 const artifact = computed(() => task.value?.current_artifact || null);
+const isPublishableVideoArtifact = computed(() => {
+  if (!isVideoGeneration.value || !artifact.value) return false;
+  const content = artifact.value.content_json as Record<string, any>;
+  return content?.schema_version === '3.0'
+    && content?.mode === 'seedance_native'
+    && Boolean(content?.outputs?.final_asset_id);
+});
 const isRunning = computed(() => ['queued', 'running'].includes(task.value?.status || ''));
 const profileReady = computed(() => task.value?.agent_profile_status === 'ready');
 const currentTemplateId = computed(() => {
@@ -167,11 +195,26 @@ async function load() {
   selectedSlide.value = 0;
   editing.value = false;
   taskSheetDraft.value = null;
+  taskSheetV3Draft.value = null;
   exerciseDraft.value = null;
   videoScriptDraft.value = null;
   selectedVideoSceneId.value = '';
   try {
     await store.openTask(courseId.value, taskType.value);
+    if (taskType.value === 'task_sheet') {
+      try {
+        const { data } = await api.get(`/courses/${courseId.value}/blueprints`);
+        const latest = Array.isArray(data) ? data[0] : data;
+        const bpContent = latest?.content;
+        if (bpContent) {
+          blueprintRef.value = {
+            objectives: (bpContent.objectives || []).map((item: any) => ({ id: item.id, statement: item.behavior || item.statement, criterion: item.criterion })),
+            knowledge_points: (bpContent.knowledge_points || []).map((item: any) => ({ id: item.id, name: item.name })),
+            stages: (bpContent.timeline || []).map((item: any) => ({ id: item.segment_id, name: item.name, duration_minutes: (item.end_minute || 0) - (item.start_minute || 0) })),
+          };
+        }
+      } catch { blueprintRef.value = null; }
+    }
     await nextTick();
     scrollToBottom(false);
   } catch (cause) {
@@ -231,9 +274,13 @@ async function handleButtonClick() {
     pausing.value = true;
     error.value = '';
     try {
-      await pipelineApi.pause(courseId.value, taskType.value);
+      if (isPpt.value) await pipelineApi.pause(courseId.value, taskType.value);
+      else await store.cancelTask(courseId.value, taskType.value);
     } catch (cause) {
       error.value = errorMessage(cause);
+      // A worker can finish between rendering and the button click. Reconcile
+      // the authoritative snapshot instead of leaving the workspace disabled.
+      await store.refreshCurrentTask().catch(() => undefined);
     } finally {
       pausing.value = false;
     }
@@ -243,9 +290,24 @@ async function handleButtonClick() {
 }
 
 async function send() {
-  const content = input.value.trim();
-  if (!content || sending.value) return;
-  sending.value = true;
+    const content = input.value.trim();
+    if (!content || sending.value) return;
+    if (isVideoGeneration.value) {
+      if (!isWholeVideoGenerationIntent(content)) {
+        error.value = '成片修改必须先点击右侧目标片段的“编辑”，确认修改内容并获取报价；若要生成整片，请输入“帮我生成视频”。';
+        return;
+      }
+      sending.value = true;
+      error.value = '';
+      input.value = '';
+      try {
+        await runVideo('initial');
+      } finally {
+        sending.value = false;
+      }
+      return;
+    }
+    sending.value = true;
   error.value = '';
   input.value = '';
   try {
@@ -300,35 +362,88 @@ async function setVideoModel(id: string) {
   } catch (cause) { error.value = errorMessage(cause); }
 }
 
-async function setSpeechModel(id: string) {
-  try {
-    const { data } = await api.patch(`/courses/${courseId.value}/tasks/${taskType.value}/model`, { speech_model_config_id: id });
-    if (task.value) task.value.speech_model_config_id = data.speech_model_config_id;
-  } catch (cause) { error.value = errorMessage(cause); }
-}
-
 async function runVideo(action: 'initial' | 'retry' | 'recompose' | 'sync_dependencies' = 'initial') {
-  await run(action, {
-    resolution: videoResolution.value,
-    voice_style: videoVoiceStyle.value,
-    subtitle_enabled: videoSubtitleEnabled.value,
-    background_music_enabled: false,
-  });
+  if (action === 'recompose') {
+    await run(action, { subtitle_enabled: videoSubtitleEnabled.value });
+    return;
+  }
+  pendingVideoAction.value = action;
+  await requestVideoQuote();
 }
 
 async function regenerateVideoScene(sceneId: string, payload: Record<string, unknown>) {
+  const content = artifact.value?.content_json as VideoGenerationContent | undefined;
+  const scene = content?.scenes.find(item => item.id === sceneId);
+  if (!scene) return;
+  quoteLoading.value = true;
+  error.value = '';
+  try {
+    const { data } = await api.post<VideoGenerationQuote>(`/courses/${courseId.value}/tasks/video_generation/quotes`, {
+      resolution: videoResolution.value,
+      subtitle_enabled: videoSubtitleEnabled.value,
+      continuity_policy: 'grouped',
+      target_scene_id: scene.script_scene_id,
+      ...payload,
+    });
+    pendingSceneRegeneration.value = { sceneId, payload };
+    videoQuote.value = data;
+    quoteDialogVisible.value = true;
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  } finally {
+    quoteLoading.value = false;
+  }
+}
+
+async function requestVideoQuote() {
+  quoteLoading.value = true;
+  error.value = '';
+  pendingSceneRegeneration.value = null;
+  try {
+    const { data } = await api.post<VideoGenerationQuote>(`/courses/${courseId.value}/tasks/video_generation/quotes`, {
+      resolution: videoResolution.value,
+      subtitle_enabled: videoSubtitleEnabled.value,
+      continuity_policy: 'grouped',
+    });
+    videoQuote.value = data;
+    quoteDialogVisible.value = true;
+  } catch (cause) {
+    error.value = errorMessage(cause);
+  } finally {
+    quoteLoading.value = false;
+  }
+}
+
+async function confirmVideoQuote() {
+  if (!videoQuote.value) return;
   regeneratingScene.value = true;
   error.value = '';
   try {
-    await api.post(`/courses/${courseId.value}/tasks/video_generation/scenes/${sceneId}/regenerate`, payload);
-    editing.value = false;
-    await store.openTask(courseId.value, taskType.value);
+    if (pendingSceneRegeneration.value) {
+      const pending = pendingSceneRegeneration.value;
+      await api.post(`/courses/${courseId.value}/tasks/video_generation/scenes/${pending.sceneId}/regenerate`, {
+        ...pending.payload,
+        quote_id: videoQuote.value.quote_id,
+        approved_max_cost_fen: videoQuote.value.maximum_cost_fen,
+      });
+      editing.value = false;
+      await store.openTask(courseId.value, taskType.value);
+    } else {
+      await run(pendingVideoAction.value, {
+        quote_id: videoQuote.value.quote_id,
+        approved_max_cost_fen: videoQuote.value.maximum_cost_fen,
+        subtitle_enabled: videoSubtitleEnabled.value,
+      });
+    }
+    quoteDialogVisible.value = false;
   } catch (cause) {
     error.value = errorMessage(cause);
   } finally {
     regeneratingScene.value = false;
   }
 }
+
+const formatFen = (fen: number) => `¥${(fen / 100).toFixed(2)}`;
 
 async function lockVideoScene(scene: VideoGenerationScene) {
   if (!artifact.value) return;
@@ -375,6 +490,14 @@ function selectVersion(version: Artifact) {
   showVersions.value = false;
 }
 
+function confirmRestoreVersion(version: Artifact) {
+  void ElMessageBox.confirm(
+    `确定基于 V${version.version} 创建一个新的当前版本吗？现有历史版本不会被删除。`,
+    '恢复历史版本',
+    { type: 'warning', confirmButtonText: '恢复为新版本', cancelButtonText: '取消' },
+  ).then(() => restoreVersion(version)).catch(() => undefined);
+}
+
 async function restoreVersion(version: Artifact) {
   try {
     const { data } = await api.post<Artifact>(`/artifacts/${version.id}/restore`);
@@ -397,13 +520,17 @@ function isExerciseV2(value: unknown): value is ExerciseContent {
   return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '2.0');
 }
 
-function isVideoScriptV2(value: unknown): value is VideoScriptContent {
-  return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '2.0');
+function isVideoScriptV3(value: unknown): value is VideoScriptContent {
+  return Boolean(value && typeof value === 'object' && (value as { schema_version?: string }).schema_version === '3.0');
 }
 
 const editableTaskSheet = computed<TaskSheetContent>({
   get: () => taskSheetDraft.value as TaskSheetContent,
   set: value => { taskSheetDraft.value = value; },
+});
+const editableTaskSheetV3 = computed<TaskSheetContentV3>({
+  get: () => taskSheetV3Draft.value as TaskSheetContentV3,
+  set: value => { taskSheetV3Draft.value = value; },
 });
 const editableExercise = computed<ExerciseContent>({
   get: () => exerciseDraft.value as ExerciseContent,
@@ -417,11 +544,14 @@ const editableVideoScript = computed<VideoScriptContent>({
 function beginEdit() {
   error.value = '';
   if (taskType.value === 'task_sheet') {
-    if (!isTaskSheetV2(artifact.value?.content_json)) {
+    if (isTaskSheetV3(artifact.value?.content_json)) {
+      taskSheetV3Draft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as TaskSheetContentV3;
+    } else if (!isTaskSheetV2(artifact.value?.content_json)) {
       error.value = '这是旧版任务单。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化任务单。';
       return;
+    } else {
+      taskSheetDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as TaskSheetContent;
     }
-    taskSheetDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as TaskSheetContent;
   } else if (taskType.value === 'exercise') {
     if (!isExerciseV2(artifact.value?.content_json)) {
       error.value = '这是旧版课后练习。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化练习。';
@@ -429,8 +559,8 @@ function beginEdit() {
     }
     exerciseDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as ExerciseContent;
   } else if (taskType.value === 'video_script') {
-    if (!isVideoScriptV2(artifact.value?.content_json)) {
-      error.value = '这是旧版视频脚本。请在左侧对话中提出修改要求，Agent 会保留原版本并生成新的 V2 结构化脚本。';
+    if (!isVideoScriptV3(artifact.value?.content_json)) {
+      error.value = '这是旧版混合制作脚本，只读保留。请同步生成 Seedance V3 原生有声脚本后再编辑。';
       return;
     }
     videoScriptDraft.value = JSON.parse(JSON.stringify(artifact.value.content_json)) as VideoScriptContent;
@@ -447,6 +577,7 @@ function beginEdit() {
 function cancelEdit() {
   editing.value = false;
   taskSheetDraft.value = null;
+  taskSheetV3Draft.value = null;
   exerciseDraft.value = null;
   videoScriptDraft.value = null;
   selectedVideoSceneId.value = '';
@@ -460,13 +591,15 @@ function prepareSlideRevision(index: number) {
 async function saveEdit() {
   if (!artifact.value) return;
   try {
-    const contentJson = taskType.value === 'task_sheet' && taskSheetDraft.value
-      ? taskSheetDraft.value
-      : taskType.value === 'exercise' && exerciseDraft.value
-        ? exerciseDraft.value
-        : taskType.value === 'video_script' && videoScriptDraft.value
-          ? videoScriptDraft.value
-        : artifact.value.content_json;
+    const contentJson = taskType.value === 'task_sheet' && taskSheetV3Draft.value
+      ? taskSheetV3Draft.value
+      : taskType.value === 'task_sheet' && taskSheetDraft.value
+        ? taskSheetDraft.value
+        : taskType.value === 'exercise' && exerciseDraft.value
+          ? exerciseDraft.value
+          : taskType.value === 'video_script' && videoScriptDraft.value
+            ? videoScriptDraft.value
+          : artifact.value.content_json;
     const { data } = await api.patch<Artifact>(`/artifacts/${artifact.value.id}`, {
       content_json: contentJson,
       content_markdown: draftMarkdown.value,
@@ -475,6 +608,7 @@ async function saveEdit() {
     store.acceptCurrentArtifact(data, 'refresh');
     editing.value = false;
     taskSheetDraft.value = null;
+    taskSheetV3Draft.value = null;
     exerciseDraft.value = null;
     videoScriptDraft.value = null;
     await store.refreshTasks();
@@ -486,8 +620,8 @@ const quickPromptsMap: Record<string, string[]> = {
   ppt: ['优化 PPT 页面排版视觉', '增加图表示意结构', '精简每页文字字数', '强化重点结论高亮'],
   task_sheet: ['对齐教学环节', '增加观察记录表', '优化完成标准', '增强任务梯度', '精简学生说明'],
   exercise: ['对齐教学目标', '优化难度梯度', '增加材料题组', '检查答案与评分点', '生成或替换必要配图', '精简题量与学生说明'],
-  video_script: ['压缩旁白时长', '减少照读 PPT', '增强画面动效', '增加检查点', '优化字幕节奏', '同步教学设计', '校准逐页时长'],
-  video_generation: ['调整第 1 个分镜画面', '重新生成第 2 个分镜配音', '优化第 3 个分镜字幕', '让第 4 个分镜节奏更紧凑'],
+  video_script: ['压缩原生口播', '拆分过长片段', '强化镜头动作', '增加事实检查点', '统一教师声音', '同步教学设计'],
+  video_generation: ['调整第 1 个完整片段', '修正第 2 个片段口播', '增强第 3 个片段连续性', '让第 4 个片段节奏更紧凑'],
   verbatim: ['调整口语表达更自然', '增加课堂互动提示音', '控制讲解语速与时长'],
 };
 
@@ -548,6 +682,30 @@ onUnmounted(() => {
       :task-type="taskType"
       @open-version-drawer="loadVersions"
     />
+    <LessonPlanWorkbench
+      v-else-if="isLessonPlan && task && task.task_type === taskType"
+      :course-id="courseId"
+      :task-type="taskType"
+      @open-version-drawer="loadVersions"
+    />
+    <VideoScriptWorkbench
+      v-else-if="isVideoScript && task && task.task_type === taskType"
+      :course-id="courseId"
+      :task-type="taskType"
+      @open-version-drawer="loadVersions"
+    />
+    <TaskSheetWorkbench
+      v-else-if="taskType === 'task_sheet' && task && task.task_type === taskType"
+      :course-id="courseId"
+      :task-type="taskType"
+      @open-version-drawer="loadVersions"
+    />
+    <VerbatimWorkbench
+      v-else-if="taskType === 'verbatim' && task && task.task_type === taskType"
+      :course-id="courseId"
+      :task-type="taskType"
+      @open-version-drawer="loadVersions"
+    />
     <template v-else>
     <div v-if="task && task.task_type === taskType" ref="containerRef" class="task-workspace">
       <div class="mobile-pane-switch" role="tablist">
@@ -600,9 +758,9 @@ onUnmounted(() => {
         <div v-else-if="task.status === 'stale'" class="task-alert stale">
           <el-icon><RefreshRight /></el-icon>
           <div>
-            <strong>{{ task.stale_agent_profile ? '项目背景或 Agent 配置已更新' : '上游任务已有新版本' }}</strong>
-            <p>当前文件仍然保留。确认后将基于最新项目上下文与上游内容生成下一版。</p>
-            <button type="button" @click="isVideoGeneration ? runVideo('sync_dependencies') : run(task.stale_agent_profile ? 'sync_context' : 'sync_dependencies')">同步最新内容</button>
+            <strong>{{ task.stale_agent_profile ? '项目背景或 Agent 配置已更新' : '项目记忆已更新' }}</strong>
+            <p>当前文件仍然保留。确认后将基于最新项目记忆与参考内容生成下一版。</p>
+            <button type="button" @click="isVideoGeneration ? runVideo('sync_dependencies') : run(task.stale_agent_profile ? 'sync_context' : 'sync_dependencies')">读取最新项目记忆</button>
           </div>
         </div>
 
@@ -641,11 +799,20 @@ onUnmounted(() => {
               <strong>{{ task.agent_name }}</strong>
               <span v-if="artifact" class="version-chip">V{{ artifact.version }}</span>
             </div>
+            <div v-if="task.memory_revision || task.available_sources" class="memory-context-strip">
+              <span class="memory-chip">本次使用项目记忆 V{{ task.last_context_revision || task.memory_revision }}</span>
+              <span v-for="(meta, type) in (task.available_sources || {})" :key="type" class="memory-source-chip">
+                {{ type === 'lesson_plan' ? '教学设计' : type === 'video_script' ? '视频脚本' : type === 'ppt' ? 'PPT' : type === 'task_sheet' ? '任务单' : type === 'exercise' ? '练习' : type === 'verbatim' ? '逐字稿' : type }} V{{ meta.version }}
+              </span>
+              <span v-if="(task.missing_optional_sources || []).length" class="memory-source-chip missing" title="当前尚不可用，不阻塞生成">
+                {{ (task.missing_optional_sources || []).length }} 项可选来源缺失
+              </span>
+            </div>
             <p v-if="artifact">
-              老师您好！当前协助维护 <strong>{{ task.display_name }} V{{ artifact.version }}</strong>。请告诉我要调整的内容，我会精准推演生成新版本。
+              老师您好！当前协助维护 <strong>{{ task.display_name }} V{{ artifact.version }}</strong>。请告诉我要调整的内容，我会读取最新项目记忆精准推演生成新版本。
             </p>
             <p v-else>
-              {{ isVideoGeneration && task.status === 'ready_to_generate' ? '视频脚本与 PPT 已准备完成。确认模型和输出参数后，可手动开始生成成片。' : '任务文件按依赖生成中，生成完成后可在这里输入修改指令。' }}
+              {{ isVideoGeneration && task.status === 'ready_to_generate' ? '视频脚本已准备完成。选择原生有声视频模型并确认报价后即可生成。' : '任务文件按共享项目记忆生成中，生成完成后可在这里输入修改指令。' }}
             </p>
           </div>
 
@@ -732,7 +899,7 @@ onUnmounted(() => {
             v-model="input"
             rows="2"
             :disabled="isRunning || !artifact || !profileReady"
-            :placeholder="isRunning ? 'Agent 正在处理中，点击右下角按钮可暂停...' : (!profileReady ? '项目专属 Agent 初始化完成后可继续对话' : artifact ? `详细描述您希望如何修改 ${task.display_name}…` : '任务文件生成后可继续对话修改')"
+            :placeholder="isRunning ? (isPpt ? 'Agent 正在处理中，点击右下角按钮可暂停...' : 'Agent 正在处理中，点击右下角按钮可停止...') : (!profileReady ? '项目专属 Agent 初始化完成后可继续对话' : artifact ? `详细描述您希望如何修改 ${task.display_name}…` : '任务文件生成后可继续对话修改')"
             @keydown="onKeydown"
           />
 
@@ -742,27 +909,17 @@ onUnmounted(() => {
                 v-if="!isVideoGeneration"
                 :model-value="task.model_config_id || null"
                 compact
-                label=""
+                label="文本"
                 :disabled="isRunning"
                 @change="setModel"
               />
               <ModelSelector
                 v-if="isVideoGeneration"
                 :model-value="task.video_model_config_id || null"
-                capability="video_generation"
-                compact
-                label="视频"
+                capability="native_audio_video_generation"
+                compact label="Seedance 2.5"
                 :disabled="isRunning"
                 @change="setVideoModel"
-              />
-              <ModelSelector
-                v-if="isVideoGeneration"
-                :model-value="task.speech_model_config_id || null"
-                capability="speech_generation"
-                compact
-                label="语音"
-                :disabled="isRunning"
-                @change="setSpeechModel"
               />
               <ModelSelector
                 v-if="isPpt"
@@ -789,7 +946,7 @@ onUnmounted(() => {
                 class="composer-send-circle"
                 :class="{ 'is-pausing': isRunning }"
                 :disabled="isRunning ? pausing : (!input.trim() || !artifact || !profileReady)"
-                :title="isRunning ? '暂停 Agent 推演' : '发送修改'"
+                :title="isRunning ? (isPpt ? '暂停 Agent 推演' : '停止本次生成') : '发送修改'"
               >
                 <el-icon v-if="pausing || sending" class="is-loading"><Loading /></el-icon>
                 <el-icon v-else-if="isRunning"><VideoPause /></el-icon>
@@ -823,7 +980,7 @@ onUnmounted(() => {
             <span>当前任务文件</span>
             <h2>{{ task.display_name }} <small v-if="artifact">V{{ artifact.version }}</small></h2>
           </div>
-          <div v-if="artifact" class="file-actions">
+          <div v-if="artifact && (!isVideoGeneration || isPublishableVideoArtifact)" class="file-actions">
             <el-button
               v-if="taskType === 'ppt'"
               size="small"
@@ -832,7 +989,7 @@ onUnmounted(() => {
               @click="openTemplateDrawer"
             >模板 · {{ currentTemplate.short_name }}</el-button>
             <el-button size="small" :icon="Clock" @click="loadVersions">版本历史</el-button>
-            <el-button v-if="!isVideoGeneration" size="small" :icon="RefreshRight" :disabled="artifact.is_locked || isRunning" @click="run('sync_context')">同步上下文</el-button>
+            <el-button v-if="!isVideoGeneration" size="small" :icon="RefreshRight" :disabled="artifact.is_locked || isRunning" @click="run('sync_context')">刷新项目记忆</el-button>
             <el-button size="small" :icon="Lock" :disabled="artifact.is_locked" @click="lockArtifact">{{ artifact.is_locked ? '已锁定' : '锁定文件' }}</el-button>
             <el-button size="small" :icon="Edit" :disabled="artifact.is_locked" @click="beginEdit">编辑</el-button>
             <el-button size="small" type="primary" :icon="CircleCheck" :disabled="task.status === 'approved' || task.stale_agent_profile" @click="approve">{{ task.status === 'approved' ? '已确认' : '确认文件' }}</el-button>
@@ -845,7 +1002,18 @@ onUnmounted(() => {
           <strong>{{ task.progress }}%</strong>
         </div>
 
-        <div v-if="editing && taskType === 'task_sheet' && taskSheetDraft" class="structured-editor">
+        <div v-if="editing && taskType === 'task_sheet' && taskSheetV3Draft" class="structured-editor">
+          <div class="structured-editor-scroll">
+            <TaskSheetOutlineEditor
+              v-model="editableTaskSheetV3"
+              :blueprint="blueprintRef"
+              @save="saveEdit"
+              @cancel="cancelEdit"
+            />
+          </div>
+          <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
+        </div>
+        <div v-else-if="editing && taskType === 'task_sheet' && taskSheetDraft" class="structured-editor">
           <div class="structured-editor-scroll"><TaskSheetEditor v-model="editableTaskSheet" /></div>
           <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
         </div>
@@ -873,7 +1041,7 @@ onUnmounted(() => {
           <textarea v-model="draftMarkdown" spellcheck="false" />
           <footer><el-button size="small" @click="cancelEdit">取消</el-button><el-button size="small" type="primary" @click="saveEdit">保存为新版本</el-button></footer>
         </div>
-        <div v-else-if="artifact" class="artifact-viewport" :class="{ updated: artifact.id }">
+        <div v-else-if="artifact && (!isVideoGeneration || isPublishableVideoArtifact)" class="artifact-viewport" :class="{ updated: artifact.id }">
           <div v-if="taskType === 'ppt' && artifact.content_json?.slides" class="ppt-layout">
             <div class="slide-list">
               <SlideThumbnail v-for="(slide, index) in artifact.content_json.slides" :key="slide.id || index" :slide="slide" :index="index" :total-slides="artifact.content_json.slides.length" :is-active="selectedSlide === index" :template="previewTemplate" @select="selectedSlide = $event" />
@@ -881,10 +1049,11 @@ onUnmounted(() => {
             <div class="slide-preview"><SlidePreview :slide="artifact.content_json.slides[selectedSlide]" :slide-index="selectedSlide" :total-slides="artifact.content_json.slides.length" :template="previewTemplate" @regenerate-slide="prepareSlideRevision" /></div>
           </div>
           <TaskSheetPreview v-else-if="taskType === 'task_sheet' && isTaskSheetV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
+          <TaskSheetDraftPreview v-else-if="taskType === 'task_sheet' && isTaskSheetV3(artifact.content_json)" :draft="artifact.content_json as any" :is-running="false" :published="true" mode="document" />
           <ExercisePreview v-else-if="taskType === 'exercise' && isExerciseV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
-          <VideoScriptPreview v-else-if="taskType === 'video_script' && isVideoScriptV2(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
+          <VideoScriptPreview v-else-if="taskType === 'video_script' && isVideoScriptV3(artifact.content_json)" :content="artifact.content_json" :source-versions="artifact.source_versions_json" />
           <VideoGenerationPreview
-            v-else-if="taskType === 'video_generation' && artifact.content_json?.schema_version === '1.0'"
+            v-else-if="taskType === 'video_generation' && artifact.content_json?.schema_version === '3.0'"
             :content="artifact.content_json"
             :version="artifact.version"
             :disabled="isRunning || artifact.is_locked"
@@ -895,132 +1064,38 @@ onUnmounted(() => {
         </div>
         <div v-else-if="isVideoGeneration && task.status === 'ready_to_generate'" class="video-generation-ready">
           <div class="video-ready-container">
-            <!-- Glassmorphism Main Card -->
             <div class="video-ready-card">
-              <!-- Top Hero Header -->
               <div class="ready-hero-banner">
-                <div class="ready-hero-main">
-                  <div class="ready-step-badge">
-                    <span class="step-num">06</span>
-                    <span class="step-label">STAGE</span>
-                  </div>
-                  <div class="ready-title-group">
-                    <div class="ready-pill-tag">
-                      <el-icon><VideoCamera /></el-icon>
-                      <span>AI 微课视频生成 · 准备完成</span>
-                    </div>
-                    <h3>生成第一版微课视频</h3>
-                    <p>系统已将故事线与分镜脚本进行智能化编排。点击“开始生成”后，将自动合成音频旁白、匹配 PPT 画面并渲染硬字幕 MP4。</p>
-                  </div>
-                </div>
-
-                <!-- Upstream Artifact Indicators -->
-                <div class="upstream-resources">
-                  <div class="resource-chip">
-                    <span class="chip-icon">🎨</span>
-                    <div class="chip-text">
-                      <strong>PPT 课件</strong>
-                      <small>视觉画面已就绪</small>
-                    </div>
-                    <el-icon class="check-icon"><CircleCheck /></el-icon>
-                  </div>
-                  <div class="resource-chip">
-                    <span class="chip-icon">📜</span>
-                    <div class="chip-text">
-                      <strong>分镜脚本</strong>
-                      <small>8 场景音画对齐</small>
-                    </div>
-                    <el-icon class="check-icon"><CircleCheck /></el-icon>
-                  </div>
-                  <div class="resource-chip">
-                    <span class="chip-icon">🎙️</span>
-                    <div class="chip-text">
-                      <strong>语音旁白</strong>
-                      <small>TTS 多角色配音</small>
-                    </div>
-                    <el-icon class="check-icon"><CircleCheck /></el-icon>
-                  </div>
-                </div>
+                <span>STAGE 06 / NATIVE AUDIO VIDEO</span>
+                <h3>生成原生有声微课视频</h3>
+                <p>按所选 Provider 的单段时长约束同时生成画面与语音，确认报价后才会提交任务。</p>
               </div>
-
-              <!-- Configuration Matrix -->
               <div class="ready-config-body">
                 <div class="config-section-header">
-                  <el-icon><Setting /></el-icon>
-                  <span>视频渲染与音质参数配置</span>
+                  <span>固定生产契约</span>
                 </div>
-
-                <div class="video-options-grid">
-                  <div class="option-card">
-                    <div class="option-label">
-                      <span class="opt-icon">📺</span>
-                      <span>输出规格</span>
-                    </div>
-                    <el-select v-model="videoResolution" size="large" class="custom-select">
-                      <el-option label="1080p 全高清 (1920x1080)" value="1920x1080" />
-                      <el-option label="720p 高清 (1280x720)" value="1280x720" />
-                      <el-option label="360p 极速预览 (640x360)" value="640x360" />
-                    </el-select>
-                  </div>
-
-                  <div class="option-card">
-                    <div class="option-label">
-                      <span class="opt-icon">🎙️</span>
-                      <span>声音风格</span>
-                    </div>
-                    <el-select v-model="videoVoiceStyle" size="large" class="custom-select">
-                      <el-option label="自然讲解 (推荐)" value="natural" />
-                      <el-option label="沉稳清晰" value="calm" />
-                      <el-option label="亲切活泼" value="friendly" />
-                    </el-select>
-                  </div>
-
-                  <div class="option-card switch-card">
-                    <div class="option-label">
-                      <span class="opt-icon">💬</span>
-                      <span>字幕硬合成</span>
-                    </div>
-                    <div class="switch-wrapper">
-                      <el-switch
-                        v-model="videoSubtitleEnabled"
-                        size="large"
-                        active-text="开启字幕"
-                        inactive-text="关闭字幕"
-                      />
-                    </div>
-                  </div>
+                <div class="native-contract-grid">
+                  <div><b>1280 × 720</b><span>16:9 · 25fps</span></div>
+                  <div><b>原生语音</b><span>禁止独立 TTS</span></div>
+                  <div><b>分段生成</b><span>Gemini 3–10 秒 · Seedance 4–15 秒</span></div>
+                  <div><b>并发上限 2</b><span>失败片段最多重试一次</span></div>
                 </div>
-
-                <!-- AI Models Selection Row -->
-                <div class="model-config-panel">
-                  <div class="config-section-header compact">
-                    <el-icon><Cpu /></el-icon>
-                    <span>媒体生成引擎配置</span>
-                  </div>
-                  <div class="video-model-row">
-                    <ModelSelector :model-value="task.video_model_config_id || null" capability="video_generation" label="视频模型" @change="setVideoModel" />
-                    <ModelSelector :model-value="task.speech_model_config_id || null" capability="speech_generation" label="语音模型" @change="setSpeechModel" />
-                  </div>
+                <div class="native-options-row">
+                  <ModelSelector :model-value="task.video_model_config_id || null" capability="native_audio_video_generation" label="原生有声视频模型" @change="setVideoModel" />
+                  <el-switch v-model="videoSubtitleEnabled" active-text="封装 ASR 字幕轨" />
                 </div>
               </div>
-
-              <!-- Footer CTA Section -->
               <div class="ready-action-footer">
                 <el-button
-                  type="primary"
-                  size="large"
-                  class="generate-hero-btn"
-                  :icon="VideoCamera"
-                  @click="runVideo('initial')"
+                  type="primary" size="large" class="generate-hero-btn" :icon="VideoCamera"
+                  :loading="quoteLoading" :disabled="!task.video_model_config_id" @click="runVideo('initial')"
                 >
-                  <span class="btn-main-text">开始生成微课视频</span>
-                  <span class="btn-badge">一键渲染 MP4</span>
+                  获取费用报价并确认
                 </el-button>
-
-                <div v-if="!task.video_model_config_id || !task.speech_model_config_id" class="video-settings-alert">
+                <div v-if="!task.video_model_config_id" class="video-settings-alert">
                   <el-icon><Warning /></el-icon>
-                  <span>未配置私有媒体模型时，系统将自动基于内置 Mock/Fast 引擎合成测试视频。</span>
-                  <RouterLink to="/settings" class="video-settings-link">前往模型设置 ➔</RouterLink>
+                  <span>必须配置 Gemini Interactions 或 Seedance 原生有声视频模型；系统不会降级到 PPT、图片或本地 TTS。</span>
+                  <RouterLink to="/settings" class="video-settings-link">配置模型</RouterLink>
                 </div>
               </div>
             </div>
@@ -1029,13 +1104,37 @@ onUnmounted(() => {
         <div v-else class="file-empty">
           <span>{{ String(task.display_order).padStart(2, '0') }}</span>
           <h3>{{ task.status === 'failed' ? '任务生成失败' : '任务文件正在准备' }}</h3>
-          <p>{{ task.status === 'waiting_dependency' ? '上游任务完成后将自动启动当前 Agent。' : task.status === 'failed' ? task.error?.message : 'Agent 完成结构校验后，最新文件会自动显示在这里。' }}</p>
-          <el-button v-if="task.status === 'failed'" type="primary" @click="run('retry')">重试任务</el-button>
+          <p>{{ task.status === 'waiting_dependency' ? (isVideoGeneration ? '请先完成上游同步并确认视频脚本；确认后这里会显示视频模型与生成按钮。' : '上游任务完成后将自动启动当前 Agent。') : task.status === 'failed' ? task.error?.message : 'Agent 完成结构校验后，最新文件会自动显示在这里。' }}</p>
+          <RouterLink
+            v-if="isVideoGeneration && task.status === 'waiting_dependency'"
+            :to="`/courses/${courseId}/tasks/video_script`"
+          >
+            <el-button type="primary">前往确认视频脚本</el-button>
+          </RouterLink>
+          <el-button v-if="task.status === 'failed'" type="primary" @click="isVideoGeneration ? runVideo('retry') : run('retry')">重试任务</el-button>
         </div>
       </main>
     </div>
     </template>
-    <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration || isPpt" @select="selectVersion" @restore="restoreVersion" @close="closeVersions" />
+    <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration || isPpt || isLessonPlan" @select="selectVersion" @restore="confirmRestoreVersion" @close="closeVersions" />
+    <el-dialog v-model="quoteDialogVisible" width="680px" class="video-quote-dialog" title="确认原生有声视频报价" destroy-on-close>
+      <div v-if="videoQuote" class="quote-sheet">
+        <header><span>QUOTE / 15 MIN VALID</span><h3>{{ pendingSceneRegeneration ? '单片段修改报价' : '首版分段生成报价' }}</h3><p>{{ videoQuote.provider }} · {{ videoQuote.model_name }} · 720p · 原生音频</p></header>
+        <dl class="quote-metrics">
+          <div><dt>片段数</dt><dd>{{ videoQuote.scene_count }}</dd></div>
+          <div><dt>预计时长</dt><dd>{{ videoQuote.duration_seconds.toFixed(1) }}s</dd></div>
+          <div><dt>可复用</dt><dd>{{ videoQuote.reusable_scene_count }}</dd></div>
+          <div><dt>基础费用</dt><dd>{{ formatFen(videoQuote.estimated_cost_fen) }}</dd></div>
+          <div class="maximum"><dt>确认费用上限</dt><dd>{{ formatFen(videoQuote.maximum_cost_fen) }}</dd></div>
+        </dl>
+        <div class="quote-scenes">
+          <div v-for="item in videoQuote.scenes" :key="item.scene_id"><b>{{ item.scene_id }}</b><span>{{ item.duration_seconds.toFixed(1) }}s</span><span>{{ item.reusable ? '缓存复用' : `${item.estimated_tokens.toLocaleString()} tokens` }}</span><strong>{{ formatFen(item.estimated_cost_fen) }}</strong></div>
+        </div>
+        <p v-if="videoQuote.api_mode === 'gemini_interactions_video' && videoQuote.maximum_cost_fen === 0" class="quote-note">本地网关未配置计费，预计费用 0 元；仍需确认本次分镜范围、时长、复用数量和模型。</p>
+        <p class="quote-note">费用上限按“所有不合格片段最多各重试一次”计算。只有确认后才提交 Provider；实际未重试或命中复用时按实耗记录。</p>
+      </div>
+      <template #footer><el-button @click="quoteDialogVisible=false">取消</el-button><el-button type="primary" :loading="regeneratingScene" @click="confirmVideoQuote">确认费用上限并生成</el-button></template>
+    </el-dialog>
     <el-drawer
       v-model="showTemplateDrawer"
       class="ppt-template-drawer"
@@ -1700,6 +1799,41 @@ onUnmounted(() => {
   border: 1px solid var(--primary-200, #c7d2fe);
   padding: 1px 6px;
   border-radius: 999px;
+}
+
+.memory-context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.memory-chip {
+  font-size: 10px;
+  font-weight: 800;
+  color: #7c3aed;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.memory-source-chip {
+  font-size: 10px;
+  font-weight: 700;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.memory-source-chip.missing {
+  color: #b45309;
+  background: #fffbeb;
+  border-color: #fde68a;
 }
 
 .agent-introduction p {
@@ -2467,4 +2601,29 @@ onUnmounted(() => {
   .template-drawer-footer { align-items: stretch; flex-direction: column; }
   .template-drawer-footer > div:last-child { justify-content: flex-end; }
 }
+
+/* Seedance V3 keeps the generation gate deliberately plain and auditable. */
+.video-generation-ready { padding: 28px; background: #f5f5f3; font-family: Helvetica Neue, Helvetica, Arial, sans-serif; }
+.video-ready-container { max-width: 820px; }
+.video-ready-card { border: 1px solid #aeb3bc; border-radius: 0; box-shadow: none; }
+.ready-hero-banner { padding: 30px; background: #111318; }
+.ready-hero-banner::after { display: none; }
+.ready-hero-banner > span { color: #7fa2ff; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
+.ready-hero-banner h3 { margin: 9px 0 7px; color: #fff; font-size: 30px; letter-spacing: -.04em; }
+.ready-hero-banner p { max-width: 630px; margin: 0; color: #b7bbc3; font-size: 13px; line-height: 1.65; }
+.ready-config-body { padding: 24px 30px; gap: 16px; }
+.config-section-header { color: #002fa7; font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
+.native-contract-grid { display: grid; grid-template-columns: repeat(4,1fr); border: 1px solid #c7cad0; }
+.native-contract-grid div { display: grid; gap: 5px; padding: 16px; border-right: 1px solid #d9dbe0; }
+.native-contract-grid div:last-child { border-right: 0; }
+.native-contract-grid b { font-size: 13px; }.native-contract-grid span { color: #676d76; font-size: 10px; line-height: 1.4; }
+.native-options-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 14px; border-top: 1px solid #d9dbe0; }
+.ready-action-footer { padding: 18px 30px 26px; border-top: 1px solid #d9dbe0; gap: 12px; }
+.generate-hero-btn { height: 46px!important; padding: 0 22px!important; border-radius: 0!important; background: #002fa7!important; box-shadow: none!important; }
+.video-settings-alert { border-radius: 0; }
+.quote-sheet { color: #111318; font-family: Helvetica Neue, Helvetica, Arial, sans-serif; }
+.quote-sheet>header { padding-bottom: 14px; border-bottom: 1px solid #c7cad0; }.quote-sheet>header span { color: #002fa7; font-size: 10px; font-weight: 800; letter-spacing: .1em; }.quote-sheet>header h3 { margin: 6px 0 3px; font-size: 23px; }.quote-sheet>header p { margin: 0; color: #676d76; font-size: 12px; }
+.quote-metrics { display: grid; grid-template-columns: repeat(4,1fr); margin: 14px 0; border: 1px solid #c7cad0; }.quote-metrics div { padding: 13px; border-right: 1px solid #d9dbe0; }.quote-metrics .maximum { grid-column: span 4; border-top: 1px solid #d9dbe0; border-right: 0; background: #e8eeff; }.quote-metrics dt { color: #676d76; font-size: 10px; }.quote-metrics dd { margin: 4px 0 0; font-size: 17px; font-weight: 800; }
+.quote-scenes { max-height: 230px; overflow: auto; border: 1px solid #c7cad0; }.quote-scenes>div { display: grid; grid-template-columns: 80px 70px 1fr 80px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid #e1e2e5; font-size: 11px; }.quote-scenes>div:last-child { border-bottom: 0; }.quote-scenes strong { text-align: right; }.quote-note { color: #676d76; font-size: 11px; line-height: 1.6; }
+@media(max-width:760px){.native-contract-grid{grid-template-columns:1fr 1fr}.native-contract-grid div:nth-child(2){border-right:0}.native-options-row{align-items:flex-start;flex-direction:column}.quote-metrics{grid-template-columns:1fr 1fr}.quote-metrics .maximum{grid-column:span 2}}
 </style>

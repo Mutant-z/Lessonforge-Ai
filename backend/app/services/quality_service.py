@@ -11,8 +11,10 @@ from app.schemas.artifact import (
     TaskSheetContent,
     VerbatimContent,
     VideoScriptContent,
+    SeedanceVideoScriptContent,
 )
 from app.schemas.blueprint import CourseBlueprintSchema
+from app.schemas.video_script_v4 import SeedanceVideoScriptContentV4, VIDEO_SCRIPT_V4
 
 
 def issue(severity: str, artifact_type: str, location: str, dimension: str, description: str, suggestion: str, target_agent: str) -> dict:
@@ -43,7 +45,24 @@ def _duplicates(values: list[str]) -> set[str]:
     return {value for value, count in counts.items() if count > 1}
 
 
+def _lesson_plan_or_none(lesson_plan_raw):
+    """容错解析教学设计：V1 直接解析，V2 投影为 V1，结构非法回退 None（用蓝图环节）。"""
+    if not lesson_plan_raw:
+        return None
+    from app.schemas.lesson_plan import lesson_plan_v1_from_any
+
+    try:
+        return lesson_plan_v1_from_any(lesson_plan_raw)
+    except Exception:  # noqa: BLE001  结构非法的教学设计不参与环节检查
+        return None
+
+
 def validate_task_sheet(bp: CourseBlueprintSchema, raw: dict, lesson_plan_raw: dict | None = None) -> list[dict]:
+    if raw.get("schema_version") == "3.0":
+        # V3：动态目录任务单，复用 Agent 发布 / 人工编辑 / QA 门禁同一套确定性校验。
+        from app.agent.agents.task_sheet.qa import validate_task_sheet_v3
+
+        return validate_task_sheet_v3(bp, raw, lesson_plan_raw)
     if raw.get("schema_version") != "2.0":
         return [issue(
             "minor", "task_sheet", "$", "compatibility",
@@ -60,7 +79,7 @@ def validate_task_sheet(bp: CourseBlueprintSchema, raw: dict, lesson_plan_raw: d
     stage_durations = blueprint_stage_durations
     lesson_stage_ids: set[str] | None = None
     if lesson_plan_raw:
-        lesson_plan = LessonPlanContent.model_validate(lesson_plan_raw)
+        lesson_plan = _lesson_plan_or_none(lesson_plan_raw)
         stage_durations = {item.id: item.duration_minutes for item in lesson_plan.stages}
         lesson_stage_ids = set(stage_durations)
 
@@ -168,8 +187,68 @@ def validate_video_script(
     bp: CourseBlueprintSchema,
     raw: dict,
     lesson_plan_raw: dict | None,
-    ppt_raw: dict,
+    ppt_raw: dict | None,
 ) -> list[dict]:
+    if raw.get("schema_version") == VIDEO_SCRIPT_V4:
+        try:
+            script = SeedanceVideoScriptContentV4.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001
+            return [issue("critical", "video_script", "$", "integrity",
+                          f"V4 视频脚本结构非法：{str(exc)[:300]}", "修复章节与分镜结构后重新校验", "video_script_agent")]
+        lesson_plan = _lesson_plan_or_none(lesson_plan_raw)
+        objective_ids = {item.id for item in bp.objectives}
+        knowledge_ids = {item.id for item in bp.knowledge_points}
+        stage_ids = {item.id for item in lesson_plan.stages} if lesson_plan else {item.segment_id for item in bp.timeline}
+        section_by_id = {item.id: item for item in script.outline.sections}
+        issues = []
+        covered_section_objectives: set[str] = set()
+        for index, scene in enumerate(script.scenes):
+            location = f"$.scenes[{index}]"
+            if scene.section_id not in section_by_id:
+                issues.append(issue("critical", "video_script", f"{location}.section_id", "alignment",
+                                    f"分镜引用了不存在的章节 {scene.section_id}", "改为当前大纲中的章节 ID", "video_script_agent"))
+            if scene.lesson_stage_id not in stage_ids:
+                issues.append(issue("critical", "video_script", f"{location}.lesson_stage_id", "alignment", "引用了不存在的教学环节", "改为当前教学设计中的环节 ID", "video_script_agent"))
+            if any(value not in objective_ids for value in scene.objective_ids):
+                issues.append(issue("critical", "video_script", f"{location}.objective_ids", "alignment", "引用了不存在的课程目标", "改为蓝图中的目标 ID", "video_script_agent"))
+            if any(value not in knowledge_ids for value in scene.knowledge_point_ids):
+                issues.append(issue("critical", "video_script", f"{location}.knowledge_point_ids", "alignment", "引用了不存在的知识点", "改为蓝图中的知识点 ID", "video_script_agent"))
+            normalized = _normalized_script_text(scene.spoken_text)
+            if any(_normalized_script_text(term) not in normalized for term in scene.required_terms if term):
+                issues.append(issue("major", "video_script", f"{location}.required_terms", "consistency", "必需术语未完整出现在口播中", "补齐必需术语或修订术语清单", "video_script_agent"))
+            if "ppt" in scene.visual_prompt.lower() or "幻灯片" in scene.visual_prompt:
+                issues.append(issue("major", "video_script", f"{location}.visual_prompt", "production", "原生视频提示词不得依赖 PPT", "改写为真实场景和镜头描述", "video_script_agent"))
+        for section in script.outline.sections:
+            location = f"$.outline.sections[{section.id}]"
+            if any(value not in objective_ids for value in section.objective_ids):
+                issues.append(issue("critical", "video_script", location, "alignment",
+                                    f"章节 {section.id} 引用了不存在的课程目标", "改为蓝图中的目标 ID", "video_script_agent"))
+            if any(value not in knowledge_ids for value in section.knowledge_point_ids):
+                issues.append(issue("critical", "video_script", location, "alignment",
+                                    f"章节 {section.id} 引用了不存在的知识点", "改为蓝图中的知识点 ID", "video_script_agent"))
+            covered_section_objectives.update(section.objective_ids)
+        return issues
+    if raw.get("schema_version") == "3.0":
+        script = SeedanceVideoScriptContent.model_validate(raw)
+        lesson_plan = _lesson_plan_or_none(lesson_plan_raw)
+        objective_ids = {item.id for item in bp.objectives}
+        knowledge_ids = {item.id for item in bp.knowledge_points}
+        stage_ids = {item.id for item in lesson_plan.stages} if lesson_plan else {item.segment_id for item in bp.timeline}
+        issues = []
+        for index, scene in enumerate(script.scenes):
+            location = f"$.scenes[{index}]"
+            if scene.lesson_stage_id not in stage_ids:
+                issues.append(issue("critical", "video_script", f"{location}.lesson_stage_id", "alignment", "引用了不存在的教学环节", "改为当前教学设计中的环节 ID", "video_script_agent"))
+            if any(value not in objective_ids for value in scene.objective_ids):
+                issues.append(issue("critical", "video_script", f"{location}.objective_ids", "alignment", "引用了不存在的课程目标", "改为蓝图中的目标 ID", "video_script_agent"))
+            if any(value not in knowledge_ids for value in scene.knowledge_point_ids):
+                issues.append(issue("critical", "video_script", f"{location}.knowledge_point_ids", "alignment", "引用了不存在的知识点", "改为蓝图中的知识点 ID", "video_script_agent"))
+            normalized = _normalized_script_text(scene.spoken_text)
+            if any(_normalized_script_text(term) not in normalized for term in scene.required_terms if term):
+                issues.append(issue("major", "video_script", f"{location}.required_terms", "consistency", "必需术语未完整出现在口播中", "补齐必需术语或修订术语清单", "video_script_agent"))
+            if "ppt" in scene.visual_prompt.lower() or "幻灯片" in scene.visual_prompt:
+                issues.append(issue("major", "video_script", f"{location}.visual_prompt", "production", "原生视频提示词不得依赖 PPT", "改写为真实场景和镜头描述", "video_script_agent"))
+        return issues
     if raw.get("schema_version") != "2.0":
         LegacyVideoScriptContent.model_validate(raw)
         return [issue(
@@ -177,8 +256,10 @@ def validate_video_script(
             "当前视频脚本仍使用 V1 结构", "下一次修改时升级为结构化视频脚本 V2", "video_script_agent",
         )]
     script = VideoScriptContent.model_validate(raw)
+    if ppt_raw is None:
+        raise ValueError("V2 视频脚本校验仍需要 PPT")
     ppt = PPTContent.model_validate(ppt_raw)
-    lesson_plan = LessonPlanContent.model_validate(lesson_plan_raw) if lesson_plan_raw else None
+    lesson_plan = _lesson_plan_or_none(lesson_plan_raw)
     issues = []
     objective_ids = {item.id for item in bp.objectives}
     knowledge_ids = {item.id for item in bp.knowledge_points}
@@ -359,16 +440,30 @@ def validate_exercise(
 
 def validate_resources(bp: CourseBlueprintSchema, data: dict[str, dict]) -> list[dict]:
     issues = validate_blueprint(bp)
+    # 教学设计：Agent 发布、人工编辑、审批与全局 QA 四入口复用的统一校验。
+    if "lesson_plan" in data:
+        from app.agent.agents.lesson_plan.qa import validate_lesson_plan as _validate_lesson_plan
+
+        issues.extend(_validate_lesson_plan(bp, data["lesson_plan"]))
     if "task_sheet" in data:
         issues.extend(validate_task_sheet(bp, data["task_sheet"], data.get("lesson_plan")))
     ppt = PPTContent.model_validate(data["ppt"])
     exercise_raw = data["exercise"]
     video_raw = data["video_script"]
-    verbatim = VerbatimContent.model_validate(data["verbatim"])
+    verbatim_raw = data.get("verbatim") or {}
+    if verbatim_raw.get("schema_version") == "2.0":
+        from app.schemas.verbatim_v2 import verbatim_sections_for
+
+        verbatim_sections = verbatim_sections_for(verbatim_raw)
+    else:
+        verbatim = VerbatimContent.model_validate(verbatim_raw)
+        verbatim_sections = [section.model_dump() for section in verbatim.sections]
     slide_ids = [x.id for x in ppt.slides]
     if len(slide_ids) != len(set(slide_ids)):
         issues.append(issue("critical", "ppt", "slides", "integrity", "PPT 页面 ID 不唯一", "重新编号页面", "ppt_agent"))
-    if video_raw.get("schema_version") == "2.0":
+    if video_raw.get("schema_version") == "3.0":
+        issues.extend(validate_video_script(bp, video_raw, data.get("lesson_plan"), None))
+    elif video_raw.get("schema_version") == "2.0":
         issues.extend(validate_video_script(bp, video_raw, data.get("lesson_plan"), data["ppt"]))
     else:
         video = LegacyVideoScriptContent.model_validate(video_raw)
@@ -377,10 +472,10 @@ def validate_resources(bp: CourseBlueprintSchema, data: dict[str, dict]) -> list
             for slide_id in segment.slide_ids:
                 if slide_id not in slide_ids:
                     issues.append(issue("critical", "video_script", f"segments.{segment.id}", "consistency", f"引用了不存在的页面 {slide_id}", "修正页面引用", "video_script_agent"))
-    for section in verbatim.sections:
-        for slide_id in section.slide_ids:
+    for section in verbatim_sections:
+        for slide_id in section.get("slide_ids", []):
             if slide_id not in slide_ids:
-                issues.append(issue("critical", "verbatim", f"sections.{section.id}", "consistency", f"引用了不存在的页面 {slide_id}", "修正页面引用", "verbatim_agent"))
+                issues.append(issue("critical", "verbatim", f"sections.{section.get('id')}", "consistency", f"引用了不存在的页面 {slide_id}", "修正页面引用", "verbatim_agent"))
     issues.extend(validate_exercise(bp, exercise_raw, data.get("task_sheet")))
     return issues
 

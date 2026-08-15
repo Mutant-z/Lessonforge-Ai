@@ -8,12 +8,12 @@ const props = withDefaults(defineProps<{
   disabled?: boolean;
   compact?: boolean;
   label?: string;
-  capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'speech_generation' | 'media_composition' | null;
+  capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'native_audio_video_generation' | 'speech_generation' | 'speech_recognition' | 'media_composition' | null;
 }>(), {
   modelValue: null,
   disabled: false,
   compact: false,
-  label: '对话模型',
+  label: '文本',
   capability: null,
 });
 
@@ -24,11 +24,34 @@ const emit = defineEmits<{
 
 const store = useModelConfigStore();
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
+const mediaTransportModes: Partial<Record<NonNullable<typeof props.capability>, string[]>> = {
+  image_generation: ['openai_images', 'google_gemini_image', 'custom_image_http', 'mock_media'],
+  video_generation: ['custom_video_async_http', 'volcengine_ark_video', 'gemini_interactions_video', 'mock_media'],
+  native_audio_video_generation: ['volcengine_ark_video', 'gemini_interactions_video'],
+  speech_recognition: ['volcengine_asr'],
+  speech_generation: ['custom_speech_http', 'mock_media'],
+  media_composition: ['local_ffmpeg', 'mock_media'],
+};
+
+function hasCompatibleTransport(item: typeof store.configs[number]) {
+  if (props.capability === 'native_audio_video_generation') {
+    return ['volcengine_ark_video', 'gemini_interactions_video'].includes(item.api_mode);
+  }
+  if (!props.capability || item.provider === 'mock') return true;
+  const modes = mediaTransportModes[props.capability];
+  return !modes || modes.includes(item.api_mode || 'text_chat');
+}
+
 const availableConfigs = computed(() => {
   if (!props.capability) return store.configs;
   // 能力型选择器不能回退展示不具备该能力的模型，否则会造成“选了图片模型但实际只能生成文本”的假象。
-  return store.configs.filter(item => item.capabilities?.includes(props.capability!));
+  return store.configs.filter(item => (
+    item.capabilities?.includes(props.capability!) && hasCompatibleTransport(item)
+  ));
 });
+const effectiveModelValue = computed(() => (
+  availableConfigs.value.some(item => item.id === props.modelValue) ? props.modelValue : undefined
+));
 
 function formatTokens(value: number) {
   if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
@@ -41,6 +64,12 @@ function providerLabel(provider: string) {
   if (provider === 'anthropic') return 'Anthropic';
   if (provider === 'mock') return 'Mock';
   return provider;
+}
+
+function nativeVideoRange(apiMode: string) {
+  if (apiMode === 'gemini_interactions_video') return '3–10 秒/段';
+  if (apiMode === 'volcengine_ark_video') return '4–15 秒/段';
+  return '';
 }
 
 function selectModel(value: string) {
@@ -69,7 +98,7 @@ onMounted(() => {
     <span v-if="label && !compact" class="selector-label">{{ label }}</span>
     <div v-if="availableConfigs.length" class="selector-control">
       <el-select
-        :model-value="modelValue || undefined"
+        :model-value="effectiveModelValue"
         :disabled="disabled"
         :loading="store.loading"
         filterable
@@ -84,11 +113,11 @@ onMounted(() => {
           <div class="prefix-wrap">
             <el-icon class="select-prefix-icon">
               <Picture v-if="capability === 'image_generation'" />
-              <VideoCamera v-else-if="capability === 'video_generation'" />
+              <VideoCamera v-else-if="capability === 'video_generation' || capability === 'native_audio_video_generation'" />
               <Microphone v-else-if="capability === 'speech_generation'" />
               <Cpu v-else />
             </el-icon>
-            <span v-if="label" class="select-prefix-tag" :class="capability === 'image_generation' ? 'tag-purple' : 'tag-indigo'">{{ label }}</span>
+            <span v-if="label" class="select-prefix-tag" :class="capability === 'image_generation' ? 'tag-purple' : (capability === 'video_generation' ? 'tag-blue' : (capability === 'speech_generation' ? 'tag-emerald' : 'tag-indigo'))">{{ label }}</span>
           </div>
         </template>
         <el-option
@@ -100,7 +129,7 @@ onMounted(() => {
           <div class="model-option">
             <div class="option-main">
               <strong>{{ config.name || config.model_name }}</strong>
-              <span>{{ providerLabel(config.provider) }} · {{ config.model_name }}</span>
+              <span>{{ providerLabel(config.provider) }} · {{ config.model_name }}<template v-if="nativeVideoRange(config.api_mode)"> · {{ nativeVideoRange(config.api_mode) }}</template></span>
             </div>
             <div class="option-tags">
               <span>{{ formatTokens(config.context_window_tokens) }}</span>
@@ -119,7 +148,13 @@ onMounted(() => {
       </div>
     </div>
     <div v-else class="system-default">
-      <el-icon><Cpu /></el-icon>
+      <el-icon class="select-prefix-icon">
+        <Picture v-if="capability === 'image_generation'" />
+        <VideoCamera v-else-if="capability === 'video_generation' || capability === 'native_audio_video_generation'" />
+        <Microphone v-else-if="capability === 'speech_generation'" />
+        <Cpu v-else />
+      </el-icon>
+      <span v-if="label" class="select-prefix-tag" :class="capability === 'image_generation' ? 'tag-purple' : (capability === 'video_generation' ? 'tag-blue' : (capability === 'speech_generation' ? 'tag-emerald' : 'tag-indigo'))">{{ label }}</span>
       <span>{{ store.loading ? '正在加载模型...' : '系统默认模型' }}</span>
       <RouterLink v-if="!store.loading" to="/settings">配置模型</RouterLink>
     </div>

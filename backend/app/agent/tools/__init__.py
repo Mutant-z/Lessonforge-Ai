@@ -2,6 +2,7 @@
 
 领域划分（对齐需求 §8 统一工具系统）：
 - artifact_tools：Artifact 工具
+- memory_tools：共享项目记忆读取工具（list/search/read/按需读取其他 Agent 产物）
 - template_tools：PPT 模板工具
 - editing_tools：PPT 编辑工具
 - render_tools：PPT 渲染工具
@@ -12,6 +13,7 @@
 """
 from app.agent.tools import (  # noqa: F401
     artifact_tools,
+    memory_tools,
     template_tools,
     editing_tools,
     render_tools,
@@ -20,3 +22,11 @@ from app.agent.tools import (  # noqa: F401
     workspace_tools,
     vision_tools,
 )
+
+
+def register_domain_tools() -> None:
+    """惰性注册领域工具（学习任务单等），幂等。"""
+    from app.agent.agents.task_sheet.tools import register_task_sheet_tools
+
+    register_task_sheet_tools()
+

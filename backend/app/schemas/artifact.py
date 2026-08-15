@@ -596,6 +596,92 @@ class VideoScriptContent(BaseModel):
         return self
 
 
+class SeedanceCameraBeat(BaseModel):
+    start_offset_seconds: float = Field(ge=0)
+    end_offset_seconds: float = Field(gt=0)
+    instruction: str = Field(min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end_offset_seconds <= self.start_offset_seconds:
+            raise ValueError("镜头节拍结束时间必须晚于开始时间")
+        return self
+
+
+class SeedanceVideoScene(BaseModel):
+    id: str = Field(min_length=1)
+    sequence: int = Field(gt=0)
+    title: str = Field(min_length=1)
+    pedagogical_role: Literal["导入", "目标", "情境", "概念讲解", "示范", "练习", "检查点", "总结", "过渡"]
+    lesson_stage_id: str = Field(min_length=1)
+    objective_ids: list[str] = Field(min_length=1)
+    knowledge_point_ids: list[str] = Field(min_length=1)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    continuity_group: str = Field(min_length=1, max_length=120)
+    visual_prompt: str = Field(min_length=1, max_length=6000)
+    camera_beats: list[SeedanceCameraBeat] = Field(default_factory=list)
+    spoken_text: str = Field(min_length=1, max_length=3000)
+    required_terms: list[str] = Field(default_factory=list)
+    required_numbers: list[str] = Field(default_factory=list)
+    required_facts: list[str] = Field(default_factory=list)
+    voice_direction: str = Field(default="自然、清晰的中文教师讲解", min_length=1, max_length=300)
+    sound_design: list[str] = Field(default_factory=list)
+    negative_constraints: list[str] = Field(default_factory=list)
+    production_notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_native_scene(self):
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("原生视频片段结束时间必须晚于开始时间")
+        duration = self.end_seconds - self.start_seconds
+        if duration < 4 or duration > 15:
+            raise ValueError("Seedance 原生片段时长必须介于 4–15 秒")
+        for beat in self.camera_beats:
+            if beat.end_offset_seconds > duration + .01:
+                raise ValueError("镜头节拍不得超出片段时长")
+        return self
+
+
+class SeedanceVideoProductionSettings(BaseModel):
+    mode: Literal["seedance_native"] = "seedance_native"
+    aspect_ratio: Literal["16:9"] = "16:9"
+    target_duration_seconds: float = Field(gt=0)
+    target_clip_seconds: int = Field(default=12, ge=8, le=15)
+    min_clip_seconds: int = Field(default=8, ge=4, le=15)
+    max_clip_seconds: int = Field(default=15, ge=8, le=15)
+    global_visual_style: str = Field(default="统一、清晰、适龄的现代教学影像", min_length=1, max_length=1000)
+    global_voice_direction: str = Field(default="自然、清晰、可信赖的中文教师声音", min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_clip_window(self):
+        if not self.min_clip_seconds <= self.target_clip_seconds <= self.max_clip_seconds:
+            raise ValueError("目标片段时长必须位于最短与最长片段时长之间")
+        return self
+
+
+class SeedanceVideoScriptContent(BaseModel):
+    schema_version: Literal["3.0"] = "3.0"
+    course_info: VideoScriptCourseInfo
+    production_settings: SeedanceVideoProductionSettings
+    scenes: list[SeedanceVideoScene] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_native_timeline(self):
+        if [scene.sequence for scene in self.scenes] != list(range(1, len(self.scenes) + 1)):
+            raise ValueError("原生视频片段序号必须从 1 连续递增")
+        if len({scene.id for scene in self.scenes}) != len(self.scenes):
+            raise ValueError("原生视频片段 ID 不能重复")
+        cursor = 0.0
+        for scene in self.scenes:
+            if abs(scene.start_seconds - cursor) > .11:
+                raise ValueError("原生视频片段时间轴必须连续")
+            cursor = scene.end_seconds
+        if abs(cursor - self.production_settings.target_duration_seconds) > .11:
+            raise ValueError("片段总时长必须与制作目标时长一致")
+        return self
+
+
 class VerbatimSection(BaseModel):
     id: str
     scene_id: str | None = None

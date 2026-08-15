@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1.projects import _generation_event_payload
+from app.services.course_task_service import is_publishable_video_artifact
 
 
 def test_generation_event_envelope_uses_durable_database_sequence():
@@ -13,6 +14,25 @@ def test_generation_event_envelope_uses_durable_database_sequence():
     ))
     assert payload["event_id"] == 42
     assert payload["sequence"] == 42
+
+
+def test_video_task_file_requires_native_renderer_output():
+    legacy = SimpleNamespace(
+        artifact_type="video_generation",
+        content_json={
+            "schema_version": "2.0", "mode": "hybrid",
+            "outputs": {"final_asset_id": "legacy-plan-output"},
+        },
+    )
+    native = SimpleNamespace(
+        artifact_type="video_generation",
+        content_json={
+            "schema_version": "3.0", "mode": "seedance_native",
+            "outputs": {"final_asset_id": "rendered-video"},
+        },
+    )
+    assert not is_publishable_video_artifact(legacy)
+    assert is_publishable_video_artifact(native)
 
 
 async def wait_for_project(client, headers, course_id, predicate, attempts=200):
@@ -72,7 +92,7 @@ async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_ta
         auth_headers,
         course_id,
         lambda item: all(
-            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+            task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
             for task in item["tasks"]
         ),
     )
@@ -82,7 +102,20 @@ async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_ta
     ]
     assert all(task["current_artifact"] for task in project["tasks"] if task["task_type"] != "video_generation")
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
-    assert video_task["status"] == "ready_to_generate"
+    assert video_task["status"] == "waiting_dependency"
+    assert video_task["current_artifact"] is None
+    script_approval = await client.post(
+        f"/api/v1/courses/{course_id}/tasks/video_script/approve",
+        headers=auth_headers,
+    )
+    assert script_approval.status_code == 200, script_approval.text
+    project = await wait_for_project(
+        client, auth_headers, course_id,
+        lambda item: next(
+            task for task in item["tasks"] if task["task_type"] == "video_generation"
+        )["status"] == "ready_to_generate",
+    )
+    video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
     assert video_task["current_artifact"] is None
     assert project["quality"]["score"] is not None
     assert project["event_cursor"] > 0
@@ -131,12 +164,12 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         auth_headers,
         course["id"],
         lambda item: all(
-            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+            task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
             for task in item["tasks"]
         ),
     )
     assert all(
-        task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
+        task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
         for task in project["tasks"]
     ), project
     sent = await client.post(
@@ -163,22 +196,11 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
     )
     statuses = {task["task_type"]: task["status"] for task in project["tasks"]}
     assert statuses["ppt"] == "review"
-    assert statuses["video_script"] == "stale"
-    assert statuses["verbatim"] == "stale"
-
-    synced = await client.post(
-        f"/api/v1/courses/{course['id']}/tasks/video_script/runs",
-        headers=auth_headers,
-        json={"action": "sync_dependencies"},
-    )
-    assert synced.status_code == 202
-    project = await wait_for_project(
-        client,
-        auth_headers,
-        course["id"],
-        lambda item: next(task for task in item["tasks"] if task["task_type"] == "video_script")["current_artifact"]["version"] == 2,
-    )
-    assert next(task for task in project["tasks"] if task["task_type"] == "verbatim")["status"] == "stale"
+    # Seedance V3 is based on the lesson plan, not PPT. Editing PPT must not
+    # invalidate the native video script, generated video, or scene transcript.
+    assert statuses["video_script"] == "review"
+    assert statuses["video_generation"] == "waiting_dependency"
+    assert statuses["verbatim"] == "review"
 
     from sqlalchemy import select
 

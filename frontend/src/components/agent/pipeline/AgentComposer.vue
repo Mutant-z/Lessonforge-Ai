@@ -83,6 +83,13 @@ const defaultQuickPromptsByTask: Record<string, string[]> = {
     '调整习题难度梯度',
     '补充变式训练与拓展思考',
   ],
+  exercise: [
+    '调整题目难度梯度',
+    '优化解析与评分点',
+    '补充迁移挑战题',
+    '检查目标覆盖与总分',
+    '增加材料题组与阅读情境',
+  ],
   verbatim: [
     '优化讲授语言表达',
     '增加提问与互动过渡语',
@@ -110,9 +117,10 @@ const effectivePlaceholder = computed(() => {
   const taskNameMap: Record<string, string> = {
     lesson_plan: '教学设计',
     ppt: 'PPT 课件',
-    task_sheet: '课后练习',
+    task_sheet: '学习任务单',
     verbatim: '教师逐字稿',
     video_script: '视频脚本',
+    exercise: '课后练习',
   };
   const taskName = taskNameMap[props.taskType] || '任务内容';
   return `详细描述您希望如何修改${targetText} ${taskName}…`;

@@ -407,7 +407,7 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
         content=payload.content.strip(),
         status="pending",
     )
-    if task_type == "lesson_plan" and any((
+    if task_type in {"lesson_plan", "exercise"} and any((
         payload.selected_section_ids, payload.active_section_id, payload.mode != "auto",
     )):
         message.metadata_json = {

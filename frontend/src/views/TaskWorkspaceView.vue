@@ -33,6 +33,7 @@ import LessonPlanWorkbench from '../components/agent/pipeline/LessonPlanWorkbenc
 import VideoScriptWorkbench from '../components/agent/pipeline/VideoScriptWorkbench.vue';
 import TaskSheetWorkbench from '../components/agent/pipeline/TaskSheetWorkbench.vue';
 import VerbatimWorkbench from '../components/agent/pipeline/VerbatimWorkbench.vue';
+import ExerciseWorkbench from '../components/agent/pipeline/ExerciseWorkbench.vue';
 import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
 import { isWholeVideoGenerationIntent } from '../utils/videoGenerationIntent';
 
@@ -702,6 +703,12 @@ onUnmounted(() => {
     />
     <VerbatimWorkbench
       v-else-if="taskType === 'verbatim' && task && task.task_type === taskType"
+      :course-id="courseId"
+      :task-type="taskType"
+      @open-version-drawer="loadVersions"
+    />
+    <ExerciseWorkbench
+      v-else-if="taskType === 'exercise' && task && task.task_type === taskType"
       :course-id="courseId"
       :task-type="taskType"
       @open-version-drawer="loadVersions"

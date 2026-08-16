@@ -263,6 +263,7 @@ async def run_video_script_pipeline(db, course, task, run: GenerationRun, bluepr
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
         config.context_window_tokens if config else None,
+    provider=provider,
     )
     locks: list[ArtifactLock] = []
     if source:

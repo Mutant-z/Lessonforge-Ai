@@ -1107,7 +1107,7 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         schema = VerbatimContentV2
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None, run=run,
+        config.context_window_tokens if config else None, run=run, provider=provider,
     )
     if isinstance(provider, MockProvider):
         value = mock
@@ -1153,7 +1153,7 @@ async def _generate_revision(db, course: CourseProject, task: CourseTask, run: G
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None, run=run,
+        config.context_window_tokens if config else None, run=run, provider=provider,
     )
     version = source.version + 1
     if isinstance(provider, MockProvider):
@@ -1242,7 +1242,7 @@ async def _generate_context_sync(
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None, run=run,
+        config.context_window_tokens if config else None, run=run, provider=provider,
     )
     schema = TASK_SCHEMAS[task.task_type]
     locks = list(await db.scalars(select(ArtifactLock).where(ArtifactLock.artifact_id == source.id)))
@@ -1646,10 +1646,13 @@ async def execute_task_run(run_id: str):
             use_verbatim_pipeline = (
                 task.task_type == "verbatim" and get_settings().verbatim_agent_runtime_enabled
             )
-            if task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline or use_verbatim_pipeline:
+            use_exercise_pipeline = (
+                task.task_type == "exercise" and get_settings().exercise_agent_runtime_enabled
+            )
+            if task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline or use_verbatim_pipeline or use_exercise_pipeline:
                 # PPT：多 Agent 流水线（多次 LLM 调用 + 工具调用 + QA 修订闭环）
-                # 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2：动态工具化流水线（意图识别 +
-                # 工具修改候选稿 + QA 返修 + 流式时间线）
+                # 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2 / 课后练习 V2：
+                # 动态工具化流水线（意图识别 + 工具修改候选稿 + QA 返修 + 流式时间线）
                 if task.task_type == "ppt":
                     from app.services.ppt_pipeline_service import run_ppt_pipeline
 
@@ -1666,6 +1669,10 @@ async def execute_task_run(run_id: str):
                     from app.services.verbatim_pipeline_service import run_verbatim_pipeline
 
                     pipeline_runner = run_verbatim_pipeline(db, course, task, run, blueprint)
+                elif use_exercise_pipeline:
+                    from app.services.exercise_pipeline_service import run_exercise_pipeline
+
+                    pipeline_runner = run_exercise_pipeline(db, course, task, run, blueprint)
                 else:
                     from app.services.task_sheet_pipeline_service import run_task_sheet_pipeline
 
@@ -1743,7 +1750,7 @@ async def execute_task_run(run_id: str):
                 elapsed_ms=generation_elapsed,
             )
 
-            if (task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline) and skip_publish:
+            if (task.task_type == "ppt" or use_lesson_plan_pipeline or use_task_sheet_pipeline or use_video_script_pipeline or use_verbatim_pipeline or use_exercise_pipeline) and skip_publish:
                 # A safe no-op is a successful request resolution, not a new
                 # domain version. Keep the official Artifact pointer and close
                 # the run with an explicit no_change terminal result.
@@ -1776,6 +1783,9 @@ async def execute_task_run(run_id: str):
                 elif use_verbatim_pipeline:
                     from app.services.verbatim_pipeline_service import complete_verbatim_pipeline_after_publish
                     complete = complete_verbatim_pipeline_after_publish
+                elif use_exercise_pipeline:
+                    from app.services.exercise_pipeline_service import complete_exercise_pipeline_after_publish
+                    complete = complete_exercise_pipeline_after_publish
                 else:
                     from app.services.task_sheet_pipeline_service import complete_task_sheet_pipeline_after_publish
                     complete = complete_task_sheet_pipeline_after_publish
@@ -1823,7 +1833,9 @@ async def execute_task_run(run_id: str):
                 else:
                     trusted_theme = (source.content_json or {}).get("theme") if source else content.get("theme")
                 content = {**content, "theme": resolve_ppt_template(trusted_theme)["id"]}
-            if task.task_type == "exercise":
+            if task.task_type == "exercise" and not use_exercise_pipeline:
+                # 旧路径（开关关闭）：视觉处理 + 降级在 pipeline 外后置执行；
+                # agentic 流水线路径的视觉决策/降级已在 pipeline 内完成。
                 content, _, pipeline_notes = await process_exercise_visuals(db, course, run, content)
                 content, degraded_notes = degrade_unreviewed_visuals(content)
                 visual_notes = [*pipeline_notes, *degraded_notes]
@@ -1865,7 +1877,8 @@ async def execute_task_run(run_id: str):
                 blocking = [item for item in video_issues if item["severity"] in {"critical", "major"}]
                 if blocking:
                     raise TaskValidationError(f"视频脚本校验未通过：{blocking[0]['description']}")
-            if task.task_type == "exercise":
+            if task.task_type == "exercise" and not use_exercise_pipeline:
+                # 旧路径（开关关闭）：后置规则门禁 + LLM 复核修复（只修一次）。
                 task_sheet_artifact = await _latest_artifact(db, course.id, "task_sheet")
                 exercise_issues = validate_exercise(
                     CourseBlueprintSchema.model_validate(blueprint.content_json),
@@ -1923,13 +1936,14 @@ async def execute_task_run(run_id: str):
 
             reply_id = None
             streamed_reply = None
-            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2 的对话气泡生命周期由
-            # pipeline emitter 拥有（agent_message_*），这里跳过 _stream_verified_reply，
-            # 避免创建第二条 assistant 消息。
+            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2 / 课后练习 V2 的
+            # 对话气泡生命周期由 pipeline emitter 拥有（agent_message_*），这里跳过
+            # _stream_verified_reply，避免创建第二条 assistant 消息。
             if user_message and revision and provider and (
                 task.task_type not in {"ppt", "lesson_plan", "video_script", "verbatim"}
                 and not use_task_sheet_pipeline
                 and not use_verbatim_pipeline
+                and not use_exercise_pipeline
             ):
                 current_phase = "replying"
                 await _publish_activity(run_id, "replying", 88)
@@ -2023,6 +2037,10 @@ async def execute_task_run(run_id: str):
                 await db.commit()
                 from app.services.verbatim_pipeline_service import complete_verbatim_pipeline_after_publish
                 await complete_verbatim_pipeline_after_publish(pipeline_runtime, artifact.id)
+            if task.task_type == "exercise" and use_exercise_pipeline:
+                await db.commit()
+                from app.services.exercise_pipeline_service import complete_exercise_pipeline_after_publish
+                await complete_exercise_pipeline_after_publish(pipeline_runtime, artifact.id)
             final_status = "review" if task.current_agent_profile_id == profile.id else "stale"
             task.status = final_status
             task.progress = 100
@@ -2033,12 +2051,13 @@ async def execute_task_run(run_id: str):
             run.progress = 100
             run.finished_at = utcnow()
 
-            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2：assistant 消息已由
-            # pipeline emitter 完成；跳过 reply 处理（reply_id 为空，若不跳过会 raise）。
+            # PPT / 教学设计 V2 / 任务单 V3 / 视频脚本 V4 / 逐字稿 V2 / 课后练习 V2：
+            # assistant 消息已由 pipeline emitter 完成；跳过 reply 处理（reply_id 为空，若不跳过会 raise）。
             if user_message and revision and (
                 task.task_type not in {"ppt", "lesson_plan", "video_script", "verbatim"}
                 and not use_task_sheet_pipeline
                 and not use_verbatim_pipeline
+                and not use_exercise_pipeline
             ):
                 stored_user_message = await db.get(AgentMessage, user_message.id)
                 if stored_user_message:

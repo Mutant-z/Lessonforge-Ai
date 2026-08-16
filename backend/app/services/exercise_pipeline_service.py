@@ -1,12 +1,12 @@
-"""学习任务单 Agent V3 流水线服务：把 task_sheet 任务运行分派进动态工具化流水线。
+"""课后练习 Agent V2 流水线服务：把 exercise 任务运行分派进动态工具化流水线。
 
-- initial → 全链生成（上下文调研 → 内容 → QA → 终稿）
+- initial → 全链生成（上下文调研 → 架构 → 题目设计 → 评分 → 视觉 → 质询 → 终稿）
 - message → 意图识别 → 计划 → 工具修改内存候选稿 → QA → 返修 → 发布
 - sync_context → 上下文同步（保留源内容，同步最新项目上下文）
 
-result_status 语义与 PPT / lesson_plan 对齐：applied / no_change / rejected / needs_confirmation。
+result_status 语义与 PPT / task_sheet 对齐：applied / no_change / rejected / needs_confirmation。
 - no_change / rejected / needs_confirmation → skip_publish（不创建正式新版本，原版本保持不变）
-- applied → 创建 V3 Artifact 版本
+- applied → 创建 V2 Artifact 版本
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app.agent.agents.task_sheet.runtime import TaskSheetAgentRuntime
+from app.agent.agents.exercise.runtime import ExerciseAgentRuntime
 from app.agent.artifacts import PipelineArtifactManager
 from app.agent.context import ContextState
 from app.agent.core.loop import PipelinePaused
@@ -26,8 +26,7 @@ from app.agent.registry import ToolContext
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models.entities import AgentMessage, Artifact, ArtifactLock, GenerationRun, PipelineRun
-from app.schemas.artifact import AgentArtifactRevisionPayload
-from app.schemas.task_sheet import TASK_SHEET_V3, task_sheet_v3_to_markdown
+from app.schemas.artifact import AgentArtifactRevisionPayload, ExerciseContent
 from app.services.ppt_pipeline_service import (
     PAUSE_EVENTS, PipelineRunResult, _get_or_create_pipeline_run, _latest_artifact,
 )
@@ -35,28 +34,51 @@ from app.services.project_knowledge_service import build_project_knowledge_conte
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PIPELINE_TYPE = "task_sheet_agent_pipeline"
+DEFAULT_PIPELINE_TYPE = "exercise_agent_pipeline"
+EXERCISE_RUNTIME_VERSION = "exercise-count-contract-v2"
+
+
+def _exercise_checkpoint_resume(checkpoint: dict | None) -> tuple[int, bool]:
+    """Return the safe resume step for an exercise runtime.
+
+    Exercise checkpoints currently persist orchestration progress, but not the
+    in-memory ``ExerciseBuilder`` candidate.  Reusing ``step_index`` after a
+    process restart can therefore skip mutations that only existed in memory.
+    Until the candidate itself is checkpointed, restarting from the formal
+    source is the only state-consistent resume strategy.
+
+    The boolean tells the runtime to expose a restart event for observability.
+    Human-confirmation metadata remains available directly on ``PipelineRun``
+    and is restored separately by ``ExerciseAgentRuntime``.
+    """
+    raw = dict(checkpoint or {})
+    had_progress = bool(
+        int(raw.get("step_index", 0) or 0)
+        or raw.get("paused_agent")
+        or raw.get("agents_done")
+    )
+    return 0, had_progress
 
 
 def _workspace_root(course_id: str, generation_run_id: str) -> Path:
-    root = Path(get_settings().storage_root) / "generated" / course_id / "task_sheet_pipeline" / generation_run_id
+    root = Path(get_settings().storage_root) / "generated" / course_id / "exercise_pipeline" / generation_run_id
     root.mkdir(parents=True, exist_ok=True)
     for sub in ("analysis", "content", "plans", "assets", "drafts", "qa", "output"):
         (root / sub).mkdir(exist_ok=True)
     return root
 
 
-def _lesson_plan_raw(knowledge_context: dict) -> dict | None:
-    raw = (knowledge_context or {}).get("sibling_artifacts", {}).get("lesson_plan")
+def _task_sheet_raw(knowledge_context: dict) -> dict | None:
+    raw = (knowledge_context or {}).get("sibling_artifacts", {}).get("task_sheet")
     if raw is None:
-        raw = (knowledge_context or {}).get("hard_dependencies", {}).get("lesson_plan")
+        raw = (knowledge_context or {}).get("hard_dependencies", {}).get("task_sheet")
     if isinstance(raw, dict):
         raw = raw.get("content") or raw
     return raw if isinstance(raw, dict) else None
 
 
 async def _build_runtime(db, course, task, generation_run, blueprint, source, profile, provider, config,
-                         knowledge_context, source_versions, locks, user_message) -> TaskSheetAgentRuntime:
+                         knowledge_context, source_versions, locks, user_message) -> ExerciseAgentRuntime:
     pipeline_run = await _get_or_create_pipeline_run(db, generation_run, max_rounds=2)
     pipeline_run.pipeline_type = DEFAULT_PIPELINE_TYPE
     await db.commit()
@@ -73,8 +95,8 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         upstream=knowledge_context.get("upstream") or knowledge_context.get("sibling_artifacts") or {},
     )
     artifacts = PipelineArtifactManager(pipeline_run, workspace)
-    emitter = await PipelineEventEmitter.for_run(generation_run, pipeline_run, task_type="task_sheet")
-    runtime = TaskSheetAgentRuntime(
+    emitter = await PipelineEventEmitter.for_run(generation_run, pipeline_run, task_type="exercise")
+    runtime = ExerciseAgentRuntime(
         course=course, task=task, blueprint=blueprint, generation_run=generation_run,
         pipeline_run=pipeline_run, profile=profile, provider=provider, config=config,
         knowledge_context=knowledge_context, source_versions=source_versions,
@@ -91,13 +113,11 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
     )
     runtime.tool_context = tool_context
     checkpoint = pipeline_run.checkpoint_json or {}
-    if checkpoint.get("step_index"):
-        runtime.context.restore(checkpoint)
-        runtime.checkpoint_start = int(checkpoint.get("step_index", 0))
+    runtime.checkpoint_start, runtime.restarted_from_source = _exercise_checkpoint_resume(checkpoint)
     return runtime
 
 
-async def _finish_pipeline(runtime: TaskSheetAgentRuntime, status: str, error: str | None = None, artifact_id: str | None = None):
+async def _finish_pipeline(runtime: ExerciseAgentRuntime, status: str, error: str | None = None, artifact_id: str | None = None):
     async with SessionLocal() as db:
         row = await db.get(PipelineRun, runtime.pipeline_run.id)
         if row:
@@ -107,12 +127,25 @@ async def _finish_pipeline(runtime: TaskSheetAgentRuntime, status: str, error: s
             row.plan_json = {
                 **(row.plan_json or {}),
                 "result_status": getattr(runtime, "result_status", "applied"),
-                "active_intent": getattr(runtime, "active_intent", "TASK_EDIT"),
+                "active_intent": getattr(runtime, "active_intent", "QUESTION_EDIT"),
                 "repair_round": getattr(runtime, "repair_round", 0),
-                # 方案 §3.1：记录实际使用的协议与工具/返修统计
                 "tool_protocol": getattr(runtime, "tool_protocol", "structured"),
                 "protocol_fallbacks": getattr(runtime, "protocol_fallbacks", 0),
-                "tool_call_count": getattr(runtime, "tool_call_count", 0),
+                "tool_call_count": sum(
+                    int(item.get("tool_calls", 0))
+                    for item in getattr(runtime, "agent_stats", {}).values()
+                ),
+                "decision_rounds": sum(
+                    int(item.get("decision_rounds", 0))
+                    for item in getattr(runtime, "agent_stats", {}).values()
+                ),
+                "llm_calls": int(getattr(runtime, "token_usage", {}).get("llm_calls", 0)),
+                "before_type_counts": dict(getattr(runtime, "before_type_counts", {}) or {}),
+                "after_type_counts": dict(getattr(runtime, "after_type_counts", {}) or {}),
+                "requested_delta": int(getattr(runtime, "requested_delta", 0) or 0),
+                "actual_delta": int(getattr(runtime, "actual_delta", 0) or 0),
+                "runtime_version": EXERCISE_RUNTIME_VERSION,
+                "restarted_from_source": bool(getattr(runtime, "restarted_from_source", False)),
             }
             if status in {"completed", "failed", "cancelled"}:
                 from app.models.entities import now
@@ -141,7 +174,7 @@ async def _finish_pipeline(runtime: TaskSheetAgentRuntime, status: str, error: s
             await runtime.emitter.agent_message_failed(message="")
 
 
-async def _pause_at_safe_boundary(runtime: TaskSheetAgentRuntime, boundary: str) -> None:
+async def _pause_at_safe_boundary(runtime: ExerciseAgentRuntime, boundary: str) -> None:
     from app.agent.core.loop import _persist_paused
 
     if not runtime.pause_requested():
@@ -151,7 +184,7 @@ async def _pause_at_safe_boundary(runtime: TaskSheetAgentRuntime, boundary: str)
 
 
 def _section_scope(message: AgentMessage, source: Artifact | None) -> list[str]:
-    """把教师指令中的章节范围转换为稳定章节 ID。"""
+    """把教师指令中的分区范围转换为稳定分区 ID。"""
     metadata = dict(getattr(message, "metadata_json", None) or {})
     structured = list(metadata.get("selected_section_ids") or metadata.get("target_section_ids") or [])
     if structured:
@@ -167,26 +200,25 @@ def _section_scope(message: AgentMessage, source: Artifact | None) -> list[str]:
     return []
 
 
-async def _run_pipeline_full(runtime: TaskSheetAgentRuntime) -> dict:
+async def _run_pipeline_full(runtime: ExerciseAgentRuntime) -> dict:
     await _pause_at_safe_boundary(runtime, "orchestrator")
     await runtime.run()
     await _pause_at_safe_boundary(runtime, "finalize")
     content = dict(runtime.draft_content)
     section_count = len((content or {}).get("sections", []))
     runtime.dialogue_summary = (
-        f"任务单已生成完成，共 {section_count} 个章节。已完成目标、任务、学习证据与评价的"
-        "一致设计，你可以在右侧预览，或继续输入指令调整目录与内容。"
+        f"课后练习已生成完成，共 {section_count} 个分区。已完成目标、题目与学习证据的"
+        "一致设计，并交付学生卷与教师卷，你可以在右侧预览，或继续输入指令调整内容。"
     )
     return content
 
 
-async def _run_pipeline_message(runtime: TaskSheetAgentRuntime, source: Artifact, message: AgentMessage) -> tuple[dict, AgentArtifactRevisionPayload]:
+async def _run_pipeline_message(runtime: ExerciseAgentRuntime, source: Artifact, message: AgentMessage) -> tuple[dict, AgentArtifactRevisionPayload]:
     emitter = runtime.emitter
     runtime.selected_section_ids = _section_scope(message, source)
     if emitter is not None:
         await emitter.agent_status_delta("orchestrator", "正在理解修改范围并创建动态执行计划。\n")
-        await emitter.revision_started(1, runtime.pipeline_run.max_revision_rounds, reason=message.content[:200], target_agents=["orchestrator"])
-        await emitter.emit_domain("repair.started", message="已开始创建任务单新修订版本", payload={
+        await emitter.emit_domain("artifact.revision.preparing", message="已开始创建课后练习新修订版本", payload={
             "revision": source.version + 1, "selected_section_ids": runtime.selected_section_ids,
         })
     await runtime.run()
@@ -195,18 +227,21 @@ async def _run_pipeline_message(runtime: TaskSheetAgentRuntime, source: Artifact
     if runtime.result_status in {"no_change", "rejected", "needs_confirmation"}:
         content = dict(source_content)
         if runtime.result_status == "rejected":
-            assistant_reply = "本轮修订未通过任务单质询门禁，未创建新版本；原任务单保持不变。"
+            assistant_reply = "本轮修订未通过练习质询门禁，未创建新版本；原课后练习保持不变。"
         elif runtime.result_status == "no_change":
-            assistant_reply = "当前任务单已符合要求，本轮未创建空转版本；原任务单保持不变。"
+            assistant_reply = runtime.dialogue_summary or "当前课后练习已符合要求，本轮未创建空转版本；原课后练习保持不变。"
         else:
             assistant_reply = runtime.dialogue_summary or "修改范围或目标存在歧义，请确认后继续；本轮未创建新版本。"
     else:
         content = dict(runtime.draft_content)
-        assistant_reply = f"已根据你的要求创建任务单 V{source.version + 1}；原版本仍可在版本历史中恢复。"
+        assistant_reply = f"已根据你的要求创建课后练习 V{source.version + 1}；原版本仍可在版本历史中恢复。"
     runtime.dialogue_summary = assistant_reply
     if emitter is not None:
-        await emitter.revision_completed(1, applied_changes=[f"教师指令：{message.content[:60]}"])
-        await emitter.emit_domain("repair.completed", message="任务单修订已完成", payload={"revision": source.version + 1})
+        await emitter.emit_domain(
+            "artifact.revision.completed",
+            message="课后练习修订已完成",
+            payload={"revision": source.version + 1, "result_status": runtime.result_status},
+        )
         await emitter.emit_domain(
             "polish.result",
             message=assistant_reply,
@@ -220,7 +255,7 @@ async def _run_pipeline_message(runtime: TaskSheetAgentRuntime, source: Artifact
     return content, AgentArtifactRevisionPayload(content_json=content, assistant_reply=assistant_reply)
 
 
-async def _run_pipeline_sync(runtime: TaskSheetAgentRuntime, source: Artifact) -> dict:
+async def _run_pipeline_sync(runtime: ExerciseAgentRuntime, source: Artifact) -> dict:
     await _pause_at_safe_boundary(runtime, "context_sync")
     await runtime.run()
     await _pause_at_safe_boundary(runtime, "context_sync")
@@ -229,11 +264,11 @@ async def _run_pipeline_sync(runtime: TaskSheetAgentRuntime, source: Artifact) -
         runtime.dialogue_summary = "已同步最新项目上下文，文件内容保持不变。"
     else:
         content = dict(runtime.draft_content)
-        runtime.dialogue_summary = "已依据最新项目上下文更新任务单候选稿。"
+        runtime.dialogue_summary = "已依据最新项目上下文更新课后练习候选稿。"
     return content
 
 
-async def complete_task_sheet_pipeline_after_publish(runtime: TaskSheetAgentRuntime | None, artifact_id: str) -> None:
+async def complete_exercise_pipeline_after_publish(runtime: ExerciseAgentRuntime | None, artifact_id: str) -> None:
     """Publish the sole success terminal event after the domain Artifact commit."""
     if runtime is None:
         return
@@ -241,22 +276,21 @@ async def complete_task_sheet_pipeline_after_publish(runtime: TaskSheetAgentRunt
         await _finish_pipeline(runtime, "completed", artifact_id=artifact_id)
     except Exception:  # The already committed official Artifact remains authoritative.
         logger.exception(
-            "task_sheet pipeline terminal event failed after Artifact commit",
+            "exercise pipeline terminal event failed after Artifact commit",
             extra={"generation_run_id": runtime.generation_run.id, "artifact_id": artifact_id},
         )
 
 
-async def run_task_sheet_pipeline(db, course, task, run: GenerationRun, blueprint) -> PipelineRunResult:
-    """执行 task_sheet 任务运行（动态工具化流水线），返回与下游 save 块兼容的结果。"""
+async def run_exercise_pipeline(db, course, task, run: GenerationRun, blueprint) -> PipelineRunResult:
+    """执行 exercise 任务运行（动态工具化流水线），返回与下游 save 块兼容的结果。"""
     from app.services.course_task_service import _profile_provider
     from app.services.model_config_service import resolved_model_name
 
-    source = await _latest_artifact(db, course.id, "task_sheet")
+    source = await _latest_artifact(db, course.id, "exercise")
     profile, provider, config = await _profile_provider(db, course, task)
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
-        config.context_window_tokens if config else None, run=run,
-    provider=provider,
+        config.context_window_tokens if config else None, run=run, provider=provider,
     )
     locks: list[ArtifactLock] = []
     if source:

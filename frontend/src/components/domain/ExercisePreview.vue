@@ -44,6 +44,8 @@ const difficultyLabels: Record<string, { label: string; class: string }> = {
 function formatMathText(text: string): string {
   if (!text) return '';
   let res = text;
+  // \n 换行转成 <br>，保留 LLM 写入题干的分行意图
+  res = res.replace(/\n/g, '<br>');
   // 识别与高亮常见物理/数学公式符号：如 G = 4.0 N, F拉 = 2.5 N, F上 = 4 N, F下 = 10 N, F浮, p=ρgh, Δh, ρ_液 g V_排 等
   res = res.replace(
     /\b(G\s*=\s*\d+(?:\.\d+)?\s*[Nn]|F\s*拉\s*=\s*\d+(?:\.\d+)?\s*[Nn]|G\s*桶\s*=\s*\d+(?:\.\d+)?\s*[Nn]|G\s*总\s*=\s*\d+(?:\.\d+)?\s*[Nn]|G\s*排\s*=\s*\d+(?:\.\d+)?\s*[Nn]|F\s*上\s*=\s*\d+(?:\.\d+)?\s*[Nn]|F\s*下\s*=\s*\d+(?:\.\d+)?\s*[Nn]|F\s*浮|F\s*上|F\s*下|G\s*排|G\s*物|G\s*桶|G\s*总|F\s*拉|p\s*=\s*ρgh|Δh|ρ|g|h|V\s*排)\b/g,
@@ -267,6 +269,11 @@ const questions = computed(() => props.content.sections.flatMap(section => secti
   block => block.kind === 'question_group' ? block.sub_questions : [block],
 )));
 
+const questionTypeCounts = computed(() => questions.value.reduce<Record<string, number>>((counts, item) => {
+  counts[item.question_type] = (counts[item.question_type] || 0) + 1;
+  return counts;
+}, {}));
+
 const coveredObjectives = computed(() => new Set(questions.value.flatMap(item => item.objective_ids)).size);
 
 watchEffect(async () => {
@@ -381,6 +388,9 @@ function handlePrint() {
           <div class="metric-detail">
             <span class="metric-label">题量总数</span>
             <span class="metric-val">{{ questions.length }} 道大题</span>
+            <span class="metric-subcount">
+              单选 {{ questionTypeCounts.single_choice || 0 }} · 多选 {{ questionTypeCounts.multiple_choice || 0 }}
+            </span>
           </div>
         </div>
         <div class="metric-card">
@@ -709,6 +719,14 @@ function handlePrint() {
   font-weight: 900;
   color: #f8fafc;
   margin-top: 1px;
+}
+
+.metric-card .metric-subcount {
+  margin-top: 2px;
+  color: #c7d2fe;
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .metric-card .metric-val.highlight {

@@ -264,4 +264,59 @@ export const pipelineApi = {
     );
     return data;
   },
+  /** 课后练习运行创建（走通用 messages 端点，携带分区作用域与显式模式）。 */
+  async createExerciseRun(
+    courseId: string,
+    content: string,
+    selectedSectionIds: string[] = [],
+    mode: LessonPlanMode = 'auto',
+    activeSectionId?: string,
+  ): Promise<{ message_id: string; run_id: string; task_id: string; status: 'queued' }> {
+    const { data } = await api.post(`/courses/${courseId}/tasks/exercise/messages`, {
+      content,
+      selected_section_ids: selectedSectionIds,
+      mode: mode ?? 'auto',
+      ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
+    });
+    return data;
+  },
+  /** 课后练习运行中指令排队（安全边界合并到当前 Run）。 */
+  async enqueueExerciseInstruction(
+    courseId: string,
+    runId: string,
+    content: string,
+    selectedSectionIds: string[] = [],
+    mode: LessonPlanMode = 'auto',
+    resumeIfPaused = false,
+  ): Promise<{
+    instruction_id: string;
+    message_id: string;
+    message: { id: string; role: 'user'; content: string; run_id: string; status: 'completed' };
+    status: string;
+  }> {
+    const { data } = await api.post(
+      `/courses/${courseId}/tasks/exercise/runs/${runId}/instructions`,
+      {
+        content,
+        selected_section_ids: selectedSectionIds,
+        mode: mode ?? 'auto',
+        resume_if_paused: resumeIfPaused,
+      },
+    );
+    return data;
+  },
+  /** 课后练习人工确认（同一 GenerationRun 从 checkpoint 恢复，复用 task_sheet 同构端点）。 */
+  async exerciseHumanResponse(
+    courseId: string,
+    runId: string,
+    requestId: string,
+    choice: string,
+    responseData: PPTHumanResponseData = {},
+  ): Promise<AgentRunHumanResponseResult> {
+    const { data } = await api.post<AgentRunHumanResponseResult>(
+      `/courses/${courseId}/tasks/exercise/runs/${runId}/human-responses/${requestId}`,
+      { choice, data: responseData },
+    );
+    return data;
+  },
 };

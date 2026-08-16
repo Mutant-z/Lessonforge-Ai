@@ -272,13 +272,16 @@ async def resolve_human_response(
     row.status = "resolved"
     row.resolved_at = datetime.now(timezone.utc)
     row.response_json = {**payload.data, "choice": payload.choice, "resolution": "confirmed"}
-    # 颁发一次性确认令牌（同一 Run 的 runtime 校验）。
+    # 颁发一次性确认令牌（同一 Run 的 runtime 校验）。request_type 沿用原
+    # checkpoint（task_sheet_confirmation / exercise_confirmation 等），
+    # 使该端点可复用于任一按同构 checkpoint 恢复的流水线。
     token = f"confirm-{request_id}"
+    pending = (pipeline.checkpoint_json or {}).get("pending_confirmation") or {}
     pipeline.checkpoint_json = {
         **(pipeline.checkpoint_json or {}),
         "pending_confirmation": {
             "request_id": request_id,
-            "request_type": "task_sheet_confirmation",
+            "request_type": pending.get("request_type") or "task_sheet_confirmation",
             "choice": payload.choice,
             "token": token,
         },

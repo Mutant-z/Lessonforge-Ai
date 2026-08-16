@@ -390,6 +390,7 @@ async def run_lesson_plan_pipeline(db, course, task, run: GenerationRun, bluepri
     knowledge_context, source_versions = await build_project_knowledge_context(
         db, task, blueprint.content_json, blueprint.version, profile.context_json,
         config.context_window_tokens if config else None, run=run,
+    provider=provider,
     )
     locks: list[ArtifactLock] = []
     if source:

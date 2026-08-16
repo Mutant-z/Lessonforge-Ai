@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # 教师逐字稿 Agent V2 动态工具化流水线开关（意图识别 + 工具修改候选稿 + QA 返修 +
     # 流式可视化）；关闭时回退旧的单次确定性派生路径。默认开启。
     verbatim_agent_runtime_enabled: bool = True
+    # 课后练习 Agent V2 动态工具化流水线开关（意图识别 + 多角色 LLM 工具循环 +
+    # LLM 语义质询 + QA 返修）；关闭时回退旧单次生成 + 后置质检路径。默认开启。
+    exercise_agent_runtime_enabled: bool = True
     ffmpeg_binary: str = ""
     ffprobe_binary: str = ""
     video_max_mb: int = 500

@@ -508,6 +508,45 @@ export const useProjectStore = defineStore('project', {
         throw cause;
       }
     },
+    /** 课后练习 V2：创建带分区作用域的 message 运行（流式执行时间线）。 */
+    async createExerciseRun(
+      courseId: string,
+      content: string,
+      selectedSectionIds: string[] = [],
+      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+    ) {
+      const previousPipelineStatus = this.pipelineStatus;
+      const previousPipelineEvents = this.pipelineEvents;
+      const local: ProjectAgentMessage = {
+        id: `local-${crypto.randomUUID()}`,
+        role: 'user',
+        content,
+        status: 'pending',
+        created_at: new Date().toISOString(),
+      };
+      if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
+      this.pipelineEvents = [];
+      this.pipelineStatus = 'queued';
+      if (this.currentTask) this.currentTask.status = 'queued';
+      try {
+        const data = await pipelineApi.createExerciseRun(courseId, content, selectedSectionIds, mode);
+        Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
+        this.pipelineStatus = 'queued';
+        if (this.currentTask) {
+          this.currentTask.status = 'queued';
+          this.currentTask.active_run_id = data.run_id;
+          this.currentTask.error = null;
+          this.replaceTask(this.currentTask);
+        }
+        this.startActiveTaskPolling(courseId, 'exercise');
+        return data;
+      } catch (cause) {
+        local.status = 'failed';
+        this.pipelineEvents = previousPipelineEvents;
+        this.pipelineStatus = previousPipelineStatus;
+        throw cause;
+      }
+    },
     /** 教师逐字稿 V2：创建带章节作用域的 message 运行（流式执行时间线）。 */
     async createVerbatimRun(
       courseId: string,

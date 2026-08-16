@@ -14,6 +14,7 @@ missing_optional_sources 等字段，并保持 sibling_artifacts / hard_dependen
 import json
 from typing import Any
 
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from app.models.entities import (
@@ -104,6 +105,125 @@ def _bounded(value: dict[str, Any], limit: int) -> dict[str, Any]:
     if len(serialized) <= limit:
         return compacted
     return {"truncated": True, "content_excerpt": serialized[: max(0, limit - 80)]}
+
+
+# ---------------------------------------------------------------------------
+# 兄弟产物 LLM 语义摘要（替代字符截断 _bounded）
+# ---------------------------------------------------------------------------
+
+SUMMARY_SYSTEM = (
+    "你是 LessonForge AI 的项目记忆摘要器。把兄弟 Agent 的结构化产物压缩为语义摘要，"
+    "供其他内容 Agent 在生成时参考。只提取与教学设计和测评相关的事实，不推断、不补充"
+    "原文没有的信息，不展示隐藏推理，只返回符合 Schema 的 JSON。"
+)
+
+SUMMARY_ARTIFACT_HINTS = {
+    "lesson_plan": "教学设计：抽取核心教学目标、教学环节（含时长）、学生活动与评价证据。",
+    "ppt": "PPT 页面规划：抽取页面顺序、页面目的与关键结论。",
+    "task_sheet": "学习任务单：抽取任务清单（标题/动作/产出）、记录表与自评；不要整篇复制任务步骤。",
+    "exercise": "课后练习：抽取三区结构、计分题清单（题型/分值/目标覆盖）与答案要点。",
+    "video_script": "视频脚本：抽取章节结构、分镜时长与口播要点。",
+    "verbatim": "教师逐字稿：抽取章节与口播要点。",
+}
+
+
+class ArtifactSemanticSummary(BaseModel):
+    """LLM 语义摘要的强类型产物（provider.structured 的 schema）。"""
+
+    summary: str = Field(min_length=1, max_length=2000, description="整体语义摘要（保留关键事实与编号）")
+    key_points: list[str] = Field(default_factory=list, max_length=12, description="关键要点列表")
+    alignment_notes: list[str] = Field(default_factory=list, max_length=6, description="与下游生成相关的对齐提示")
+    must_keep_refs: list[str] = Field(default_factory=list, max_length=30, description="不得遗漏或改变的目标/知识点/环节/题目 ID")
+
+
+def _is_mock(provider) -> bool:
+    if provider is None:
+        return True
+    return provider.__class__.__name__ == "MockProvider"
+
+
+async def _llm_summarize_sibling(
+    provider,
+    artifact_type: str,
+    content: dict[str, Any],
+    allowance: int,
+) -> dict[str, Any]:
+    """用 LLM 把兄弟产物压缩为语义摘要；Mock/失败回退 _bounded 截断。"""
+    selected = _select_fields(artifact_type, content)
+    compacted = _bounded(selected, allowance)
+    if _is_mock(provider):
+        return compacted
+    prompt = (
+        f"产物类型：{artifact_type}\n"
+        f"摘要提示：{SUMMARY_ARTIFACT_HINTS.get(artifact_type, '通用结构化产物')}\n"
+        f"字符预算（约等于 {max(512, min(3000, allowance // 2))} 字符）：请保证摘要不超预算。\n"
+        f"原始结构化内容（JSON）：\n{json.dumps(selected, ensure_ascii=False, default=str)[:16000]}\n"
+        "输出 summary / key_points / alignment_notes / must_keep_refs。"
+    )
+    try:
+        result = await provider.structured(SUMMARY_SYSTEM, prompt, ArtifactSemanticSummary)
+        return {
+            "semantic_summary": True,
+            "summary": result.summary,
+            "key_points": list(result.key_points),
+            "alignment_notes": list(result.alignment_notes),
+            "must_keep_refs": list(result.must_keep_refs),
+        }
+    except Exception:  # noqa: BLE001  摘要失败回退截断，绝不阻塞上下文构建
+        return compacted
+
+
+def _summary_cache_key(artifact_type: str, artifact_version: int, blueprint_version: int) -> str:
+    return f"{artifact_type}:v{artifact_version}:bp{blueprint_version}"
+
+
+async def _load_summary_cache(db, course_id: str, key: str) -> dict[str, Any] | None:
+    item = await db.scalar(select(ProjectMemoryItem).where(
+        ProjectMemoryItem.course_id == course_id,
+        ProjectMemoryItem.source_type == "artifact_summary",
+        ProjectMemoryItem.source_id == key,
+    ))
+    return dict(item.summary_json) if item and item.summary_json else None
+
+
+async def _save_summary_cache(db, course_id: str, key: str, summary: dict[str, Any]) -> None:
+    existing = await db.scalar(select(ProjectMemoryItem).where(
+        ProjectMemoryItem.course_id == course_id,
+        ProjectMemoryItem.source_type == "artifact_summary",
+        ProjectMemoryItem.source_id == key,
+    ))
+    if existing is None:
+        existing = ProjectMemoryItem(
+            course_id=course_id, source_type="artifact_summary", source_id=key,
+        )
+        db.add(existing)
+    existing.summary_json = summary
+    existing.source_version = int(key.split(":v")[1].split(":")[0])
+
+
+async def _summarize_artifact_entry(
+    db,
+    provider,
+    course_id: str,
+    artifact: Artifact,
+    blueprint_version: int,
+    allowance: int,
+) -> dict[str, Any]:
+    """带缓存取兄弟产物摘要：缓存命中跳过 LLM；否则 LLM 摘要并写入缓存。"""
+    artifact_type = artifact.artifact_type
+    key = _summary_cache_key(artifact_type, artifact.version, blueprint_version)
+    cached = await _load_summary_cache(db, course_id, key)
+    if cached is not None:
+        return {"version": artifact.version, "status": artifact.status, "content": cached, "summary_source": "cache"}
+    content = artifact.content_json or {}
+    summary = await _llm_summarize_sibling(provider, artifact_type, content, allowance)
+    if summary.get("semantic_summary"):
+        await _save_summary_cache(db, course_id, key, summary)
+    return {
+        "version": artifact.version, "status": artifact.status,
+        "content": summary,
+        "summary_source": "llm" if summary.get("semantic_summary") else "bounded",
+    }
 
 
 def _reference_conflicts(value: Any, blueprint: dict[str, Any], path: str = "$") -> list[str]:
@@ -444,12 +564,16 @@ async def build_project_knowledge_context(
     profile_context: dict[str, Any],
     context_window_tokens: int | None,
     run=None,
+    provider=None,
 ) -> tuple[dict[str, Any], dict[str, int]]:
     """Build a bounded, course-isolated snapshot of the shared project memory.
 
     保持既有 sibling_artifacts / hard_dependencies / blueprint 形状，供各
     pipeline 与 Agent 读取工具继续使用；新增 memory_revision /
     available_sources / missing_optional_sources / decisions / qa_findings。
+
+    provider 非空且非 Mock 时，兄弟产物用 LLM 语义摘要（带版本缓存）替代字符
+    截断；Mock / LLM 失败 / 无 provider 一律回退 _bounded，绝不阻塞上下文构建。
     """
     declared_window = context_window_tokens or 100_000
     total_budget = max(512, min(24_000, int(declared_window * 0.20)))
@@ -502,8 +626,9 @@ async def build_project_knowledge_context(
         if not artifact:
             continue
         allowance = min(5_000, remaining)
-        selected = _bounded(_select_fields(artifact_type, artifact.content_json or {}), allowance)
-        entry = {"version": artifact.version, "status": artifact.status, "content": selected}
+        entry = await _summarize_artifact_entry(
+            db, provider, task.course_id, artifact, blueprint_version, allowance,
+        )
         # 旧读者（_lesson_plan_raw 等）同时兼容 hard_dependencies 与 sibling_artifacts。
         context["sibling_artifacts"][artifact_type] = entry
         if artifact_type in (task.dependency_types_json or []):
@@ -513,7 +638,7 @@ async def build_project_knowledge_context(
         }
         context["conflicts"].extend(
             f"{artifact_type} V{artifact.version}：{item}"
-            for item in _reference_conflicts(selected, blueprint)
+            for item in _reference_conflicts(artifact.content_json or {}, blueprint)
         )
         source_versions[artifact_type] = artifact.version
         remaining -= len(json.dumps({artifact_type: entry}, ensure_ascii=False))

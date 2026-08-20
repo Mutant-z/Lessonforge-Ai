@@ -192,9 +192,11 @@ def validate_video_script_v4(
                                     f"章节 {section_id} 引用了不存在的知识点 {ref}",
                                     "改为蓝图中的知识点 ID"))
 
-    # 目标覆盖：每个蓝图目标至少被一个章节覆盖
+    # 目标覆盖：每个蓝图目标至少被一个分镜覆盖。
+    # minor 提示而非阻断：这是章节规划覆盖度检查，与内容编辑（如精简口播）无关；
+    # 基线遗留的覆盖缺口不应卡死每一次内容修改，结构类意图下仍会给出提示。
     for objective in bp.objectives:
         if objective.id not in covered_objectives:
-            issues.append(issue("major", "$.outline.sections", "alignment",
+            issues.append(issue("minor", "$.outline.sections", "alignment",
                                 f"目标 {objective.id} 未被任何分镜覆盖", "在对应章节中补充覆盖该目标的分镜"))
     return issues

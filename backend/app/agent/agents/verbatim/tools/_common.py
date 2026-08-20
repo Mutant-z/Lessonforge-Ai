@@ -101,7 +101,7 @@ def _lock_guard(tc: ToolContext, change_paths: list[str]) -> None:
 
 
 def _scope_guard(tc: ToolContext, section_ids: list[str] | None = None) -> None:
-    """检查修改范围是否属于本轮意图。
+    """检查修改范围是否属于本轮意图（支持 seg_01, scene_01 等别名解析）。
 
     intent_plan.target_section_ids 非空时，工具只允许修改这些章节；空（全局意图）不限。
     """
@@ -110,13 +110,27 @@ def _scope_guard(tc: ToolContext, section_ids: list[str] | None = None) -> None:
     if plan is None:
         return
     target_sections = list(getattr(plan, "target_section_ids", None) or [])
-    if target_sections and section_ids:
-        for section_id in section_ids:
-            if section_id not in target_sections:
-                raise ValueError(
-                    f"章节 {section_id} 不属于本轮意图范围（本轮目标章节：{target_sections}），"
-                    "请缩小修改范围或发起新指令"
-                )
+    if not target_sections or not section_ids:
+        return
+    builder = tc.extra.get("builder") if tc.extra else None
+    if builder is None and runtime:
+        builder = getattr(runtime, "builder", None)
+
+    def _normalize(sid: str) -> str:
+        if builder and hasattr(builder, "canonical_section_id"):
+            canon = builder.canonical_section_id(sid)
+            if canon:
+                return canon
+        return sid
+
+    target_canonical = {_normalize(sid) for sid in target_sections if sid}
+    for sid in section_ids:
+        canon_sid = _normalize(sid)
+        if canon_sid not in target_canonical and sid not in target_sections:
+            raise ValueError(
+                f"章节 {sid} 不属于本轮意图范围（本轮目标章节：{target_sections}），"
+                "请缩小修改范围或发起新指令"
+            )
 
 
 def _confirmation_tokens(tc: ToolContext) -> list[str]:

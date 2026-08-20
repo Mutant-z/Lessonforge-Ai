@@ -7,6 +7,7 @@ import hashlib
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, status
 from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 
 from app.core.config import get_settings
 
@@ -22,7 +23,12 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    return password_hasher.verify(password, hashed)
+    try:
+        return password_hasher.verify(password, hashed)
+    except UnknownHashError:
+        # 数据库中的历史脏数据可能不是合法哈希（如测试写入的 "hash"），
+        # 校验失败按密码错误处理，而不是抛 500。
+        return False
 
 
 def _signing_keys() -> list[str]:

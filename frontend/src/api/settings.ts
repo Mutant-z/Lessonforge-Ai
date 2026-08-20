@@ -23,6 +23,9 @@ export const settingsApi = {
   activateModelConfig: (configId: string) =>
     api.post<ModelConfigItem>(`/settings/models/${configId}/activate`).then(r => r.data),
 
+  duplicateModelConfig: (configId: string, data: Pick<ModelConfigPayload, 'model_category' | 'model_purpose'> & { name?: string }) =>
+    api.post<ModelConfigItem>(`/settings/models/${configId}/duplicate`, data).then(r => r.data),
+
   // 删除模型配置
   deleteModelConfig: (configId: string) =>
     api.delete<{ message: string }>(`/settings/models/${configId}`).then(r => r.data),

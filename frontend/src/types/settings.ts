@@ -1,3 +1,6 @@
+export type ModelCategory = 'text' | 'vision' | 'video';
+export type ModelPurpose = 'text_chat' | 'vision_chat' | 'image_generation' | 'video_generation' | 'native_audio_video_generation' | 'speech_generation' | 'speech_recognition' | 'media_composition';
+
 export interface ModelConfigItem {
   id: string;
   name: string;
@@ -10,6 +13,8 @@ export interface ModelConfigItem {
   capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'native_audio_video_generation' | 'speech_generation' | 'speech_recognition' | 'media_composition'>;
   api_mode: string;
   adapter_config: Record<string, unknown>;
+  model_category: ModelCategory;
+  model_purpose: ModelPurpose;
   api_key_configured: boolean;
   api_key_masked: string;
   is_active: boolean;
@@ -29,6 +34,8 @@ export interface ModelConfigPayload {
   capabilities: Array<'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'native_audio_video_generation' | 'speech_generation' | 'speech_recognition' | 'media_composition'>;
   api_mode: string;
   adapter_config: Record<string, unknown>;
+  model_category?: ModelCategory;
+  model_purpose?: ModelPurpose;
   is_active?: boolean;
 }
 
@@ -39,7 +46,7 @@ export interface TestConnectionPayload {
   model_name?: string;
   api_key?: string;
   timeout_seconds?: number;
-  test_capability?: 'text_generation' | 'image_generation' | 'video_generation' | 'speech_generation' | 'speech_recognition';
+  test_capability?: 'text_generation' | 'vision_review' | 'image_generation' | 'video_generation' | 'speech_generation' | 'speech_recognition';
   api_mode?: string;
   adapter_config?: Record<string, unknown>;
 }
@@ -53,6 +60,7 @@ export interface UserPreferencesPayload {
 export interface FullSettingsResponse {
   configs: ModelConfigItem[];
   active_config_id: string | null;
+  active_config_ids?: Record<ModelCategory, string | null>;
   preferences: UserPreferencesPayload;
   // 旧字段兼容
   provider: string;

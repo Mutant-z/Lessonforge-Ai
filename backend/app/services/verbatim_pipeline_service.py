@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 
@@ -75,6 +76,33 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         workspace_root=workspace, pause_event=PAUSE_EVENTS.setdefault(generation_run.id, asyncio.Event()),
         request_metadata=dict(getattr(user_message, "metadata_json", None) or {}),
     )
+    if user_message is not None:
+        recent = list(await db.scalars(
+            select(AgentMessage).where(
+                AgentMessage.course_id == course.id,
+                AgentMessage.task_id == task.id,
+                AgentMessage.module_type == "verbatim",
+            ).order_by(AgentMessage.created_at.desc()).limit(8)
+        ))
+        runtime.dialogue_context = [
+            {"role": row.role, "content": row.content, "metadata": row.metadata_json or {}}
+            for row in reversed(recent)
+            if row.id != user_message.id
+        ]
+        runtime.context.dialogue_context = runtime.dialogue_context
+        pending = next(
+            (item.get("metadata", {}).get("clarification") for item in reversed(runtime.dialogue_context)
+             if item.get("role") == "assistant" and item.get("metadata", {}).get("clarification")),
+            None,
+        )
+        if isinstance(pending, dict):
+            source_id = pending.get("source_artifact_id")
+            source_version = pending.get("source_version")
+            if (not source_id or source_id == getattr(source, "id", None)) and (
+                source_version is None or source_version == getattr(source, "version", None)
+            ):
+                runtime.pending_clarification = pending
+
     tool_context = ToolContext(
         ctx=context, workspace_root=workspace, course=course, task=task,
         generation_run_id=generation_run.id, pipeline_run_id=pipeline_run.id,
@@ -86,8 +114,19 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
     if video_script_artifact:
         runtime.video_script_raw = video_script_artifact.content_json
     checkpoint = pipeline_run.checkpoint_json or {}
-    if checkpoint.get("step_index"):
-        runtime.context.restore(checkpoint)
+    if checkpoint.get("context_snapshot"):
+        runtime.context.restore(checkpoint.get("context_snapshot"))
+    if isinstance(checkpoint.get("pending_clarification"), dict):
+        runtime.pending_clarification = dict(checkpoint["pending_clarification"])
+    runtime.selected_section_ids = list(checkpoint.get("selected_section_ids") or runtime.selected_section_ids)
+    draft_snapshot = checkpoint.get("draft_snapshot")
+    checkpoint_source_id = checkpoint.get("source_artifact_id")
+    if isinstance(draft_snapshot, dict) and checkpoint_source_id == getattr(source, "id", None):
+        runtime.builder = VerbatimBuilder(draft_snapshot)
+        runtime.builder._revision = int(checkpoint.get("draft_revision", 0) or 0)
+        runtime.tool_context.extra["builder"] = runtime.builder
+        runtime.pending_course_title = checkpoint.get("pending_course_title")
+    if checkpoint.get("step_index") and (not draft_snapshot or checkpoint_source_id == getattr(source, "id", None)):
         runtime.checkpoint_start = int(checkpoint.get("step_index", 0))
     return runtime
 
@@ -124,6 +163,11 @@ async def _finish_pipeline(runtime: VerbatimAgentRuntime, status: str, error: st
             ]
             await runtime.emitter.agent_message_completed(
                 summary=runtime.dialogue_summary, sub_agents=sub_agents, artifact_id=artifact_id,
+                metadata=(
+                    {"clarification": runtime.pending_clarification}
+                    if runtime.pending_clarification
+                    else {"intent": runtime.active_intent, "mutation_domain": getattr(runtime.intent_plan, "mutation_domain", "none")}
+                ),
             )
         elif error:
             await runtime.emitter.pipeline_failed(error=error)
@@ -145,17 +189,33 @@ def _section_scope(message: AgentMessage, source: Artifact | None) -> list[str]:
     """把教师指令中的章节范围转换为稳定章节 ID。"""
     metadata = dict(getattr(message, "metadata_json", None) or {})
     structured = list(metadata.get("selected_section_ids") or metadata.get("target_section_ids") or [])
-    if structured:
-        return [str(value) for value in structured if str(value)]
     if source is None:
-        return []
-    source_sections = {
-        str(item.get("id")) for item in (source.content_json or {}).get("sections", [])
-    }
-    active_section_id = str(metadata.get("active_section_id") or "")
-    if active_section_id in source_sections:
-        return [active_section_id]
-    return []
+        return [str(value) for value in structured if str(value)]
+    source_content = source.content_json or {}
+    source_sections = list(source_content.get("sections", []) or [])
+    known_ids = {str(item.get("id")) for item in source_sections if item.get("id")}
+
+    def canonical(value: Any) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        if raw in known_ids:
+            return raw
+        import re
+        match = re.search(r"(\d+)", raw)
+        if match:
+            candidate = f"VB-{int(match.group(1)):02d}"
+            if candidate in known_ids:
+                return candidate
+            index = int(match.group(1)) - 1
+            if 0 <= index < len(source_sections):
+                return str(source_sections[index].get("id") or "") or None
+        return None
+
+    if structured:
+        return list(dict.fromkeys(item for value in structured if (item := canonical(value))))
+    active_section_id = canonical(metadata.get("active_section_id"))
+    return [active_section_id] if active_section_id else []
 
 
 async def _run_pipeline_full(runtime: VerbatimAgentRuntime) -> dict:
@@ -194,7 +254,7 @@ async def _run_pipeline_message(runtime: VerbatimAgentRuntime, source: Artifact,
             assistant_reply = runtime.dialogue_summary or "修改范围或目标存在歧义，请确认后重试；本轮未创建新版本。"
     else:
         content = dict(runtime.draft_content)
-        assistant_reply = f"已根据你的要求创建教师逐字稿 V{source.version + 1}；原版本仍可在版本历史中恢复。"
+        assistant_reply = runtime.dialogue_summary or f"已根据你的要求创建教师逐字稿 V{source.version + 1}；原版本仍可在版本历史中恢复。"
     runtime.dialogue_summary = assistant_reply
     if emitter is not None:
         await emitter.revision_completed(1, applied_changes=[f"教师指令：{message.content[:60]}"])
@@ -230,6 +290,19 @@ async def complete_verbatim_pipeline_after_publish(runtime: VerbatimAgentRuntime
     if runtime is None:
         return
     try:
+        update = getattr(runtime, "course_title_update", None)
+        if update is not None and update.changed and runtime.emitter is not None:
+            await runtime.emitter.emit_domain(
+                "course.metadata.updated",
+                agent={"id": "course_metadata"},
+                message=f"课程名称已更新为“{update.title}”",
+                payload={
+                    "field": "title",
+                    "title": update.title,
+                    "previous_title": update.previous_title,
+                    "changed": True,
+                },
+            )
         await _finish_pipeline(runtime, "completed", artifact_id=artifact_id)
     except Exception:  # The already committed official Artifact remains authoritative.
         logger.exception(
@@ -282,6 +355,7 @@ async def run_verbatim_pipeline(db, course, task, run: GenerationRun, blueprint)
             change_summary=f"Agent 对话修改：{user_message.content[:80]}",
             runtime=runtime,
             skip_publish=runtime.result_status in {"no_change", "needs_confirmation", "rejected"},
+            keep_paused=runtime.result_status == "needs_confirmation",
         )
     if run.trigger_type == "sync_context":
         if not source:

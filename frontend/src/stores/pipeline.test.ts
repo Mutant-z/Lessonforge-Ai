@@ -145,4 +145,57 @@ describe('pipeline store draft restoration', () => {
     expect(timeline).toHaveLength(2);
     expect(timeline.map(item => item.data.tool_name)).toEqual(['task_sheet_add_section', 'task_sheet_initialize_draft']);
   });
+
+  it('applies monotonic video-script patches to the live candidate', () => {
+    const pipeline = usePipelineStore();
+    const project = useProjectStore();
+    project.currentTask = {
+      id: 'task-video', course_id: 'course-1', task_type: 'video_script',
+      current_artifact: { content_json: {} },
+    } as any;
+    const videoDetail = detail('running');
+    videoDetail.run!.generation_run_id = 'run-video';
+    videoDetail.run!.pipeline_type = 'video_script_agent_pipeline';
+    pipeline.detail = videoDetail;
+    const baseline = {
+      schema_version: '4.0', outline: { sections: [{ id: 'SEC-01', sequence: 1, title: '原章节' }] },
+      scenes: [{ id: 'VS-01', section_id: 'SEC-01', sequence: 1, title: '原分镜', spoken_text: '原口播' }],
+    };
+    pipeline.applyStreamEvent('artifact_patch', {
+      run_id: 'run-video', artifact_type: 'video_script', snapshot: true,
+      base_revision: 0, draft_revision: 0, patch: [{ op: 'replace', path: '', value: baseline }],
+    });
+    pipeline.applyStreamEvent('artifact_patch', {
+      run_id: 'run-video', artifact_type: 'video_script', base_revision: 0, draft_revision: 1,
+      affected_scene_ids: ['VS-01'],
+      patch: [{ op: 'replace', path: '/scenes/VS-01/spoken_text', value: '新口播' }],
+    });
+
+    expect(pipeline.draftArtifact?.scenes[0].spoken_text).toBe('新口播');
+    expect(pipeline.draftRevision).toBe(1);
+    expect(pipeline.lastAffectedSceneIds).toEqual(['VS-01']);
+  });
+
+  it('ignores duplicate video patches and requests a snapshot on a revision gap', () => {
+    const pipeline = usePipelineStore();
+    const project = useProjectStore();
+    project.currentTask = { id: 'task-video', course_id: 'course-1', task_type: 'video_script' } as any;
+    const videoDetail = detail('running');
+    videoDetail.run!.generation_run_id = 'run-video';
+    videoDetail.run!.pipeline_type = 'video_script_agent_pipeline';
+    pipeline.detail = videoDetail;
+    pipeline.applyStreamEvent('artifact_patch', {
+      run_id: 'run-video', artifact_type: 'video_script', snapshot: true,
+      base_revision: 0, draft_revision: 0,
+      patch: [{ op: 'replace', path: '', value: { outline: { sections: [] }, scenes: [] } }],
+    });
+    pipeline.applyStreamEvent('artifact_patch', {
+      run_id: 'run-video', artifact_type: 'video_script', base_revision: 1, draft_revision: 2,
+      patch: [{ op: 'add', path: '/outline/sections/SEC-02', value: { id: 'SEC-02', sequence: 2, title: '跳号章节' } }],
+    });
+
+    expect(pipeline.draftNeedsRefresh).toBe(true);
+    expect(pipeline.draftArtifact?.outline.sections).toHaveLength(0);
+    expect(pipeline.draftRevision).toBe(0);
+  });
 });

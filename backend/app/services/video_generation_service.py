@@ -53,6 +53,7 @@ from app.services.media_provider_service import (
     generate_video,
     media_transport_supports,
 )
+from app.services.model_config_service import resolve_model_config
 from app.services.quality_service import validate_video_script
 from app.renderers.presentation_builder import PresentationBuilder
 from app.renderers.ppt_visual_qa import PPTVisualQARenderer
@@ -484,6 +485,8 @@ async def _media_configs(
     video_config = await db.get(ModelConfig, session.video_model_config_id) if session and session.video_model_config_id else None
     speech_config = await db.get(ModelConfig, session.speech_model_config_id) if session and session.speech_model_config_id else None
     image_config = await db.get(ModelConfig, session.image_model_config_id) if session and session.image_model_config_id else None
+    if not video_config:
+        video_config = await resolve_model_config(db, course.owner_id, model_category="video")
     if not image_config:
         ppt_session = await db.scalar(select(AgentChatSession).where(
             AgentChatSession.course_id == course.id,

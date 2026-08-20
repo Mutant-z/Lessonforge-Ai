@@ -45,15 +45,15 @@
           <div class="chip-top-row">
             <div class="chip-label-wrap">
               <div class="metric-icon bg-indigo"><el-icon><Cpu /></el-icon></div>
-              <span class="chip-label">当前激活模型</span>
+              <span class="chip-label">三类默认模型</span>
             </div>
             <div class="status-badge-wrap">
               <span class="status-dot" :class="{ green: activeConfig }"></span>
               <span class="status-txt">{{ activeConfig ? getProviderLabel(activeConfig.provider) : '等待配置' }}</span>
             </div>
           </div>
-          <div class="chip-title-val" :title="activeConfig?.name || activeConfig?.model_name || '未激活'">
-            {{ activeConfig ? (activeConfig.name || activeConfig.model_name) : '未接入配置' }}
+          <div class="chip-title-val" :title="activeDefaultsSummary">
+            {{ activeDefaultsSummary }}
           </div>
         </div>
 
@@ -209,9 +209,23 @@
           </div>
 
           <!-- 模型卡片列表 -->
-          <div v-else class="model-cards-grid">
-            <div
-              v-for="config in modelConfigs"
+          <div v-else class="model-category-grid">
+            <section v-for="category in modelCategories" :key="category.key" class="model-category-column">
+              <div class="model-category-header">
+                <div>
+                  <span class="model-category-kicker">{{ category.label }}</span>
+                  <p>{{ category.description }}</p>
+                </div>
+                <el-button size="small" plain @click="handleOpenCreateDialog(undefined, category.key)">
+                  <el-icon><Plus /></el-icon> 新增
+                </el-button>
+              </div>
+              <div v-if="configsForCategory(category.key).length === 0" class="category-empty">
+                暂无{{ category.label }}配置
+              </div>
+              <div v-else class="model-column-cards">
+                <div
+              v-for="config in configsForCategory(category.key)"
               :key="config.id"
               class="config-card"
               :class="{ active: config.is_active }"
@@ -222,8 +236,9 @@
                     <span class="provider-badge" :class="getProviderBadgeClass(config.provider)">
                       {{ getProviderLabel(config.provider) }}
                     </span>
+                    <span class="purpose-tag">{{ getPurposeLabel(config.model_purpose) }}</span>
                     <span v-if="config.is_active" class="active-tag">
-                      <span class="pulse-dot"></span> 当前激活
+                      <span class="pulse-dot"></span> 本列默认
                     </span>
                   </div>
 
@@ -235,7 +250,10 @@
                       <el-dropdown-menu>
                         <el-dropdown-item command="edit"><el-icon><Edit /></el-icon> 编辑配置</el-dropdown-item>
                         <el-dropdown-item command="test"><el-icon><Connection /></el-icon> 测试连通性</el-dropdown-item>
-                        <el-dropdown-item v-if="!config.is_active" command="activate"><el-icon><Check /></el-icon> 设为激活</el-dropdown-item>
+                        <el-dropdown-item v-if="!config.is_active && canBeDefault(config)" command="activate"><el-icon><Check /></el-icon> 设为本列默认</el-dropdown-item>
+                        <el-dropdown-item v-if="config.model_category !== 'text'" command="duplicate-text"><el-icon><CopyDocument /></el-icon> 复制为文本模型</el-dropdown-item>
+                        <el-dropdown-item v-if="config.model_category !== 'vision'" command="duplicate-vision"><el-icon><CopyDocument /></el-icon> 复制为视觉模型</el-dropdown-item>
+                        <el-dropdown-item v-if="config.model_category !== 'video'" command="duplicate-video"><el-icon><CopyDocument /></el-icon> 复制为视频模型</el-dropdown-item>
                         <el-dropdown-item command="delete" divided class="text-danger"><el-icon><Delete /></el-icon> 删除配置</el-dropdown-item>
                       </el-dropdown-menu>
                     </template>
@@ -293,7 +311,7 @@
                 </el-button>
 
                 <el-button
-                  v-if="!config.is_active"
+                  v-if="!config.is_active && canBeDefault(config)"
                   type="success"
                   plain
                   size="small"
@@ -301,11 +319,11 @@
                   :loading="activatingConfigId === config.id"
                   @click="handleActivate(config.id)"
                 >
-                  <el-icon class="mr-1"><Check /></el-icon> 设为激活
+                  <el-icon class="mr-1"><Check /></el-icon> 设为默认
                 </el-button>
 
                 <el-button
-                  v-else
+                  v-else-if="config.is_active"
                   type="primary"
                   plain
                   size="small"
@@ -316,6 +334,8 @@
                 </el-button>
               </div>
             </div>
+              </div>
+            </section>
           </div>
         </div>
 
@@ -545,6 +565,19 @@
         </el-form-item>
 
         <div class="dialog-form-row">
+          <el-form-item label="模型类别" class="form-col">
+            <el-select v-model="configForm.model_category" class="w-full" :disabled="Boolean(editingConfigId)" @change="handleCategoryChange">
+              <el-option v-for="category in modelCategories" :key="category.key" :label="category.label" :value="category.key" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模型用途" class="form-col">
+            <el-select v-model="configForm.model_purpose" class="w-full" :disabled="Boolean(editingConfigId)" @change="handlePurposeChange">
+              <el-option v-for="option in purposeOptionsForCategory" :key="option.value" :label="option.label" :value="option.value" />
+            </el-select>
+          </el-form-item>
+        </div>
+
+        <div class="dialog-form-row">
           <el-form-item label="协议类型 (Provider)" prop="provider" class="form-col">
             <el-select v-model="configForm.provider" class="w-full" @change="handleProviderChange">
               <el-option label="OpenAI 兼容协议" value="openai_compatible" />
@@ -585,31 +618,24 @@
         </div>
 
         <div class="dialog-form-row capability-switch-row">
-          <el-form-item label="模型能力" class="form-col">
-            <el-checkbox-group v-model="configForm.capabilities" class="capability-checks">
-              <el-checkbox value="text_generation">文本生成</el-checkbox>
-              <el-checkbox value="structured_output">结构化输出</el-checkbox>
-              <el-checkbox value="vision_review">视觉复核</el-checkbox>
-              <el-checkbox value="image_generation">图片生成</el-checkbox>
-              <el-checkbox value="video_generation">视频生成</el-checkbox>
-              <el-checkbox value="native_audio_video_generation">原生有声视频</el-checkbox>
-              <el-checkbox value="speech_generation">语音生成</el-checkbox>
-              <el-checkbox value="speech_recognition">语音识别 / ASR</el-checkbox>
-              <el-checkbox value="media_composition">媒体合成</el-checkbox>
-            </el-checkbox-group>
+          <el-form-item label="模型能力（由用途确定）" class="form-col">
+            <div class="capability-summary">
+              <span v-for="capability in configForm.capabilities" :key="capability">{{ getCapabilityLabel(capability) }}</span>
+            </div>
+            <div v-if="configForm.model_purpose === 'vision_chat'" class="url-hint-row">
+              通用多模态聊天模型：支持文本、结构化输出和图片输入；图片生成是另一种用途。
+            </div>
           </el-form-item>
 
           <el-form-item label="激活状态" class="form-col">
-            <div class="pt-1"><el-switch v-model="configForm.is_active" active-text="设为当前激活" /></div>
+            <div class="pt-1"><el-switch v-model="configForm.is_active" :disabled="!canBeDefault(configForm)" active-text="设为本列默认" /></div>
           </el-form-item>
         </div>
 
         <el-form-item v-if="hasSpecializedTransport" label="媒体接口模式">
           <el-select v-model="configForm.api_mode" class="w-full">
-            <el-option v-if="hasImageCapability" label="OpenAI Images / Vision" value="openai_images" />
+            <el-option v-if="hasImageCapability" label="OpenAI Images" value="openai_images" />
             <el-option v-if="hasImageCapability" label="Google Gemini Image" value="google_gemini_image" />
-            <el-option v-if="hasImageCapability" label="Google Gemini Vision" value="google_vision" />
-            <el-option v-if="hasImageCapability" label="Anthropic Vision" value="anthropic_vision" />
             <el-option v-if="hasImageCapability" label="自定义图片 HTTP" value="custom_image_http" />
             <el-option v-if="configForm.capabilities.includes('video_generation')" label="自定义异步视频 HTTP" value="custom_video_async_http" />
             <el-option v-if="configForm.capabilities.includes('native_audio_video_generation')" label="火山方舟 Seedance 原生有声视频" value="volcengine_ark_video" />
@@ -695,7 +721,7 @@ import {
 import { settingsApi } from '../api/settings';
 import { pptTemplatesApi } from '../api/pptTemplates';
 import type { PPTTemplate } from '../types';
-import type { ModelConfigItem, UserPreferencesPayload } from '../types/settings';
+import type { ModelCategory, ModelConfigItem, ModelPurpose, UserPreferencesPayload } from '../types/settings';
 import { useModelConfigStore } from '../stores/modelConfigs';
 
 // 页面全局状态
@@ -711,6 +737,7 @@ const activeTab = ref<'models' | 'preferences' | 'protocols'>('preferences');
 const modelConfigStore = useModelConfigStore();
 const modelConfigs = ref<ModelConfigItem[]>([]);
 const activeConfigId = ref<string | null>(null);
+const activeConfigIds = ref<Record<ModelCategory, string | null>>({ text: null, vision: null, video: null });
 const pptTemplates = ref<PPTTemplate[]>([]);
 
 const preferenceForm = reactive<UserPreferencesPayload>({
@@ -721,8 +748,24 @@ const preferenceForm = reactive<UserPreferencesPayload>({
 
 // 计算属性
 const activeConfig = computed(() => {
-  return modelConfigs.value.find(c => c.is_active) || modelConfigs.value[0] || null;
+  return modelConfigs.value.find(c => c.model_category === 'text' && c.is_active)
+    || modelConfigs.value.find(c => c.model_category === 'text') || null;
 });
+
+const modelCategories: Array<{ key: ModelCategory; label: string; description: string }> = [
+  { key: 'text', label: '文本模型', description: '文本生成与结构化输出' },
+  { key: 'vision', label: '视觉模型', description: '图片输入理解与图片生成服务' },
+  { key: 'video', label: '视频模型', description: '视频生成与音视频配套服务' },
+];
+
+const activeDefaultsSummary = computed(() => modelCategories.map(({ key, label }) => {
+  const config = modelConfigs.value.find(item => item.id === activeConfigIds.value[key]);
+  return `${label.replace('模型', '')}: ${config?.name || config?.model_name || '未配置'}`;
+}).join(' · '));
+
+function configsForCategory(category: ModelCategory) {
+  return modelConfigs.value.filter(item => (item.model_category || 'text') === category);
+}
 
 const providerStats = computed(() => {
   const stats = { openai: 0, anthropic: 0, mock: 0 };
@@ -758,6 +801,8 @@ const configForm = reactive({
   media_max_duration_seconds: 1800,
   media_max_file_mb: 500,
   is_active: true,
+  model_category: 'text' as ModelCategory,
+  model_purpose: 'text_chat' as ModelPurpose,
 });
 
 const formRules: FormRules = {
@@ -769,10 +814,53 @@ const formRules: FormRules = {
 
 type ModelCapability = ModelConfigItem['capabilities'][number];
 
-const hasImageCapability = computed(() => (
-  configForm.capabilities.includes('image_generation')
-  || configForm.capabilities.includes('vision_review')
-));
+const purposeDefinitions: Record<ModelPurpose, { category: ModelCategory; label: string; capabilities: ModelCapability[]; apiMode: string }> = {
+  text_chat: { category: 'text', label: '文本 / 结构化输出', capabilities: ['text_generation', 'structured_output'], apiMode: 'text_chat' },
+  vision_chat: { category: 'vision', label: '多模态视觉理解', capabilities: ['text_generation', 'structured_output', 'vision_review'], apiMode: 'text_chat' },
+  image_generation: { category: 'vision', label: '图片生成服务', capabilities: ['image_generation'], apiMode: 'openai_images' },
+  video_generation: { category: 'video', label: '视频生成服务', capabilities: ['video_generation'], apiMode: 'custom_video_async_http' },
+  native_audio_video_generation: { category: 'video', label: '原生有声视频', capabilities: ['video_generation', 'native_audio_video_generation'], apiMode: 'gemini_interactions_video' },
+  speech_generation: { category: 'video', label: 'TTS 语音配套', capabilities: ['speech_generation'], apiMode: 'custom_speech_http' },
+  speech_recognition: { category: 'video', label: 'ASR 字幕配套', capabilities: ['speech_recognition'], apiMode: 'volcengine_asr' },
+  media_composition: { category: 'video', label: '媒体合成服务', capabilities: ['media_composition'], apiMode: 'local_ffmpeg' },
+};
+const purposeOptionsForCategory = computed(() => Object.entries(purposeDefinitions)
+  .filter(([, definition]) => definition.category === configForm.model_category)
+  .map(([value, definition]) => ({ value: value as ModelPurpose, label: definition.label })));
+
+function handlePurposeChange() {
+  const definition = purposeDefinitions[configForm.model_purpose];
+  configForm.model_category = definition.category;
+  configForm.capabilities = [...definition.capabilities];
+  configForm.api_mode = definition.apiMode;
+  configForm.is_active = ['text_chat', 'vision_chat', 'video_generation', 'native_audio_video_generation'].includes(configForm.model_purpose);
+}
+
+function handleCategoryChange() {
+  const first = purposeOptionsForCategory.value[0];
+  if (first) {
+    configForm.model_purpose = first.value;
+    handlePurposeChange();
+  }
+}
+
+function getPurposeLabel(purpose: ModelPurpose) {
+  return purposeDefinitions[purpose]?.label || purpose;
+}
+
+function getCapabilityLabel(capability: ModelCapability) {
+  return ({
+    text_generation: '文本生成', structured_output: '结构化输出', vision_review: '图片输入 / 视觉复核',
+    image_generation: '图片生成', video_generation: '视频生成', native_audio_video_generation: '原生有声视频',
+    speech_generation: '语音生成', speech_recognition: '语音识别 / ASR', media_composition: '媒体合成',
+  } as Record<ModelCapability, string>)[capability];
+}
+
+function canBeDefault(config: Pick<ModelConfigItem, 'model_purpose'>) {
+  return ['text_chat', 'vision_chat', 'video_generation', 'native_audio_video_generation'].includes(config.model_purpose);
+}
+
+const hasImageCapability = computed(() => configForm.model_purpose === 'image_generation');
 const hasMediaCapability = computed(() => (
   configForm.capabilities.includes('video_generation')
   || configForm.capabilities.includes('native_audio_video_generation')
@@ -813,6 +901,7 @@ function preferredTestCapability(capabilities: ModelCapability[]) {
   if (capabilities.includes('speech_recognition')) return 'speech_recognition' as const;
   if (capabilities.includes('speech_generation')) return 'speech_generation' as const;
   if (capabilities.includes('image_generation')) return 'image_generation' as const;
+  if (capabilities.includes('vision_review')) return 'vision_review' as const;
   return 'text_generation' as const;
 }
 
@@ -865,6 +954,8 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude' | '
   configForm.supports_multimodal = false;
   configForm.capabilities = ['text_generation', 'structured_output'];
   configForm.api_mode = 'text_chat';
+  configForm.model_category = 'text';
+  configForm.model_purpose = 'text_chat';
   configForm.adapter_config_json_text = '{}';
   configForm.media_max_concurrency = 2;
   configForm.media_poll_interval_seconds = 2;
@@ -877,6 +968,8 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude' | '
     configForm.model_name = 'gemini-omni-flash-preview';
     configForm.timeout_seconds = 600;
     configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+    configForm.model_category = 'video';
+    configForm.model_purpose = 'native_audio_video_generation';
     configForm.api_mode = 'gemini_interactions_video';
     configForm.adapter_config_json_text = JSON.stringify({
       interactions_path: '/v1beta/interactions',
@@ -940,6 +1033,8 @@ function handleProviderChange(val: string) {
     configForm.base_url = 'https://ark.cn-beijing.volces.com/api/v3';
     configForm.model_name = '';
     configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+    configForm.model_category = 'video';
+    configForm.model_purpose = 'native_audio_video_generation';
     configForm.api_mode = 'volcengine_ark_video';
     configForm.media_max_duration_seconds = 15;
   } else if (val === 'mock') {
@@ -955,8 +1050,13 @@ async function loadSettings() {
     const [res, catalog] = await Promise.all([settingsApi.getSettings(), pptTemplatesApi.getCatalog()]);
     pptTemplates.value = catalog.templates;
     modelConfigs.value = res.configs || [];
-    modelConfigStore.setConfigs(modelConfigs.value);
+    modelConfigStore.setConfigs(modelConfigs.value, res.active_config_ids);
     activeConfigId.value = res.active_config_id || null;
+    activeConfigIds.value = res.active_config_ids || {
+      text: res.active_config_id || null,
+      vision: modelConfigs.value.find(item => item.model_category === 'vision' && item.is_active)?.id || null,
+      video: modelConfigs.value.find(item => item.model_category === 'video' && item.is_active)?.id || null,
+    };
     if (res.preferences) {
       preferenceForm.default_language = res.preferences.default_language || 'zh-CN';
       preferenceForm.default_grade_level = res.preferences.default_grade_level || '';
@@ -989,12 +1089,35 @@ async function handleCardCommand(command: string, config: ModelConfigItem) {
     handleTestCard(config);
   } else if (command === 'activate') {
     handleActivate(config.id);
+  } else if (command.startsWith('duplicate-')) {
+    handleDuplicateConfig(config, command.replace('duplicate-', '') as ModelCategory);
   } else if (command === 'delete') {
     handleDeleteConfig(config);
   }
 }
 
-function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'claude' | 'gemini-video') {
+async function handleDuplicateConfig(config: ModelConfigItem, targetCategory: ModelCategory) {
+  const targetPurpose: ModelPurpose = targetCategory === 'vision' ? 'vision_chat'
+    : targetCategory === 'video' ? 'native_audio_video_generation' : 'text_chat';
+  const targetLabel = targetCategory === 'vision' ? '视觉模型' : targetCategory === 'video' ? '视频模型' : '文本模型';
+  try {
+    await ElMessageBox.confirm(
+      `将复制端点、参数和已加密密钥，并创建一条独立的${targetLabel}配置。`,
+      `复制为${targetLabel}`,
+      { confirmButtonText: '确认复制', cancelButtonText: '取消', type: 'info' },
+    );
+    await settingsApi.duplicateModelConfig(config.id, {
+      model_category: targetCategory,
+      model_purpose: targetPurpose,
+    });
+    ElMessage.success(`已复制为${targetLabel}`);
+    await loadSettings();
+  } catch (err: any) {
+    if (err !== 'cancel') ElMessage.error(err.response?.data?.detail || '复制模型配置失败');
+  }
+}
+
+function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'claude' | 'gemini-video', category: ModelCategory = 'text') {
   editingConfigId.value = null;
   currentEditingMaskedKey.value = '';
   testResult.value = null;
@@ -1011,13 +1134,17 @@ function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'cla
     configForm.supports_multimodal = false;
     configForm.capabilities = ['text_generation', 'structured_output'];
     configForm.api_mode = 'text_chat';
+    configForm.model_category = category;
+    configForm.model_purpose = category === 'vision' ? 'vision_chat' : category === 'video' ? 'native_audio_video_generation' : 'text_chat';
+    handlePurposeChange();
     configForm.adapter_config_json_text = '{}';
     configForm.media_max_concurrency = 2;
     configForm.media_poll_interval_seconds = 2;
     configForm.media_max_duration_seconds = 1800;
     configForm.media_max_file_mb = 500;
   }
-  configForm.is_active = modelConfigs.value.length === 0;
+  configForm.is_active = canBeDefault({ model_purpose: configForm.model_purpose })
+    && !configsForCategory(configForm.model_category).some(item => item.is_active);
   dialogVisible.value = true;
 }
 
@@ -1035,6 +1162,8 @@ function handleEditConfig(config: ModelConfigItem) {
   configForm.supports_multimodal = config.supports_multimodal;
   configForm.capabilities = [...(config.capabilities || ['text_generation', 'structured_output'])];
   configForm.api_mode = config.api_mode || 'text_chat';
+  configForm.model_category = config.model_category || 'text';
+  configForm.model_purpose = config.model_purpose || 'text_chat';
   configForm.adapter_config_json_text = JSON.stringify(config.adapter_config || {}, null, 2);
   configForm.media_max_concurrency = Number(config.adapter_config?.max_concurrency || 2);
   configForm.media_poll_interval_seconds = Number(config.adapter_config?.poll_interval_seconds || 2);
@@ -1153,6 +1282,8 @@ async function handleSubmitConfig() {
       api_mode: configForm.api_mode,
       adapter_config: adapterWithMediaLimits(adapterConfig),
       is_active: configForm.is_active,
+      model_category: configForm.model_category,
+      model_purpose: configForm.model_purpose,
     };
 
     if (editingConfigId.value) {
@@ -1617,6 +1748,32 @@ onMounted(() => {
 .preset-url { font-size: 11px; color: var(--text-muted); font-family: monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Model Cards Grid */
+.model-category-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  min-height: 0;
+  height: 100%;
+}
+
+.model-category-column {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #f8fafc;
+  overflow-y: auto;
+}
+
+.model-category-header { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 12px; }
+.model-category-header p { margin: 3px 0 0; color: var(--text-muted); font-size: 11px; }
+.model-category-kicker { font-size: 15px; font-weight: 900; color: var(--text-primary); }
+.model-column-cards { display: flex; flex-direction: column; gap: 12px; }
+.category-empty { padding: 32px 10px; border: 1px dashed #cbd5e1; border-radius: 12px; text-align: center; color: #94a3b8; font-size: 12px; }
+.purpose-tag { padding: 2px 6px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-size: 10px; font-weight: 800; }
+.capability-summary { display: flex; flex-wrap: wrap; gap: 6px; }
+.capability-summary span { padding: 5px 8px; border-radius: 8px; background: #eef2ff; color: #4338ca; font-size: 12px; font-weight: 700; }
+
 .model-cards-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -1625,6 +1782,8 @@ onMounted(() => {
 }
 
 @media (max-width: 900px) {
+  .model-category-grid { grid-template-columns: 1fr; height: auto; }
+  .model-category-column { overflow: visible; }
   .model-cards-grid {
     grid-template-columns: 1fr;
   }

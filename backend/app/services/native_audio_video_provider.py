@@ -26,6 +26,7 @@ class SeedanceNativeAudioVideoProvider(ArkSeedanceAdapter):
         return {
             "model": self.config.model_name,
             "resolution": "720p",
+            "resolutions": ["1280x720", "854x480"],
             "duration_seconds": [4, 15],
             "native_audio": True,
         }

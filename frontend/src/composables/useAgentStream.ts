@@ -37,6 +37,9 @@ const EVENT_TYPES = new Set([
   'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
   // 教学设计：执行前上下文快照 / 拒绝结果
   'context.snapshot.created', 'result.rejected',
+  // 视频脚本：无评分发布前校验与定向修复
+  'validation.completed', 'validation.issue', 'plan.revised',
+  'draft.update.started', 'draft.update.completed',
 ]);
 
 interface StreamSession {

@@ -17,6 +17,7 @@ outline.sections + 扁平 scenes）。核心不变量（与 V4 schema 门禁一�
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from app.schemas.video_script_v4 import (
@@ -49,7 +50,14 @@ class VideoScriptBuilder:
             "scenes": [],
         }
         self._revision: int = 0
-        self._id_counter: int = 0
+        existing_ids = [
+            str(item.get("id") or "")
+            for item in [*self._content.get("outline", {}).get("sections", []), *self._content.get("scenes", [])]
+        ]
+        self._id_counter = max(
+            (int(match.group(1)) for value in existing_ids if (match := re.search(r"-(\d+)$", value))),
+            default=0,
+        )
 
     # ------------------------------------------------------------------
     # 草稿修订（供工具返回修订号 / 前端 patch 冲突检测）
@@ -73,6 +81,39 @@ class VideoScriptBuilder:
 
     def to_content(self) -> dict[str, Any]:
         return copy.deepcopy(self._content)
+
+    def restore(self, content: dict[str, Any], revision: int | None = None) -> None:
+        """原子工具失败时恢复候选稿，不留下半应用状态。"""
+        self._content = copy.deepcopy(content)
+        if revision is not None:
+            self._revision = revision
+
+    def replace_content(self, content: dict[str, Any], *, validate: bool = False) -> None:
+        if validate:
+            SeedanceVideoScriptContentV4.model_validate(content)
+        self._content = copy.deepcopy(content)
+
+    def update_production_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "aspect_ratio", "target_duration_seconds", "target_clip_seconds",
+            "min_clip_seconds", "max_clip_seconds", "global_visual_style",
+            "global_voice_direction",
+        }
+        unknown = set(patch) - allowed
+        if unknown:
+            raise ValueError(f"不支持的制作参数：{', '.join(sorted(unknown))}")
+        self._content["production_settings"].update(copy.deepcopy(patch))
+        if "target_duration_seconds" in patch and self.scenes:
+            self.rebalance_timeline()
+        return copy.deepcopy(self._content["production_settings"])
+
+    def configure_renderer_limit(self, max_scene_seconds: float) -> None:
+        """设置当前渲染器片段上限；不在准备阶段静默改写时间轴。"""
+        limit = min(MAX_SCENE_SECONDS, max(MIN_SCENE_SECONDS, float(max_scene_seconds)))
+        self._content["production_settings"]["max_clip_seconds"] = limit
+        self._content["production_settings"]["target_clip_seconds"] = min(
+            float(self._content["production_settings"].get("target_clip_seconds") or limit), limit,
+        )
 
     def to_v3_flat(self) -> dict[str, Any]:
         """V4 → 扁平 V3 投影（用于与正式源版本比较 no_change / 下游 diff）。"""
@@ -286,13 +327,17 @@ class VideoScriptBuilder:
         "required_numbers", "required_facts", "voice_direction", "sound_design",
         "negative_constraints", "production_notes",
     }
+    _SCENE_PROTECTED_FIELDS = {"id", "sequence"}
 
     def _validate_scene_patch(self, patch: dict[str, Any]) -> None:
-        forbidden = set(patch) - self._SCENE_EDITABLE_FIELDS - {"duration_seconds", "start_seconds", "end_seconds"}
-        if forbidden:
-            raise ValueError(f"不允许直接修改字段：{'、'.join(sorted(forbidden))}（时长请走 rebalance）")
-        if "id" in patch:
-            raise ValueError("不允许修改分镜 ID")
+        # 受保护字段一律拒绝，其余 V4 schema 不存在的字段（V3 遗留如 learning_purpose、
+        # 或 LLM 编造的字段）静默忽略，避免一次无关字段让整批分镜操作失败。
+        for protected in self._SCENE_PROTECTED_FIELDS:
+            if protected in patch:
+                raise ValueError(f"不允许修改分镜 {protected}")
+        unknown = set(patch) - self._SCENE_EDITABLE_FIELDS - {"duration_seconds", "start_seconds", "end_seconds"}
+        for key in unknown:
+            patch.pop(key)
         if patch.get("section_id") and self.find_section(patch["section_id"]) is None:
             raise ValueError(f"目标章节不存在：{patch['section_id']}")
 
@@ -334,6 +379,12 @@ class VideoScriptBuilder:
                 raise ValueError("分镜时长必须介于 4–15 秒")
         for key, value in patch.items():
             node[key] = copy.deepcopy(value)
+        if "spoken_text" in patch:
+            # 与 rewrite_spoken_text 保持一致：事实基准只保留仍出现在新口播中的条目，
+            # 避免精简口播后残留整句旧事实导致 QA 误判。
+            node["required_facts"] = [
+                text for text in node.get("required_facts", []) if text in node.get("spoken_text", "")
+            ]
         if patch.get("section_id") and patch["section_id"] != node.get("section_id"):
             self._ensure_contiguous_sections()
         if duration_patch is not None:
@@ -470,16 +521,25 @@ class VideoScriptBuilder:
         node["required_facts"] = [text for text in node.get("required_facts", []) if text in spoken_text]
         return copy.deepcopy(node)
 
-    def update_visual_direction(self, scene_id: str, visual_prompt: str,
-                                camera_beats: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def update_visual_direction(self, scene_id: str, visual_prompt: str | None = None,
+                                camera_beats: list[dict[str, Any]] | None = None,
+                                voice_direction: str | None = None,
+                                sound_design: list[str] | None = None) -> dict[str, Any]:
         node = self.find_scene(scene_id)
         if node is None:
             raise ValueError(f"分镜不存在：{scene_id}")
-        if not visual_prompt.strip():
-            raise ValueError("画面提示词不能为空")
-        node["visual_prompt"] = visual_prompt.strip()
+        if visual_prompt is not None:
+            if not visual_prompt.strip():
+                raise ValueError("画面提示词不能为空")
+            node["visual_prompt"] = visual_prompt.strip()
         if camera_beats is not None:
             node["camera_beats"] = copy.deepcopy(camera_beats)
+        if voice_direction is not None:
+            if not voice_direction.strip():
+                raise ValueError("声音指导不能为空")
+            node["voice_direction"] = voice_direction.strip()
+        if sound_design is not None:
+            node["sound_design"] = [str(item).strip() for item in sound_design if str(item).strip()]
         return copy.deepcopy(node)
 
     def update_continuity(self, scene_id: str, continuity_group: str) -> dict[str, Any]:
@@ -504,7 +564,11 @@ class VideoScriptBuilder:
 
         - fixed_durations：教师显式指定的分镜时长（保持不变）；
         - 其余分镜按口播字数估计时长，做有界比例分配（4–15 秒窗口内把目标总时长
-          分配到各镜），再重排偏移；末镜吸收微小舍入残差。
+          分配到各镜），再重排偏移；末镜吸收微小舍入残差；
+        - 结构性保护：当渲染器单镜上限使全部镜头无法达到目标总时长时
+          （例如 50 镜 × 10 秒上限 < 600 秒目标），把目标时长收敛到实际可达的
+          合计值，保证“总时长守恒 + 每段 4–max 秒”两个不变量始终成立，
+          避免末镜吸收巨大残差导致结构非法。
         """
         target = self.target_duration_seconds
         fixed = {key: float(value) for key, value in (fixed_durations or {}).items()}
@@ -515,14 +579,20 @@ class VideoScriptBuilder:
                 weights[scene_id] = fixed[scene_id]
                 continue
             chars = len((scene.get("spoken_text") or "").strip())
-            weights[scene_id] = max(MIN_SCENE_SECONDS, min(MAX_SCENE_SECONDS, chars / CHARS_PER_SECOND + 1.0))
+            weights[scene_id] = max(MIN_SCENE_SECONDS, min(self.max_scene_seconds, chars / CHARS_PER_SECOND + 1.0))
         durations = self._allocate_bounded(weights, fixed, target)
+        # 单镜上限导致目标时长不可达时，收敛目标到实际分配合计，保证结构合法。
+        feasible_total = sum(durations.values())
+        if abs(feasible_total - target) > 0.11 and self.scenes:
+            target = round(max(feasible_total, MIN_SCENE_SECONDS * len(self.scenes)), 3)
+            self._content["production_settings"]["target_duration_seconds"] = target
+            self._content["course_info"]["duration_seconds"] = target
         cursor = 0.0
         count = len(self.scenes)
         for index, scene in enumerate(self.scenes):
             duration = durations[scene.get("id", "")]
             if index == count - 1 and count > 1:
-                duration = max(MIN_SCENE_SECONDS, target - cursor)
+                duration = min(self.max_scene_seconds, max(MIN_SCENE_SECONDS, target - cursor))
             scene["start_seconds"] = round(cursor, 3)
             scene["end_seconds"] = round(cursor + duration, 3)
             cursor += duration
@@ -530,8 +600,8 @@ class VideoScriptBuilder:
         self._content["production_settings"]["target_duration_seconds"] = round(target, 3)
         self._content["course_info"]["duration_seconds"] = round(target, 3)
 
-    @staticmethod
     def _allocate_bounded(
+        self,
         weights: dict[str, float],
         fixed: dict[str, float],
         target: float,
@@ -541,12 +611,13 @@ class VideoScriptBuilder:
         迭代调整：按比例缩放后夹取到窗口，把盈余/缺口在未触及边界的场景间
         再次按比例分配，直到收敛或没有可调整项（此时允许轻微偏差，由 QA 门禁拦截）。
         """
+        max_seconds = self.max_scene_seconds
         result: dict[str, float] = {}
         for scene_id, weight in weights.items():
             if scene_id in fixed:
-                result[scene_id] = min(MAX_SCENE_SECONDS, max(MIN_SCENE_SECONDS, weight))
+                result[scene_id] = min(max_seconds, max(MIN_SCENE_SECONDS, weight))
             else:
-                result[scene_id] = min(MAX_SCENE_SECONDS, max(MIN_SCENE_SECONDS, weight))
+                result[scene_id] = min(max_seconds, max(MIN_SCENE_SECONDS, weight))
         ids = [scene_id for scene_id in weights]
         for _ in range(40):
             total = sum(result.values())
@@ -556,7 +627,7 @@ class VideoScriptBuilder:
             adjustable = [
                 scene_id for scene_id in ids
                 if scene_id not in fixed
-                and not (diff > 0 and result[scene_id] >= MAX_SCENE_SECONDS - 1e-6)
+                and not (diff > 0 and result[scene_id] >= max_seconds - 1e-6)
                 and not (diff < 0 and result[scene_id] <= MIN_SCENE_SECONDS + 1e-6)
             ]
             if not adjustable:
@@ -564,10 +635,17 @@ class VideoScriptBuilder:
             adjust_total = sum(result[scene_id] for scene_id in adjustable) or 1.0
             for scene_id in adjustable:
                 result[scene_id] = min(
-                    MAX_SCENE_SECONDS,
+                    max_seconds,
                     max(MIN_SCENE_SECONDS, result[scene_id] * (1 + diff / adjust_total)),
                 )
         return result
+
+    @property
+    def max_scene_seconds(self) -> float:
+        return min(
+            MAX_SCENE_SECONDS,
+            max(MIN_SCENE_SECONDS, float(self._content["production_settings"].get("max_clip_seconds") or MAX_SCENE_SECONDS)),
+        )
 
     def rebalance_timeline(self, durations: dict[str, float] | None = None) -> dict[str, Any]:
         """时间重平衡：优先保留锁定分镜与教师指定时长，其余按口播比例重算。"""
@@ -600,18 +678,13 @@ class VideoScriptBuilder:
         removed_sections = sorted(set(source_sections) - set(candidate_sections))
         changed_sections = sorted(
             section_id for section_id in set(source_sections) & set(candidate_sections)
-            if source_sections[section_id].get("title") != candidate_sections[section_id].get("title")
-            or source_sections[section_id].get("sequence") != candidate_sections[section_id].get("sequence")
-            or source_sections[section_id].get("objective_ids") != candidate_sections[section_id].get("objective_ids")
+            if source_sections[section_id] != candidate_sections[section_id]
         )
         added_scenes = sorted(set(candidate_scenes) - set(source_scenes))
         removed_scenes = sorted(set(source_scenes) - set(candidate_scenes))
         changed_scenes = sorted(
             scene_id for scene_id in set(source_scenes) & set(candidate_scenes)
-            if source_scenes[scene_id].get("section_id") != candidate_scenes[scene_id].get("section_id")
-            or source_scenes[scene_id].get("spoken_text") != candidate_scenes[scene_id].get("spoken_text")
-            or source_scenes[scene_id].get("visual_prompt") != candidate_scenes[scene_id].get("visual_prompt")
-            or source_scenes[scene_id].get("continuity_group") != candidate_scenes[scene_id].get("continuity_group")
+            if source_scenes[scene_id] != candidate_scenes[scene_id]
         )
         return {
             "added_sections": added_sections, "removed_sections": removed_sections,
@@ -637,13 +710,41 @@ def build_initial_builder(
 
     bp = CourseBlueprintSchema.model_validate(bp_content)
     lesson_plan = _to_v1_lesson_plan(lesson_plan_raw)
-    if lesson_plan is None:
+    if lesson_plan is None or not lesson_plan.stages:
         from app.agents.generators import make_lesson_plan
 
         lesson_plan = make_lesson_plan(bp)
     v3 = make_seedance_video_script(bp, lesson_plan)
     v4 = upgrade_video_script_v4(v3.model_dump(), lesson_plan_raw)
     return VideoScriptBuilder(v4.model_dump())
+
+
+def build_empty_builder(bp_content: dict[str, Any]) -> VideoScriptBuilder:
+    """真实 LLM 首次生成的最小骨架；不预填章节、分镜或模板化口播。"""
+    from app.schemas.blueprint import CourseBlueprintSchema
+
+    bp = CourseBlueprintSchema.model_validate(bp_content)
+    identity = bp.course_identity
+    duration_seconds = max(4, int(float(identity.duration_minutes or 0) * 60))
+    return VideoScriptBuilder({
+        "schema_version": VIDEO_SCRIPT_V4,
+        "course_info": {
+            "course_title": identity.title,
+            "subject": identity.subject,
+            "grade_level": identity.grade_level,
+            "audience": identity.audience,
+            "duration_seconds": duration_seconds,
+        },
+        "production_settings": {
+            "mode": "seedance_native", "aspect_ratio": "16:9",
+            "target_duration_seconds": duration_seconds,
+            "target_clip_seconds": 12, "min_clip_seconds": 4, "max_clip_seconds": 15,
+            "global_visual_style": "统一、清晰、适龄的现代教学影像",
+            "global_voice_direction": "自然、清晰、可信赖的中文教师声音",
+        },
+        "outline": {"sections": []},
+        "scenes": [],
+    })
 
 
 def _to_v1_lesson_plan(lesson_plan_raw: dict[str, Any] | None):
@@ -689,6 +790,8 @@ def _to_v1_lesson_plan(lesson_plan_raw: dict[str, Any] | None):
             )
             for item in raw.get("stages", []) if isinstance(item, dict)
         ]
+        if not stages:
+            return None
         return LessonPlanContent(
             content_analysis=raw.get("content_analysis", ""),
             learner_analysis=raw.get("learner_analysis", ""),

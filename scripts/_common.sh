@@ -11,6 +11,27 @@ FRONTEND_LOG="$RUNTIME_DIR/frontend.log"
 BACKEND_LAUNCH_LOG="$RUNTIME_DIR/backend-launchd.log"
 FRONTEND_LAUNCH_LOG="$RUNTIME_DIR/frontend-launchd.log"
 
+if [ -f "$PROJECT_DIR/.env" ]; then
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    # 忽略空行和注释行
+    case "$key" in
+      \#*|"") continue ;;
+    esac
+    key="$(echo "$key" | xargs)"
+    # 仅当 key 为有效变量名时导出
+    if [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+      # 去除首尾空格和包裹的引号
+      value="$(echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^["'\''"]//' -e 's/["'\''"]$//')"
+      export "$key"="$value"
+    fi
+  done < "$PROJECT_DIR/.env"
+fi
+
+BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+
 # `nohup ... &` is not enough in desktop/agent environments: the host may reap
 # every process that still belongs to the completed command session.  On macOS
 # we therefore submit the dev servers to the user's launchd domain.  Include a
@@ -73,7 +94,7 @@ remove_launchd_service() {
 wait_for_http() {
   local name="$1"
   local url="$2"
-  local attempts="${3:-40}"
+  local attempts="${3:-80}"
   local attempt=0
   while [ "$attempt" -lt "$attempts" ]; do
     if curl --silent --show-error --fail --max-time 1 "$url" >/dev/null 2>&1; then

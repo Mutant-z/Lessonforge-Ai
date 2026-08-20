@@ -607,6 +607,8 @@ class ModelConfig(Base, TimestampMixin):
     capabilities_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     api_mode: Mapped[str] = mapped_column(String(50), default="text_chat")
     adapter_config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    model_category: Mapped[str] = mapped_column(String(20), default="text", index=True)
+    model_purpose: Mapped[str] = mapped_column(String(40), default="text_chat", index=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     preferences_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

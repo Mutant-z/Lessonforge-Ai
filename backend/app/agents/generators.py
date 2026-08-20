@@ -761,6 +761,8 @@ def make_seedance_video_script(
     duration = total / count
     if duration < 4:
         raise ValueError("课程时长不足以生成 Seedance 原生视频片段")
+    if not lesson_plan.stages:
+        raise ValueError("教学设计缺少教学环节，无法生成视频脚本")
     objective_ids = [item.id for item in bp.objectives]
     knowledge_ids = [item.id for item in bp.knowledge_points]
     scenes: list[SeedanceVideoScene] = []

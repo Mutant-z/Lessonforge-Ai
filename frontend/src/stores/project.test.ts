@@ -377,6 +377,72 @@ describe('project task store', () => {
     ]);
   });
 
+  it('applies video resolution setting events immediately without waiting for snapshot refresh', () => {
+    const store = useProjectStore();
+    const videoScriptTask = {
+      ...structuredClone(task),
+      id: 'task-video-script',
+      task_type: 'video_script',
+      display_name: '视频脚本',
+      preferred_video_resolution: '854x480',
+    } as CourseTask;
+    const videoGenerationTask = {
+      ...structuredClone(task),
+      id: 'task-video-generation',
+      task_type: 'video_generation',
+      display_name: '视频生成',
+      preferred_video_resolution: '854x480',
+    } as CourseTask;
+    store.project = { ...structuredClone(project), tasks: [videoScriptTask, videoGenerationTask] };
+    store.currentTask = videoScriptTask;
+    // 保持后台校验刷新挂起，证明可见状态不依赖网络往返。
+    vi.mocked(api.get).mockReturnValue(new Promise(() => {}));
+
+    store.applyEvent('video_generation.setting.updated', {
+      event_id: 45,
+      course_id: 'course-1',
+      task_id: 'task-video-script',
+      task_type: 'video_script',
+      run_id: 'run-1',
+      payload: { resolution: '1280x720' },
+    });
+
+    expect(store.currentTask.preferred_video_resolution).toBe('1280x720');
+    expect(store.project.tasks.map(item => item.preferred_video_resolution)).toEqual([
+      '1280x720', '1280x720',
+    ]);
+  });
+
+  it('does not let an older task snapshot roll back a committed resolution event', async () => {
+    const store = useProjectStore();
+    const videoTask = {
+      ...structuredClone(task),
+      id: 'task-video-script',
+      task_type: 'video_script',
+      preferred_video_resolution: '854x480',
+      event_cursor: 44,
+    } as CourseTask;
+    store.project = { ...structuredClone(project), tasks: [videoTask] };
+    store.currentTask = videoTask;
+    vi.mocked(api.get).mockResolvedValue({
+      data: { ...structuredClone(videoTask), preferred_video_resolution: '854x480', event_cursor: 44 },
+    });
+
+    store.applyEvent('video_generation.setting.updated', {
+      event_id: 45,
+      course_id: 'course-1',
+      task_id: 'task-video-script',
+      task_type: 'video_script',
+      run_id: 'run-1',
+      payload: { resolution: '1280x720', previous_resolution: '854x480', changed: true },
+    });
+
+    await vi.waitFor(() => expect(api.get).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(store.videoResolutionEventId).toBe(45);
+    expect(store.currentTask.preferred_video_resolution).toBe('1280x720');
+  });
+
   it('builds a streamed assistant message and ignores duplicate deltas', () => {
     const store = useProjectStore();
     store.project = structuredClone(project);

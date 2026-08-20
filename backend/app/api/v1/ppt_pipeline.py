@@ -108,11 +108,16 @@ async def _pipeline_payload(db, task: CourseTask) -> dict:
             {
                 "id": row.id, "content": row.content, "status": row.status,
                 "client_instruction_id": row.client_instruction_id,
+                "metadata": row.metadata_json,
                 "created_at": row.created_at.isoformat() if row.created_at else "",
                 "applied_at": row.applied_at.isoformat() if row.applied_at else "",
             }
             for row in instructions
         ],
+        "draft_snapshot": (pipeline_run.checkpoint_json or {}).get("draft_snapshot"),
+        "draft_revision": int((pipeline_run.checkpoint_json or {}).get("draft_revision") or 0),
+        "base_artifact_id": (pipeline_run.checkpoint_json or {}).get("base_artifact_id"),
+        "base_version": int((pipeline_run.checkpoint_json or {}).get("base_version") or 0),
         "human_requests": [
             {
                 "id": row.id, "type": row.request_type, "prompt": row.prompt,

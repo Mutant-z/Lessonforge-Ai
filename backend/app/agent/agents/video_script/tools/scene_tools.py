@@ -15,6 +15,15 @@ from app.agent.agents.video_script.tools.read_tools import _builder
 from app.agent.registry import Tool, ToolContext, ToolResult, register_tool
 
 SCENE_OPS = {"add_scene", "update_scene", "move_scene", "split_scene", "merge_scenes", "delete_scene"}
+# 允许 LLM 使用简写形式（如 "update" 代替 "update_scene"）
+SCENE_OPS_ALIASES = {
+    "add": "add_scene",
+    "update": "update_scene",
+    "move": "move_scene",
+    "split": "split_scene",
+    "merge": "merge_scenes",
+    "delete": "delete_scene",
+}
 
 
 class ApplyVideoScriptSceneOpsInput(BaseModel):
@@ -23,15 +32,32 @@ class ApplyVideoScriptSceneOpsInput(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_ops(cls, value):
-        for operation in value.get("operations", []):
-            if operation.get("op") not in SCENE_OPS:
+        operations = value.get("operations", [])
+        for i, operation in enumerate(operations):
+            op = operation.get("op")
+            # 规范化简写形式
+            if op in SCENE_OPS_ALIASES:
+                operations[i]["op"] = SCENE_OPS_ALIASES[op]
+                op = operations[i]["op"]
+            if op not in SCENE_OPS:
                 raise ValueError(f"不支持的分镜操作：{operation.get('op')}")
+            # 如果是 update_scene 但 LLM 直接传了字段（而不是嵌套在 patch 里），自动包装
+            if op == "update_scene" and "patch" not in operation:
+                patch = {k: v for k, v in operation.items() if k not in {"op", "scene_id"}}
+                if patch:
+                    operations[i]["patch"] = patch
         return value
 
 
 async def _vs_apply_scene_ops(tc: ToolContext, inp: ApplyVideoScriptSceneOpsInput) -> ToolResult:
-    _lock_guard(tc)
     builder = _builder(tc)
+    requested_paths = [
+        f"$.scenes.{operation.get('scene_id') or 'new'}"
+        for operation in inp.operations
+    ]
+    _lock_guard(tc, requested_paths)
+    before = builder.to_content()
+    before_revision = builder.revision
     affected_ids: list[str] = []
     patches: list[dict[str, Any]] = []
     summary: list[str] = []
@@ -90,12 +116,13 @@ async def _vs_apply_scene_ops(tc: ToolContext, inp: ApplyVideoScriptSceneOpsInpu
             "ok": True,
             "summary": "；".join(summary),
             "affected_scene_ids": sorted(set(affected_ids)),
-            "revision": revision,
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "patch": patches,
             "scene_count": builder.count_scenes(),
             "target_duration_seconds": builder.target_duration_seconds,
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"分镜操作失败：{str(exc)[:300]}", error_code="scene_op_failed", retryable=True)
 
 
@@ -106,42 +133,72 @@ class RewriteSpokenTextInput(BaseModel):
 
 async def _vs_rewrite_spoken_text(tc: ToolContext, inp: RewriteSpokenTextInput) -> ToolResult:
     """重写单个分镜口播；必需事实基准随新口播同步校验。"""
-    _lock_guard(tc)
+    _lock_guard(tc, [f"$.scenes.{inp.scene_id}.spoken_text"])
     builder = _builder(tc)
+    before = builder.to_content()
+    before_revision = builder.revision
     try:
         node = builder.rewrite_spoken_text(inp.scene_id, inp.spoken_text)
         revision = builder.bump_revision()
         return ToolResult(output={
             "ok": True, "summary": f"重写分镜 {inp.scene_id} 口播",
-            "affected_scene_ids": [inp.scene_id], "revision": revision,
+            "affected_scene_ids": [inp.scene_id],
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "patch": [_patch(f"/scenes/{inp.scene_id}/spoken_text", value=node.get("spoken_text"))],
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"口播重写失败：{str(exc)[:300]}", error_code="rewrite_failed", retryable=True)
 
 
 class UpdateVisualDirectionInput(BaseModel):
     scene_id: str = Field(min_length=1)
-    visual_prompt: str = Field(min_length=1, max_length=6000)
+    visual_prompt: str | None = Field(default=None, min_length=1, max_length=6000)
     camera_beats: list[dict[str, Any]] | None = None
+    voice_direction: str | None = Field(default=None, min_length=1, max_length=300)
+    sound_design: list[str] | None = None
+
+    @model_validator(mode="after")
+    def require_audiovisual_change(self):
+        if all(value is None for value in (
+            self.visual_prompt, self.camera_beats, self.voice_direction, self.sound_design,
+        )):
+            raise ValueError("至少提供一项画面或声音修改")
+        return self
 
 
 async def _vs_update_visual_direction(tc: ToolContext, inp: UpdateVisualDirectionInput) -> ToolResult:
     """重写单个分镜的画面提示词与镜头节拍。"""
-    _lock_guard(tc)
+    requested = [
+        f"$.scenes.{inp.scene_id}.{field}"
+        for field, value in {
+            "visual_prompt": inp.visual_prompt, "camera_beats": inp.camera_beats,
+            "voice_direction": inp.voice_direction, "sound_design": inp.sound_design,
+        }.items() if value is not None
+    ]
+    _lock_guard(tc, requested)
     builder = _builder(tc)
+    before = builder.to_content()
+    before_revision = builder.revision
     try:
-        node = builder.update_visual_direction(inp.scene_id, inp.visual_prompt, inp.camera_beats)
+        node = builder.update_visual_direction(
+            inp.scene_id, inp.visual_prompt, inp.camera_beats, inp.voice_direction, inp.sound_design,
+        )
         revision = builder.bump_revision()
         return ToolResult(output={
             "ok": True, "summary": f"更新分镜 {inp.scene_id} 画面与镜头",
-            "affected_scene_ids": [inp.scene_id], "revision": revision,
+            "affected_scene_ids": [inp.scene_id],
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "patch": [
-                _patch(f"/scenes/{inp.scene_id}/visual_prompt", value=node.get("visual_prompt")),
-                _patch(f"/scenes/{inp.scene_id}/camera_beats", value=node.get("camera_beats")),
+                _patch(f"/scenes/{inp.scene_id}/{field}", value=node.get(field))
+                for field, value in {
+                    "visual_prompt": inp.visual_prompt, "camera_beats": inp.camera_beats,
+                    "voice_direction": inp.voice_direction, "sound_design": inp.sound_design,
+                }.items() if value is not None
             ],
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"画面更新失败：{str(exc)[:300]}", error_code="visual_update_failed", retryable=True)
 
 
@@ -152,17 +209,21 @@ class UpdateContinuityInput(BaseModel):
 
 async def _vs_update_continuity(tc: ToolContext, inp: UpdateContinuityInput) -> ToolResult:
     """调整单个分镜的连续性分组。"""
-    _lock_guard(tc)
+    _lock_guard(tc, [f"$.scenes.{inp.scene_id}.continuity_group"])
     builder = _builder(tc)
+    before = builder.to_content()
+    before_revision = builder.revision
     try:
         node = builder.update_continuity(inp.scene_id, inp.continuity_group)
         revision = builder.bump_revision()
         return ToolResult(output={
             "ok": True, "summary": f"更新分镜 {inp.scene_id} 连续性分组",
-            "affected_scene_ids": [inp.scene_id], "revision": revision,
+            "affected_scene_ids": [inp.scene_id],
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "patch": [_patch(f"/scenes/{inp.scene_id}/continuity_group", value=node.get("continuity_group"))],
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"连续性更新失败：{str(exc)[:300]}", error_code="continuity_update_failed", retryable=True)
 
 
@@ -172,14 +233,16 @@ class RebalanceTimelineInput(BaseModel):
 
 async def _vs_rebalance_timeline(tc: ToolContext, inp: RebalanceTimelineInput) -> ToolResult:
     """按口播长度重算时间轴：优先保留锁定分镜与指定时长，总时长守恒、每段 4–15 秒。"""
-    _lock_guard(tc)
+    _lock_guard(tc, ["$.scenes"])
     builder = _builder(tc)
+    before = builder.to_content()
+    before_revision = builder.revision
     try:
         result = builder.rebalance_timeline(durations=inp.durations)
         revision = builder.bump_revision()
         return ToolResult(output={
             "ok": True, "summary": "已重平衡分镜时间轴",
-            "revision": revision,
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "timeline": result.get("scenes"),
             "target_duration_seconds": result.get("target_duration_seconds"),
             "patch": [_patch("/scenes", "replace", [
@@ -188,7 +251,34 @@ async def _vs_rebalance_timeline(tc: ToolContext, inp: RebalanceTimelineInput) -
             ])],
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"时间轴重平衡失败：{str(exc)[:300]}", error_code="rebalance_failed", retryable=True)
+
+
+class UpdateProductionSettingsInput(BaseModel):
+    patch: dict[str, Any] = Field(min_length=1)
+
+
+async def _vs_update_production_settings(tc: ToolContext, inp: UpdateProductionSettingsInput) -> ToolResult:
+    builder = _builder(tc)
+    _lock_guard(tc, [f"$.production_settings.{key}" for key in inp.patch])
+    before = builder.to_content()
+    before_revision = builder.revision
+    try:
+        settings = builder.update_production_settings(inp.patch)
+        revision = builder.bump_revision()
+        return ToolResult(output={
+            "ok": True,
+            "summary": f"更新制作参数：{', '.join(sorted(inp.patch))}",
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
+            "patch": [
+                _patch(f"/production_settings/{key}", value=settings.get(key))
+                for key in inp.patch
+            ],
+        })
+    except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
+        return ToolResult(ok=False, error=f"制作参数更新失败：{str(exc)[:300]}", error_code="settings_update_failed", retryable=True)
 
 
 def _register_scene_tools() -> None:
@@ -200,5 +290,7 @@ def _register_scene_tools() -> None:
                        UpdateVisualDirectionInput, _vs_update_visual_direction))
     register_tool(Tool("vs_update_continuity", "调整单个分镜连续性分组",
                        UpdateContinuityInput, _vs_update_continuity))
+    register_tool(Tool("vs_update_production_settings", "更新视频比例、目标时长与全局视听风格",
+                       UpdateProductionSettingsInput, _vs_update_production_settings))
     register_tool(Tool("vs_rebalance_timeline", "按口播长度重算时间轴（保留锁定与指定时长）",
                        RebalanceTimelineInput, _vs_rebalance_timeline))

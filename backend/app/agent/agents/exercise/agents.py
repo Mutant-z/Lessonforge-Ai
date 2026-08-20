@@ -40,6 +40,7 @@ STRUCTURE_TOOLS = [
 EDIT_TOOLS = [
     *READ_TOOLS, "exercise_initialize_draft",
     "exercise_add_question", "exercise_add_question_group",
+    "exercise_move_question",
     "exercise_update_question", "exercise_update_question_group",
     "exercise_update_section",   # 结构编辑时可能需要调整分区分值/标题
     "exercise_update_stimulus",

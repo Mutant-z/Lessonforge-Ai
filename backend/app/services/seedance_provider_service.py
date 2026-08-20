@@ -75,6 +75,7 @@ class ArkSeedanceAdapter:
                 "model": self.config.model_name,
                 "model_family": "doubao-seedance-2.5",
                 "resolution": "720p",
+                "resolutions": ["1280x720", "854x480"],
                 "duration_seconds": [4, 15],
                 "native_audio": True,
                 "source": "validated_configuration",
@@ -100,6 +101,7 @@ class ArkSeedanceAdapter:
             "model": model,
             "model_family": "doubao-seedance-2.5",
             "resolution": "720p",
+            "resolutions": ["1280x720", "854x480"],
             "duration_seconds": [minimum, maximum],
             "native_audio": native_audio,
             "source": "provider_capability_probe",
@@ -125,6 +127,14 @@ def _adapter_path(adapter: dict, key: str, default: str) -> str:
     return str(adapter.get(key) or default)
 
 
+def _resolution_label(resolution: str) -> str | None:
+    """把分辨率字符串映射为 Provider 规格标记；不支持时返回 None。"""
+    return {
+        "1280x720": "720p",
+        "854x480": "480p",
+    }.get(str(resolution).lower())
+
+
 async def generate_seedance_video(
     config: ModelConfig,
     *,
@@ -140,8 +150,9 @@ async def generate_seedance_video(
         raise MediaProviderError("所选配置不是火山方舟原生有声视频接口", retryable=False)
     if "native_audio_video_generation" not in (config.capabilities_json or []):
         raise MediaProviderError("所选配置未声明原生有声视频能力", retryable=False)
-    if resolution != "1280x720" or not 4 <= duration_seconds <= 15:
-        raise MediaProviderError("当前工作流只允许 720p、4–15 秒的原生有声片段", retryable=False)
+    resolution_label = _resolution_label(resolution)
+    if resolution_label is None or not 4 <= duration_seconds <= 15:
+        raise MediaProviderError("当前工作流只允许 720p/480p、4–15 秒的原生有声片段", retryable=False)
 
     adapter = config.adapter_config_json or {}
     content: list[dict] = [{"type": "text", "text": prompt}]
@@ -152,7 +163,7 @@ async def generate_seedance_video(
         str(adapter.get("model_field") or "model"): config.model_name,
         "content": content,
         str(adapter.get("duration_field") or "duration"): round(duration_seconds, 3),
-        str(adapter.get("size_field") or "resolution"): "720p",
+        str(adapter.get("size_field") or "resolution"): resolution_label,
         str(adapter.get("aspect_ratio_field") or "ratio"): "16:9",
         "generate_audio": True,
     })

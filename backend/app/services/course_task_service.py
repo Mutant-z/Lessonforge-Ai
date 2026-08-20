@@ -70,6 +70,11 @@ from app.services.project_knowledge_service import build_project_knowledge_conte
 from app.services.exercise_review_service import degrade_unreviewed_visuals, review_and_repair_exercise
 from app.services.exercise_visual_service import process_exercise_visuals
 from app.services.quality_service import validate_exercise, validate_resources, validate_video_script
+from app.services.video_generation_settings_service import (
+    VideoGenerationSettingsPatch,
+    apply_video_generation_settings,
+    preferred_video_resolution,
+)
 from app.agent.agents.lesson_plan.qa import validate_lesson_plan
 from app.agent.core.error import AgentError
 from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, resolve_ppt_template
@@ -211,7 +216,7 @@ def is_publishable_video_artifact(item: Artifact | None) -> bool:
     )
 
 
-async def task_payload(db, item: CourseTask) -> dict:
+async def task_payload(db, item: CourseTask, *, event_cursor: int | None = None) -> dict:
     artifact = await db.get(Artifact, item.current_artifact_id) if item.current_artifact_id else None
     profile = await db.get(CourseTaskAgentProfile, item.current_agent_profile_id) if item.current_agent_profile_id else None
     spec = TASK_SPEC_BY_TYPE[item.task_type]
@@ -272,7 +277,7 @@ async def task_payload(db, item: CourseTask) -> dict:
                 }
             else:
                 missing_optional_sources.append(reference_type)
-    return {
+    payload = {
         "id": item.id,
         "course_id": item.course_id,
         "task_type": item.task_type,
@@ -303,7 +308,33 @@ async def task_payload(db, item: CourseTask) -> dict:
         "current_activity": current_activity,
         "error": item.error_json,
         "updated_at": item.updated_at,
+        "preferred_video_resolution": await _preferred_video_resolution(db, item),
+        "video_generation_capabilities": await _video_generation_capabilities(db, item),
     }
+    if event_cursor is not None:
+        payload["event_cursor"] = event_cursor
+    return payload
+
+
+async def _video_generation_capabilities(db, item: CourseTask) -> dict | None:
+    if item.task_type not in {"video_generation", "video_script"}:
+        return None
+    try:
+        from app.services.video_generation_capability_service import get_video_generation_capabilities
+        course = await db.get(CourseProject, item.course_id)
+        return (await get_video_generation_capabilities(db, course)).payload() if course else None
+    except (ValueError, RuntimeError):
+        return None
+
+
+async def _preferred_video_resolution(db, item: CourseTask) -> str | None:
+    """返回课程级视频生成分辨率偏好（由视频脚本 Agent 保存）。"""
+    if item.task_type not in ("video_generation", "video_script"):
+        return None
+    course = await db.get(CourseProject, item.course_id)
+    if not course:
+        return None
+    return preferred_video_resolution(course)
 
 
 async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
@@ -1595,6 +1626,24 @@ async def _refresh_course_status(db, course: CourseProject):
         course.status = "teacher_review"
 
 
+async def _apply_pending_video_resolution(db, course: CourseProject, pipeline_runtime) -> bool:
+    """把复合视频脚本指令的设置更新并入成功终态事务。"""
+    patch = getattr(pipeline_runtime, "pending_video_settings", None)
+    if patch is None:
+        resolution = str(getattr(pipeline_runtime, "pending_video_resolution", "") or "")
+        patch = VideoGenerationSettingsPatch(preferred_resolution=resolution) if resolution else None
+    result_status = str(getattr(pipeline_runtime, "result_status", "") or "")
+    if patch is None or result_status not in {"applied", "no_change", "settings_applied", "settings_unchanged"}:
+        return False
+    update = await apply_video_generation_settings(
+        db,
+        course,
+        patch,
+    )
+    pipeline_runtime.video_resolution_update = update
+    return True
+
+
 async def execute_task_run(run_id: str):
     current_phase = "preparing"
     try:
@@ -1641,7 +1690,9 @@ async def execute_task_run(run_id: str):
                 task.task_type == "task_sheet" and get_settings().task_sheet_agent_runtime_enabled
             )
             use_video_script_pipeline = (
-                task.task_type == "video_script" and get_settings().video_script_agent_runtime_enabled
+                task.task_type == "video_script"
+                and run.trigger_type == "message"
+                and get_settings().video_script_agent_runtime_enabled
             )
             use_verbatim_pipeline = (
                 task.task_type == "verbatim" and get_settings().verbatim_agent_runtime_enabled
@@ -1770,6 +1821,8 @@ async def execute_task_run(run_id: str):
                             reason="等待教师人工确认", checkpoint_step=pipeline_runtime.current_agent_key or "confirmation",
                         )
                     return
+                if use_video_script_pipeline:
+                    await _apply_pending_video_resolution(db, course, pipeline_runtime)
                 await db.commit()
                 if task.task_type == "ppt":
                     from app.services.ppt_pipeline_service import complete_ppt_pipeline_after_publish
@@ -1969,6 +2022,15 @@ async def execute_task_run(run_id: str):
             )) if course else None
             if not run or not task or not course or not blueprint:
                 raise RuntimeError("保存新版本时任务上下文不存在")
+
+            if use_video_script_pipeline:
+                await _apply_pending_video_resolution(db, course, pipeline_runtime)
+            if use_verbatim_pipeline and getattr(pipeline_runtime, "pending_course_title", None):
+                from app.services.course_metadata_service import apply_course_title_update
+
+                pipeline_runtime.course_title_update = await apply_course_title_update(
+                    db, course, pipeline_runtime.pending_course_title,
+                )
 
             artifact = Artifact(
                 course_id=course.id,
@@ -2256,7 +2318,7 @@ async def execute_task_run(run_id: str):
             await db.commit()
             if pipeline:
                 from app.agent.events import PipelineEventEmitter
-                failure_emitter = await PipelineEventEmitter.for_run(run, pipeline)
+                failure_emitter = await PipelineEventEmitter.for_run(run, pipeline, task_type=task.task_type)
                 await failure_emitter.pipeline_failed(error=message)
                 await failure_emitter.emit_domain("run.failed", message=message, payload={"error": error})
                 artifact_label = {

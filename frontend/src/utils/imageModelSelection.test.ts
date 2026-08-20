@@ -12,6 +12,8 @@ function config(id: string, capabilities: ModelConfigItem['capabilities'], provi
     context_window_tokens: 1000, supports_multimodal: false, capabilities,
     api_mode: 'text_chat', adapter_config: {}, api_key_configured: false,
     api_key_masked: '', is_active: false,
+    model_category: capabilities.includes('image_generation') ? 'vision' : 'text',
+    model_purpose: capabilities.includes('image_generation') ? 'image_generation' : 'text_chat',
   };
 }
 

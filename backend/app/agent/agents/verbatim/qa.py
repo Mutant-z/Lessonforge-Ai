@@ -59,7 +59,18 @@ def issue(
 
 
 def blocking_issues(issues: list[dict]) -> list[dict]:
-    return [item for item in issues if item["severity"] in {"critical", "major"}]
+    """返回真正阻止持久化的问题。
+
+    逐字稿的事实保留、场景映射与口播节奏属于模型可修复的质量反馈，
+    不应因为一次局部润色不完美就阻止整次修订；只有候选稿无法形成合法
+    V2 结构，或教师明确锁定了目标文件时才阻止发布。
+    """
+    hard_dimensions = {"integrity", "lock"}
+    return [
+        item for item in issues
+        if item.get("dimension") in hard_dimensions
+        and item.get("severity") == "critical"
+    ]
 
 
 def fingerprint(issues: list[dict]) -> str:

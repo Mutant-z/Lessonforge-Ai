@@ -527,8 +527,23 @@ class ExerciseAgentRuntime(AgentRuntimeState):
                 "因此本轮无需删题，也未创建新版本。"
             )
             return
+        if decision.operation == "move_question" and self.builder is not None:
+            question_id = next(iter(decision.target_question_ids), "")
+            _, current_section, _ = self.builder.find_question(question_id)
+            if current_section is not None and current_section.get("id") == decision.destination_section_id:
+                self.result_status = "no_change"
+                self.changed = False
+                self.publishable = False
+                self.draft_content = self.builder.to_content()
+                self.dialogue_summary = (
+                    f"核验完成：{question_id} 已位于目标分区 {decision.destination_section_id}，"
+                    "因此未创建新版本。"
+                )
+                return
         chain = agent_chain_for_intent(decision.intent, self.trigger_type)
         if decision.operation == "ensure_question_type_count":
+            chain = ["question_designer", "finalizer"]
+        elif decision.operation == "move_question":
             chain = ["question_designer", "finalizer"]
         if self.emitter is not None:
             await self.emitter.emit_domain(
@@ -689,6 +704,34 @@ class ExerciseAgentRuntime(AgentRuntimeState):
     def _enforce_intent_contract(self, content: dict[str, Any]) -> list[str]:
         """Reject candidates that are valid documents but do not fulfill the teacher request."""
         decision = self.intent_plan
+        if decision is not None and decision.operation == "move_question":
+            question_id = next(iter(decision.target_question_ids), "")
+            baseline_builder = ExerciseBuilder(self.baseline_content)
+            candidate_builder = ExerciseBuilder(content)
+            baseline_question, _, _ = baseline_builder.find_question(question_id)
+            candidate_question, candidate_section, _ = candidate_builder.find_question(question_id)
+            failures: list[str] = []
+            if candidate_question is None or candidate_section is None:
+                failures.append(f"moved_question_missing:{question_id}")
+            elif candidate_section.get("id") != decision.destination_section_id:
+                failures.append(
+                    f"question_destination:{candidate_section.get('id')}!={decision.destination_section_id}"
+                )
+            if baseline_question != candidate_question:
+                failures.append(f"moved_question_content_changed:{question_id}")
+            baseline_locations = {
+                item["id"]: item["section_id"]
+                for item in baseline_builder.question_snapshot()
+                if item["id"] != question_id
+            }
+            candidate_locations = {
+                item["id"]: item["section_id"]
+                for item in candidate_builder.question_snapshot()
+                if item["id"] != question_id
+            }
+            if baseline_locations != candidate_locations:
+                failures.append("non_target_question_moved")
+            return failures
         if decision is None or decision.operation != "ensure_question_type_count":
             return []
         question_type = str(decision.question_type or "")
@@ -817,6 +860,29 @@ async def _call_agent(runtime: ExerciseAgentRuntime, agent_key: str, agent, deci
         and runtime.intent_plan.delete_question_ids
     ):
         return _positional_delete_decision(runtime)
+    if (
+        agent_key == "question_designer"
+        and runtime.intent_plan
+        and runtime.intent_plan.operation == "move_question"
+    ):
+        plan = runtime.intent_plan
+        question_id = next(iter(plan.target_question_ids), "")
+        _, section, _ = runtime.builder.find_question(question_id) if runtime.builder else (None, None, None)
+        if section is not None and section.get("id") == plan.destination_section_id:
+            return AgentDecision(
+                completed=True,
+                output={"question_id": question_id, "destination_section_id": plan.destination_section_id},
+                summary="题目分区移动完成",
+                message="已核验题目位于目标分区。",
+            )
+        return AgentDecision(
+            tool_calls=[ToolCall(tool_name="exercise_move_question", input={
+                "question_id": question_id,
+                "destination_section_id": plan.destination_section_id,
+            })],
+            summary=f"移动题目 {question_id}",
+            message=f"正在将 {question_id} 原样移动到目标分区。",
+        )
     if (
         is_mock_provider(runtime.provider)
         or agent_key in {"intent_planner", "repair_router", "exercise_qa"}

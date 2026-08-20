@@ -18,9 +18,20 @@ from app.agent.agents.video_script.tools.read_tools import _builder, _locked_pat
 from app.agent.registry import Tool, ToolContext, ToolResult, register_tool
 
 
-def _lock_guard(tc: ToolContext) -> None:
-    if any(path in {"", "$"} for path in _locked_paths(tc)):
+def _lock_guard(tc: ToolContext, requested_paths: list[str] | None = None) -> None:
+    locked = [str(path or "") for path in _locked_paths(tc)]
+    if any(path in {"", "$"} for path in locked):
         raise ValueError("当前任务文件已整体锁定，不允许修改")
+    for requested in requested_paths or []:
+        normalized = requested.replace("/", ".").strip(".$")
+        for locked_path in locked:
+            locked_normalized = locked_path.replace("/", ".").strip(".$")
+            if locked_normalized and (
+                normalized == locked_normalized
+                or normalized.startswith(f"{locked_normalized}.")
+                or locked_normalized.startswith(f"{normalized}.")
+            ):
+                raise ValueError(f"修改路径已锁定：{locked_path}")
 
 
 def _patch(path: str, op: str = "replace", value: Any = None) -> dict[str, Any]:
@@ -30,27 +41,51 @@ def _patch(path: str, op: str = "replace", value: Any = None) -> dict[str, Any]:
     return patch
 
 
+# 允许 LLM 使用简写形式（如 "update" 代替 "update_section_metadata"）
+OUTLINE_OPS = {
+    "add_section", "rename_section", "update_section_metadata",
+    "move_section", "merge_sections", "delete_section",
+}
+OUTLINE_OPS_ALIASES = {
+    "add": "add_section",
+    "rename": "rename_section",
+    "update": "update_section_metadata",
+    "move": "move_section",
+    "merge": "merge_sections",
+    "delete": "delete_section",
+}
+
+
 class ApplyVideoScriptOutlineOpsInput(BaseModel):
     operations: list[dict[str, Any]] = Field(min_length=1, description="原子章节操作列表，顺序执行")
 
     @model_validator(mode="before")
     @classmethod
     def validate_ops(cls, value):
-        for operation in value.get("operations", []):
-            if operation.get("op") not in {
-                "add_section", "rename_section", "update_section_metadata",
-                "move_section", "merge_sections", "delete_section",
-            }:
+        operations = value.get("operations", [])
+        for i, operation in enumerate(operations):
+            op = operation.get("op")
+            # 规范化简写形式
+            if op in OUTLINE_OPS_ALIASES:
+                operations[i]["op"] = OUTLINE_OPS_ALIASES[op]
+                op = operations[i]["op"]
+            if op not in OUTLINE_OPS:
                 raise ValueError(f"不支持的章节操作：{operation.get('op')}")
-            if operation.get("op") == "delete_section":
+            if op == "delete_section":
                 if not operation.get("move_scenes_to") and not operation.get("reason"):
                     raise ValueError("删除章节必须指定 move_scenes_to 或按指令删除的 reason")
         return value
 
 
 async def _vs_apply_outline_ops(tc: ToolContext, inp: ApplyVideoScriptOutlineOpsInput) -> ToolResult:
-    _lock_guard(tc)
     builder = _builder(tc)
+    requested_paths = [
+        f"$.outline.sections.{operation.get('section_id') or 'new'}"
+        for operation in inp.operations
+    ]
+    _lock_guard(tc, requested_paths)
+    before = builder.to_content()
+    before_revision = builder.revision
     affected_ids: list[str] = []
     patches: list[dict[str, Any]] = []
     summary: list[str] = []
@@ -108,12 +143,13 @@ async def _vs_apply_outline_ops(tc: ToolContext, inp: ApplyVideoScriptOutlineOps
             "ok": True,
             "summary": "；".join(summary),
             "affected_section_ids": sorted(set(affected_ids)),
-            "revision": revision,
+            "before_revision": before_revision, "after_revision": revision, "revision": revision,
             "patch": patches,
             "section_count": builder.count_sections(),
             "scene_count": builder.count_scenes(),
         })
     except Exception as exc:  # noqa: BLE001
+        builder.restore(before, before_revision)
         return ToolResult(ok=False, error=f"章节操作失败：{str(exc)[:300]}", error_code="outline_op_failed", retryable=True)
 
 

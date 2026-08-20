@@ -277,22 +277,16 @@ def _strip_text_prefix(text: str) -> str:
 
 
 def _clip_text_unit(text: str, limit: int = DENSITY_ITEM_CHARS) -> str:
+    """柔和清洗装饰符号，保留模型生成的完整教学表达，避免暴力截断破坏关键语义。"""
     text = _strip_text_prefix(text)
-    if len(text) <= limit:
-        return text
-    clipped = text[:limit].rstrip("，。、；：  ")
-    if len(clipped) > limit - 1:
-        clipped = clipped[:limit - 1]
-    return clipped + "…"
+    # 仅作首尾空白微调，不再强制暴力截断并追加省略号
+    return text.strip()
 
 
 def sanitize_slide_density(slide: dict[str, Any]) -> bool:
-    """确定性收敛页面密度，使边缘超标（如 27 字 > 25 字）不再阻断发布。
+    """柔性收敛页面密度，清洗前缀符号并保持教学内容语义完整，不再粗暴 pop 移除块。
 
-    - 逐条剥离装饰前缀并截断到 ≤25 字（body 与所有 blocks 文本单元）；
-    - body 条数 ≤6、块文本单元数 ≤6、正文+块合计 ≤120 字（超出的尾部截掉）。
-
-    返回 True 表示发生了修正。仅修改语义字段，不改元素几何。
+    返回 True 表示发生了清洗/调整。
     """
     changed = False
     body = slide.get("body")
@@ -300,9 +294,6 @@ def sanitize_slide_density(slide: dict[str, Any]) -> bool:
         clipped = [_clip_text_unit(item) for item in body]
         if clipped != body:
             slide["body"] = clipped
-            changed = True
-        if len(slide["body"]) > DENSITY_BODY_ITEMS:
-            slide["body"] = slide["body"][:DENSITY_BODY_ITEMS]
             changed = True
     blocks = slide.get("blocks")
     if isinstance(blocks, list):
@@ -312,62 +303,60 @@ def sanitize_slide_density(slide: dict[str, Any]) -> bool:
             kind = block.get("kind")
             if kind == "lead":
                 for key in ("text", "sub"):
-                    if block.get(key) and len(str(block[key])) > DENSITY_ITEM_CHARS:
-                        block[key] = _clip_text_unit(block[key])
-                        changed = True
+                    if block.get(key):
+                        new_val = _clip_text_unit(block[key])
+                        if new_val != block[key]:
+                            block[key] = new_val
+                            changed = True
             elif kind == "bullets":
                 for item in block.get("items") or []:
-                    if isinstance(item, dict) and len(str(item.get("text") or "")) > DENSITY_ITEM_CHARS:
-                        item["text"] = _clip_text_unit(item["text"])
-                        changed = True
+                    if isinstance(item, dict) and item.get("text"):
+                        new_val = _clip_text_unit(item["text"])
+                        if new_val != item["text"]:
+                            item["text"] = new_val
+                            changed = True
             elif kind == "steps":
                 for step in block.get("steps") or []:
                     for key in ("title", "detail"):
-                        if isinstance(step, dict) and len(str(step.get(key) or "")) > DENSITY_ITEM_CHARS:
-                            step[key] = _clip_text_unit(step[key])
-                            changed = True
+                        if isinstance(step, dict) and step.get(key):
+                            new_val = _clip_text_unit(step[key])
+                            if new_val != step[key]:
+                                step[key] = new_val
+                                changed = True
             elif kind == "compare":
                 for column in (block.get("left"), block.get("right")):
                     if not isinstance(column, dict):
                         continue
-                    if len(str(column.get("heading") or "")) > DENSITY_ITEM_CHARS:
-                        column["heading"] = _clip_text_unit(column["heading"])
-                        changed = True
+                    if column.get("heading"):
+                        new_val = _clip_text_unit(column["heading"])
+                        if new_val != column["heading"]:
+                            column["heading"] = new_val
+                            changed = True
                     items = column.get("items") or []
-                    clipped_items = [
-                        _clip_text_unit(item) if len(str(item)) > DENSITY_ITEM_CHARS else item
-                        for item in items
-                    ]
+                    clipped_items = [_clip_text_unit(item) for item in items]
                     if clipped_items != items:
                         column["items"] = clipped_items
                         changed = True
             elif kind == "quote":
                 for key in ("text", "citation"):
-                    if block.get(key) and len(str(block[key])) > DENSITY_ITEM_CHARS:
-                        block[key] = _clip_text_unit(block[key])
-                        changed = True
+                    if block.get(key):
+                        new_val = _clip_text_unit(block[key])
+                        if new_val != block[key]:
+                            block[key] = new_val
+                            changed = True
             elif kind == "note":
-                if block.get("text") and len(str(block["text"])) > DENSITY_ITEM_CHARS:
-                    block["text"] = _clip_text_unit(block["text"])
-                    changed = True
+                if block.get("text"):
+                    new_val = _clip_text_unit(block["text"])
+                    if new_val != block["text"]:
+                        block["text"] = new_val
+                        changed = True
             elif kind == "visual":
-                if block.get("caption") and len(str(block["caption"])) > DENSITY_ITEM_CHARS:
-                    block["caption"] = _clip_text_unit(block["caption"])
-                    changed = True
-        # 总量/块数封顶：超过上限时按顺序裁掉末尾块，直到合计 ≤120 字且块数 ≤6。
-        blocks = [block for block in blocks if isinstance(block, dict) and block.get("kind")]
-        total = sum(
-            len(unit)
-            for unit, _count in _density_units(blocks)
-        )
-        while len(blocks) > DENSITY_BODY_ITEMS or total > DENSITY_BODY_CHARS:
-            if not blocks:
-                break
-            removed = blocks.pop()
-            removed_chars = sum(len(unit) for unit, _count in _density_units([removed]))
-            total -= removed_chars
-            changed = True
-        slide["blocks"] = blocks
+                if block.get("caption"):
+                    new_val = _clip_text_unit(block["caption"])
+                    if new_val != block["caption"]:
+                        block["caption"] = new_val
+                        changed = True
+        slide["blocks"] = [b for b in blocks if isinstance(b, dict) and b.get("kind")]
     return changed
 
 

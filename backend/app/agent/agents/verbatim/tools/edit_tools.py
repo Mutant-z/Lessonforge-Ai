@@ -79,7 +79,10 @@ async def _vb_update_section(tc: ToolContext, inp: UpdateVerbatimSectionInput) -
     if section is None:
         return _fail(f"章节不存在：{inp.section_id}", "section_not_found")
     _lock_guard(tc, [_section_path(inp.section_id)])
-    _scope_guard(tc, [inp.section_id])
+    try:
+        _scope_guard(tc, [inp.section_id])
+    except ValueError as exc:
+        return _fail(str(exc), "section_scope_violation")
     changed: list[str] = []
     try:
         if inp.required_text is not None:

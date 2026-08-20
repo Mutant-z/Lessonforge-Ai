@@ -37,6 +37,7 @@ from app.models.entities import (
 from app.schemas.artifact import SeedanceVideoScriptContent
 from app.schemas.video_script_v4 import VIDEO_SCRIPT_V4, seedance_video_script_for_generation
 from app.schemas.video import (
+    NATIVE_VIDEO_RESOLUTIONS,
     SeedanceNativeScene,
     SeedanceNativeSettings,
     SeedanceSceneRegenerateRequest,
@@ -50,6 +51,7 @@ from app.schemas.video import (
 from app.services.media_provider_service import MediaProviderError
 from app.services.native_audio_video_provider import native_audio_video_provider
 from app.services.seedance_provider_service import transcribe_doubao_audio
+from app.services.video_generation_settings_service import effective_video_resolution
 
 
 def utcnow() -> datetime:
@@ -258,6 +260,14 @@ async def create_video_generation_quote(
     script = seedance_video_script_for_generation(script_artifact.content_json)
     video, _ = await _configs(db, course)
     provider = native_audio_video_provider(video)
+    resolution = request.resolution or await _preferred_video_resolution(course, provider)
+    if resolution not in NATIVE_VIDEO_RESOLUTIONS:
+        raise ValueError(f"不支持的视频分辨率：{resolution}")
+    requested = provider.capabilities().get("resolutions") or [provider.capabilities().get("resolution")]
+    if resolution not in requested:
+        label = "、".join(str(item) for item in requested if item)
+        raise ValueError(f"当前视频模型不支持 {resolution}；该模型仅支持：{label or '720p'}")
+    request = request.model_copy(update={"resolution": resolution})
     selected = list(script.scenes)
     if request.target_scene_id:
         target = next((item for item in selected if item.id == request.target_scene_id), None)
@@ -323,6 +333,13 @@ async def create_video_generation_quote(
         estimated_tokens=total_tokens, estimated_cost_fen=total_cost,
         maximum_cost_fen=quote.maximum_cost_fen, scenes=scene_quotes,
     )
+
+
+async def _preferred_video_resolution(course: CourseProject, provider) -> str:
+    """返回课程保存的偏好分辨率；未设置或不支持时退回模型默认。"""
+    supported = provider.capabilities().get("resolutions") or [provider.capabilities().get("resolution")]
+    fallback = str(provider.capabilities().get("resolution") or "1280x720")
+    return effective_video_resolution(course, supported, fallback)
 
 
 async def _consume_quote(db, task: CourseTask, quote_id: str, approved_max_cost_fen: int) -> VideoGenerationQuote:
@@ -467,10 +484,20 @@ async def _store_asset(db, *, course, run, path: Path, asset_type: str, scene_id
     return asset
 
 
-async def _normalize_clip(source: Path, target: Path) -> dict:
+def _dimensions_for_resolution(resolution: str) -> tuple[int, int]:
+    """把分辨率字符串解析为输出宽高；无法解析时回退 1280x720。"""
+    try:
+        width, height = (int(part) for part in str(resolution).lower().split("x", 1))
+    except (TypeError, ValueError):
+        return 1280, 720
+    return width, height
+
+
+async def _normalize_clip(source: Path, target: Path, resolution: str = "1280x720") -> dict:
     probe = await _probe(source)
+    width, height = _dimensions_for_resolution(resolution)
     await _run(
-        "-i", str(source), "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
+        "-i", str(source), "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
         "-r", "25", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-af", "loudnorm=I=-16:LRA=9:TP=-1.5", "-c:a", "aac", "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", str(target),
@@ -509,7 +536,7 @@ def _vtt(scenes: list[SeedanceNativeScene]) -> str:
     return "\n".join(lines)
 
 
-async def _compose(paths: list[Path], output_dir: Path, subtitle: Path, subtitle_enabled: bool) -> tuple[Path, Path, Path]:
+async def _compose(paths: list[Path], output_dir: Path, subtitle: Path, subtitle_enabled: bool, resolution: str = "1280x720") -> tuple[Path, Path, Path]:
     listing = output_dir / "concat.txt"
     listing.write_text("\n".join(f"file '{path.resolve().as_posix()}'" for path in paths), encoding="utf-8")
     base = output_dir / "base.mp4"
@@ -519,8 +546,10 @@ async def _compose(paths: list[Path], output_dir: Path, subtitle: Path, subtitle
         await _run("-i", str(base), "-i", str(subtitle), "-map", "0:v", "-map", "0:a", "-map", "1:0", "-c:v", "copy", "-c:a", "copy", "-c:s", "mov_text", "-movflags", "+faststart", str(final))
     else:
         shutil.copy2(base, final)
+    width, _ = _dimensions_for_resolution(resolution)
+    preview_width = min(width, 960)
     preview = output_dir / "preview.mp4"
-    await _run("-i", str(final), "-vf", "scale=960:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "29", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(preview))
+    await _run("-i", str(final), "-vf", f"scale={preview_width}:-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "29", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(preview))
     thumb = output_dir / "thumbnail.png"
     await _thumbnail(final, thumb)
     await _probe(final); await _probe(preview)
@@ -558,11 +587,16 @@ async def execute_seedance_video_run(run_id: str) -> None:
             source_content = SeedanceVideoGenerationContent.model_validate(source.content_json) if source and source.artifact_type == "video_generation" and (source.content_json or {}).get("schema_version") == "3.0" else None
             quote_id = str(request_data.get("quote_id") or (source_content.production_settings.quote_id if source_content else ""))
             approved = int(request_data.get("approved_max_cost_fen") or (source_content.production_settings.approved_max_cost_fen if source_content else 0))
+            quoted_request = dict(request_data.get("quote_request") or {})
+            run_resolution = str(quoted_request.get("resolution") or request_data.get("resolution") or (source_content.production_settings.resolution if source_content else "1280x720"))
+            if run_resolution not in NATIVE_VIDEO_RESOLUTIONS:
+                raise ValueError(f"video_generation_quote_resolution_mismatch：报价分辨率 {run_resolution} 已失效，请重新报价")
             settings = SeedanceNativeSettings(
                 model_config_id=video_config.id, model_name=video_config.model_name,
                 quote_id=quote_id or "recompose", approved_max_cost_fen=approved,
                 subtitle_enabled=bool((request_data.get("subtitle_enabled") if "subtitle_enabled" in request_data else True)),
                 provider=video_config.provider, api_mode=video_config.api_mode,
+                resolution=run_resolution,
             )
             if source_content:
                 scenes = [item.model_copy(deep=True) for item in source_content.scenes]
@@ -752,7 +786,7 @@ async def execute_seedance_video_run(run_id: str) -> None:
                     raw = output_dir / f"{scene.id}-attempt-{attempt}-raw.mp4"; raw.write_bytes(result.raw)
                     normalized = output_dir / f"{scene.id}-attempt-{attempt}.mp4"
                     try:
-                        probe = await _normalize_clip(raw, normalized)
+                        probe = await _normalize_clip(raw, normalized, settings.resolution)
                         audio = output_dir / f"{scene.id}-attempt-{attempt}.wav"
                         await _extract_audio(normalized, audio)
                     except Exception:
@@ -858,7 +892,7 @@ async def execute_seedance_video_run(run_id: str) -> None:
             scene.start_seconds = cursor; scene.end_seconds = cursor + duration; cursor += duration
         subtitle_path = output_dir / "subtitles.vtt"; subtitle_path.write_text(_vtt(scenes), encoding="utf-8")
         await _publish(run_id, "video_composition_started", progress=82)
-        final, preview, thumb = await _compose(paths, output_dir, subtitle_path, settings.subtitle_enabled)
+        final, preview, thumb = await _compose(paths, output_dir, subtitle_path, settings.subtitle_enabled, settings.resolution)
 
         async with SessionLocal() as db:
             run = await db.get(GenerationRun, run_id); task = await db.get(CourseTask, run.course_task_id); course = await db.get(CourseProject, run.course_id)

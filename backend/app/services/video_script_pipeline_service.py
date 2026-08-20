@@ -150,6 +150,12 @@ def _scene_scope(message: AgentMessage, source: Artifact | None) -> list[str]:
     structured = list(metadata.get("selected_scene_ids") or metadata.get("target_scene_ids") or [])
     if structured:
         return [str(value) for value in structured if str(value)]
+    active_scene_id = str(metadata.get("active_scene_id") or "")
+    source_scene_ids = {
+        str(item.get("id")) for item in ((source.content_json or {}).get("scenes", []) if source else [])
+    }
+    if active_scene_id in source_scene_ids:
+        return [active_scene_id]
     return []
 
 
@@ -177,10 +183,11 @@ async def _run_pipeline_full(runtime: VideoScriptAgentRuntime) -> dict:
     content = dict(runtime.draft_content)
     section_count = len((content.get("outline") or {}).get("sections", []))
     scene_count = len(content.get("scenes", []))
-    runtime.dialogue_summary = (
-        f"视频脚本已生成完成，共 {section_count} 个动态章节、{scene_count} 个分镜。"
-        "章节由 AI 根据课程内容动态规划，你可以在右侧预览，或继续输入指令调整结构与内容。"
-    )
+    if not runtime.dialogue_summary:
+        runtime.dialogue_summary = (
+            f"视频脚本已生成完成，共 {section_count} 个动态章节、{scene_count} 个分镜。"
+            "章节由 AI 根据课程内容动态规划，你可以在右侧预览，或继续输入指令调整结构与内容。"
+        )
     return content
 
 
@@ -191,39 +198,28 @@ async def _run_pipeline_message(runtime: VideoScriptAgentRuntime, source: Artifa
     if emitter is not None:
         await emitter.agent_status_delta("orchestrator", "正在理解修改范围并创建动态执行计划。\n")
         await emitter.revision_started(1, runtime.pipeline_run.max_revision_rounds, reason=message.content[:200], target_agents=["orchestrator"])
-        await emitter.emit_domain("repair.started", message="已开始创建视频脚本新修订版本", payload={
+        await emitter.emit_domain("draft.update.started", message="已开始更新视频脚本候选稿", payload={
             "revision": source.version + 1, "selected_section_ids": runtime.selected_section_ids,
             "selected_scene_ids": runtime.selected_scene_ids,
         })
     await runtime.run()
     await _pause_at_safe_boundary(runtime, "revision")
     source_content = source.content_json or {}
-    if runtime.result_status in {"no_change", "rejected", "needs_confirmation"}:
+    if runtime.result_status in {"no_change", "rejected", "needs_confirmation", "settings_applied", "settings_unchanged", "settings_rejected"}:
         content = dict(source_content)
         if runtime.result_status == "rejected":
-            assistant_reply = "本轮修订未通过视频脚本质询门禁，未创建新版本；原视频脚本保持不变。"
+            assistant_reply = runtime.dialogue_summary or "候选稿仍有发布阻断问题，未创建新版本；原视频脚本保持不变。"
         elif runtime.result_status == "no_change":
-            assistant_reply = "当前视频脚本已符合要求，本轮未创建空转版本；原视频脚本保持不变。"
+            assistant_reply = runtime.dialogue_summary or "当前视频脚本已符合要求，本轮未创建空转版本；原视频脚本保持不变。"
         else:
             assistant_reply = runtime.dialogue_summary or "修改范围或目标存在歧义，请确认后重试；本轮未创建新版本。"
     else:
         content = dict(runtime.draft_content)
-        assistant_reply = f"已根据你的要求创建视频脚本 V{source.version + 1}；原版本仍可在版本历史中恢复。"
+        assistant_reply = runtime.dialogue_summary or f"已根据你的要求创建视频脚本 V{source.version + 1}；原版本仍可在版本历史中恢复。"
     runtime.dialogue_summary = assistant_reply
     if emitter is not None:
         await emitter.revision_completed(1, applied_changes=[f"教师指令：{message.content[:60]}"])
-        await emitter.emit_domain("repair.completed", message="视频脚本修订已完成", payload={"revision": source.version + 1})
-        await emitter.emit_domain(
-            "polish.result",
-            message=assistant_reply,
-            payload={
-                "result_status": runtime.result_status,
-                "active_intent": runtime.active_intent,
-                "changed_sections": list(runtime.affected_section_ids),
-                "changed_scenes": list(runtime.affected_scene_ids),
-            },
-        )
-        await emitter.agent_message_append(assistant_reply)
+        await emitter.emit_domain("draft.update.completed", message="视频脚本候选稿更新已完成", payload={"revision": source.version + 1})
     return content, AgentArtifactRevisionPayload(content_json=content, assistant_reply=assistant_reply)
 
 
@@ -245,7 +241,40 @@ async def complete_video_script_pipeline_after_publish(runtime: VideoScriptAgent
     if runtime is None:
         return
     try:
+        update = runtime.video_resolution_update
+        if update is not None:
+            if runtime.intent_plan and runtime.intent_plan.resolution_setting_only:
+                runtime.dialogue_summary = (
+                    f"视频生成分辨率已更新为 {update.resolution}。"
+                    if update.changed
+                    else f"视频生成分辨率已经是 {update.resolution}，无需重复修改。"
+                ) + " 视频脚本内容保持不变；后续视频报价与生成将使用该分辨率。"
+        if update is not None and runtime.emitter is not None:
+            await runtime.emitter.emit_domain(
+                "video_generation.setting.updated",
+                agent={"id": "intent_planner"},
+                message=f"视频生成分辨率已设为 {update.resolution}",
+                payload={
+                    "resolution": update.resolution,
+                    "previous_resolution": update.previous_resolution,
+                    "changed": update.changed,
+                },
+            )
+        if runtime.emitter is not None:
+            await runtime.emitter.emit_domain(
+                "polish.result",
+                message=runtime.dialogue_summary,
+                payload={
+                    "result_status": runtime.result_status,
+                    "active_intent": runtime.active_intent,
+                    "changed_sections": list(runtime.affected_section_ids),
+                    "changed_scenes": list(runtime.affected_scene_ids),
+                    "resolution": update.resolution if update is not None else None,
+                },
+            )
         await _finish_pipeline(runtime, "completed", artifact_id=artifact_id)
+        runtime.pending_video_resolution = None
+        runtime.video_resolution_update = None
     except Exception:  # The already committed official Artifact remains authoritative.
         logger.exception(
             "video_script pipeline terminal event failed after Artifact commit",
@@ -296,7 +325,8 @@ async def run_video_script_pipeline(db, course, task, run: GenerationRun, bluepr
             source_versions=source_versions,
             change_summary=f"Agent 对话修改：{user_message.content[:80]}",
             runtime=runtime,
-            skip_publish=runtime.result_status in {"no_change", "needs_confirmation", "rejected"},
+            skip_publish=runtime.result_status in {"no_change", "needs_confirmation", "rejected", "settings_applied", "settings_unchanged", "settings_rejected"},
+            keep_paused=runtime.result_status == "needs_confirmation",
         )
     if run.trigger_type == "sync_context":
         if not source:

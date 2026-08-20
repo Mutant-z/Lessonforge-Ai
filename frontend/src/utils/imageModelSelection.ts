@@ -2,7 +2,10 @@ import type { ModelConfigItem } from '../types/settings';
 
 export function imageGenerationModels(configs: ModelConfigItem[]): ModelConfigItem[] {
   return configs.filter(
-    item => item.provider !== 'mock' && item.capabilities?.includes('image_generation'),
+    item => item.provider !== 'mock'
+      && item.model_category === 'vision'
+      && item.model_purpose === 'image_generation'
+      && item.capabilities?.includes('image_generation'),
   );
 }
 

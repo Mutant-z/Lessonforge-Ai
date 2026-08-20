@@ -21,6 +21,10 @@ async def lifespan(application: FastAPI):
     get_settings().prepare_storage()
     await create_schema()
     async with SessionLocal() as db:
+        from app.services.video_generation_settings_service import reconcile_video_generation_preferences
+        application.state.video_generation_preference_reconciliation = (
+            await reconcile_video_generation_preferences(db)
+        )
         await cleanup_orphan_artifact_assets(db)
         from app.services.seedance_provider_service import probe_configured_seedance_models
         from app.services.gemini_interactions_video_service import probe_configured_gemini_video_models

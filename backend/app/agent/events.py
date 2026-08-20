@@ -185,10 +185,11 @@ class PipelineEventEmitter:
 
     async def artifact_patch(self, artifact_id: str, artifact_type: str,
                              patch: list[dict[str, Any]], summary: str = "",
-                             slide_index: int | None = None):
+                             slide_index: int | None = None, **metadata: Any):
         return await self.emit("artifact_patch", artifact_id=artifact_id,
                                artifact_type=artifact_type, patch=patch[:100],
-                               summary=summary[:500], slide_index=slide_index)
+                               summary=summary[:500], slide_index=slide_index,
+                               **metadata)
 
     async def qa_issue_found(self, issue: dict[str, Any]):
         return await self.emit("qa_issue_found", issue={key: issue.get(key) for key in (
@@ -384,7 +385,9 @@ class PipelineEventEmitter:
 
     async def agent_message_completed(self, summary: str | None = None,
                                       sub_agents: list[dict] | None = None,
-                                      artifact_id: str | None = None) -> None:
+                                      artifact_id: str | None = None,
+                                      replace_existing: bool = True,
+                                      metadata: dict[str, Any] | None = None) -> None:
         """完成对话单线：强制 flush，可选整段替换正文，写 completed 事件并清空镜像状态。"""
         if not self._dialogue_message_id:
             return None
@@ -394,13 +397,23 @@ class PipelineEventEmitter:
             if row is None:
                 self._dialogue_message_id = None
                 return None
-            final_content = summary if summary is not None else (row.content or "")
+            existing_content = row.content or ""
+            final_content = summary if summary is not None else existing_content
             if summary is not None:
-                row.content = summary
-                # 先发整段替换让前端流式内容同步，再发 completed
-                self._emit_dialogue(db, "agent_message_delta", message_id=row.id,
-                                    delta=summary, reset=True)
+                if replace_existing or not existing_content.strip():
+                    row.content = summary
+                    self._emit_dialogue(db, "agent_message_delta", message_id=row.id,
+                                        delta=summary, reset=True)
+                else:
+                    separator = "\n\n" if not existing_content.endswith("\n") else "\n"
+                    suffix = f"{separator}{summary}"
+                    row.content = existing_content + suffix
+                    final_content = row.content
+                    self._emit_dialogue(db, "agent_message_delta", message_id=row.id,
+                                        delta=suffix, reset=False)
             row.status = "completed"
+            if metadata:
+                row.metadata_json = {**(row.metadata_json or {}), **metadata}
             if artifact_id is not None:
                 row.artifact_id = artifact_id
             self._emit_dialogue(db, "agent_message_completed", message={

@@ -2,6 +2,7 @@
 import { computed, onMounted, watch } from 'vue';
 import { Cpu, Microphone, Picture, VideoCamera } from '@element-plus/icons-vue';
 import { useModelConfigStore } from '../../stores/modelConfigs';
+import type { ModelCategory } from '../../types/settings';
 
 const props = withDefaults(defineProps<{
   modelValue?: string | null;
@@ -23,6 +24,11 @@ const emit = defineEmits<{
 }>();
 
 const store = useModelConfigStore();
+const targetCategory = computed<ModelCategory>(() => (
+  props.capability === 'vision_review' || props.capability === 'image_generation' ? 'vision'
+    : props.capability && ['video_generation', 'native_audio_video_generation', 'speech_generation', 'speech_recognition', 'media_composition'].includes(props.capability) ? 'video'
+      : 'text'
+));
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
 const mediaTransportModes: Partial<Record<NonNullable<typeof props.capability>, string[]>> = {
   image_generation: ['openai_images', 'google_gemini_image', 'custom_image_http', 'mock_media'],
@@ -43,9 +49,10 @@ function hasCompatibleTransport(item: typeof store.configs[number]) {
 }
 
 const availableConfigs = computed(() => {
-  if (!props.capability) return store.configs;
+  const categoryConfigs = store.configs.filter(item => (item.model_category || 'text') === targetCategory.value);
+  if (!props.capability) return categoryConfigs.filter(item => (item.model_purpose || 'text_chat') === 'text_chat');
   // 能力型选择器不能回退展示不具备该能力的模型，否则会造成“选了图片模型但实际只能生成文本”的假象。
-  return store.configs.filter(item => (
+  return categoryConfigs.filter(item => (
     item.capabilities?.includes(props.capability!) && hasCompatibleTransport(item)
   ));
 });
@@ -81,7 +88,7 @@ watch(
   () => [store.loaded, store.configs.length, props.modelValue] as const,
   () => {
     if (!props.modelValue && availableConfigs.value.length) {
-      const eligibleActive = availableConfigs.value.find(item => item.id === store.activeConfig?.id);
+      const eligibleActive = availableConfigs.value.find(item => item.id === store.activeConfigFor(targetCategory.value)?.id);
       emit('update:modelValue', (eligibleActive || availableConfigs.value[0]).id);
     }
   },

@@ -40,7 +40,7 @@ from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext
 from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan
 from app.core.database import SessionLocal
-from app.models.entities import AgentHumanRequest, AgentRunInstruction, PipelineRun
+from app.models.entities import AgentHumanRequest, AgentMessage, AgentRunInstruction, PipelineRun
 from app.schemas.verbatim_v2 import VERBATIM_V2, VerbatimContentV2
 
 logger = logging.getLogger(__name__)
@@ -86,12 +86,21 @@ class VerbatimAgentRuntime(AgentRuntimeState):
     repair_fingerprint: str = ""
     repair_round: int = 0
     max_revision_rounds: int = MAX_REVISION_ROUNDS
+    # 逐字稿支持多轮上下文调研、LLM 润色与独立质询，不因估算 Token 达到通用阈值而中断。
+    # 结构化输出仍由 V2 Schema 做最小可持久化校验。
+    max_estimated_tokens: int = 0
+    max_context_tokens: int = 0
     publishable: bool = False
     draft_content: dict[str, Any] = field(default_factory=dict)
     draft_markdown: str = ""
     request_metadata: dict[str, Any] = field(default_factory=dict)
     handoff_aliases: dict[str, str] = field(default_factory=lambda: INTENT_AGENT_ALIASES)
     changed: bool = False
+    pending_course_title: str | None = None
+    course_title_update: Any = None
+    dialogue_context: list[dict[str, Any]] = field(default_factory=list)
+    pending_clarification: dict[str, Any] = field(default_factory=dict)
+    requires_human_confirmation: bool = False
 
     # 人工确认（同一 GenerationRun 从 checkpoint 恢复）
     confirmation_tokens: list[str] = field(default_factory=list)
@@ -140,7 +149,26 @@ class VerbatimAgentRuntime(AgentRuntimeState):
             self.tool_context.runtime = self
             self.tool_context.emitter = self.emitter
             self.tool_context.artifacts = self.artifacts
+        confirmation = dict((self.request_metadata or {}).get("human_confirmation") or {})
+        if confirmation.get("confirmation_token"):
+            self.confirmation_tokens = [str(confirmation["confirmation_token"])]
+            self.resumed_confirmation = confirmation
         await self._restore_confirmation_state()
+
+    def checkpoint_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "context_snapshot": self.context.snapshot(),
+            "selected_section_ids": list(self.selected_section_ids),
+            "active_intent": self.active_intent,
+            "pending_clarification": dict(self.pending_clarification),
+            "pending_course_title": self.pending_course_title,
+            "source_artifact_id": getattr(self.source_artifact, "id", None),
+            "source_version": getattr(self.source_artifact, "version", None),
+        }
+        if self.builder is not None:
+            payload["draft_snapshot"] = self.builder.to_content()
+            payload["draft_revision"] = self.builder.revision
+        return payload
 
     async def _restore_confirmation_state(self) -> None:
         """从 checkpoint 恢复人工确认令牌与确认信息（同一 GenerationRun 恢复）。"""
@@ -165,11 +193,24 @@ class VerbatimAgentRuntime(AgentRuntimeState):
         decision = await infer_verbatim_intent(
             self.provider, self.trigger_type, instruction,
             self.selected_section_ids or None, mode,
+            pending_clarification=self.pending_clarification,
         )
         self.intent_plan = decision
         self.active_intent = decision.intent
         self.selected_section_ids = list(self.selected_section_ids or [])
         self.content_policy = "edit" if decision.mutates_document else "preserve"
+        if decision.intent == "CLARIFICATION_REQUIRED":
+            self.pending_clarification = {
+                "kind": "course_title" if "课程名称" in (decision.clarification_question or "") else "unknown",
+                "status": "pending",
+                "question": decision.clarification_question or "",
+                "source_artifact_id": getattr(self.source_artifact, "id", None),
+                "source_version": getattr(self.source_artifact, "version", None),
+            }
+        else:
+            self.pending_clarification = {}
+            if decision.intent == "COURSE_METADATA_UPDATE":
+                self.pending_course_title = decision.course_title
         if self.emitter is not None:
             await self.emitter.emit_domain(
                 "intent.recognized",
@@ -288,6 +329,19 @@ class VerbatimAgentRuntime(AgentRuntimeState):
             row = await db.get(PipelineRun, self.pipeline_run.id)
             if row:
                 row.status = "paused"
+                assistant = await db.scalar(select(AgentMessage).where(
+                    AgentMessage.run_id == self.generation_run.id,
+                    AgentMessage.role == "assistant",
+                ).order_by(AgentMessage.created_at.desc()))
+                if assistant is not None:
+                    assistant.metadata_json = {
+                        **(assistant.metadata_json or {}),
+                        "clarification": {
+                            **self.pending_clarification,
+                            "request_id": request_id,
+                            "kind": "course_title" if decision.intent == "CLARIFICATION_REQUIRED" and "课程名称" in (decision.clarification_question or "") else self.pending_clarification.get("kind", "unknown"),
+                        },
+                    }
                 row.checkpoint_json = {
                     **(row.checkpoint_json or {}),
                     "pending_confirmation": {
@@ -295,6 +349,7 @@ class VerbatimAgentRuntime(AgentRuntimeState):
                         "request_type": "verbatim_confirmation",
                         "intent": decision.intent,
                         "requires_confirmation": True,
+                        "token": f"agent-{request_id}",
                     },
                 }
                 row.plan_json = {
@@ -355,6 +410,27 @@ class VerbatimAgentRuntime(AgentRuntimeState):
             self.dialogue_summary = (
                 f"为准确完成任务，请补充说明：{decision.clarification_question or '你的修改目标'}"
             )
+            if self.pipeline_run is not None:
+                async with SessionLocal() as db:
+                    row = await db.get(PipelineRun, self.pipeline_run.id)
+                    if row is not None:
+                        row.status = "paused"
+                        row.checkpoint_json = {
+                            **(row.checkpoint_json or {}),
+                            "active_intent": decision.intent,
+                            "pending_clarification": dict(self.pending_clarification),
+                            **self.checkpoint_payload(),
+                        }
+                    assistant = await db.scalar(select(AgentMessage).where(
+                        AgentMessage.run_id == self.generation_run.id,
+                        AgentMessage.role == "assistant",
+                    ).order_by(AgentMessage.created_at.desc()))
+                    if assistant is not None:
+                        assistant.metadata_json = {
+                            **(assistant.metadata_json or {}),
+                            "clarification": dict(self.pending_clarification),
+                        }
+                    await db.commit()
             return
         # ANSWER_ONLY：读取与分析后直接回答，不创建新版本。
         if decision.intent == "ANSWER_ONLY":
@@ -382,6 +458,27 @@ class VerbatimAgentRuntime(AgentRuntimeState):
         self.repair_fingerprint = ""
         await self._run_with_repair(chain)
         await self._finalize()
+
+    def _mutation_contract_issues(self, source: dict[str, Any] | None, candidate: dict[str, Any]) -> list[str]:
+        if not source:
+            return []
+        intent = self.active_intent
+        if intent == "COURSE_METADATA_UPDATE":
+            allowed_source = dict(source)
+            allowed_candidate = dict(candidate)
+            allowed_source["course_info"] = {**(source.get("course_info") or {}), "course_title": candidate.get("course_info", {}).get("course_title")}
+            allowed_candidate["course_info"] = {**(candidate.get("course_info") or {}), "course_title": allowed_source["course_info"].get("course_title")}
+            return ["课程名称意图只能修改 $.course_info.course_title"] if allowed_source != allowed_candidate else []
+        selected = set(self.selected_section_ids or [])
+        if not selected:
+            return []
+        source_sections = {str(item.get("id")): item for item in source.get("sections", [])}
+        candidate_sections = {str(item.get("id")): item for item in candidate.get("sections", [])}
+        changed = {
+            sid for sid in set(source_sections) & set(candidate_sections)
+            if source_sections[sid] != candidate_sections[sid]
+        } | (set(source_sections) ^ set(candidate_sections))
+        return [f"候选稿修改了选定范围之外的章节：{sorted(changed - selected)}"] if changed - selected else []
 
     def _answer_only_reply(self) -> str:
         builder = self.builder
@@ -488,11 +585,17 @@ class VerbatimAgentRuntime(AgentRuntimeState):
                 retryable=True,
             ) from exc
         self.draft_content = content
+        source_content = self.source_artifact.content_json if self.source_artifact else None
+        contract_issues = self._mutation_contract_issues(source_content, content)
+        if contract_issues:
+            self.result_status = "rejected"
+            self.publishable = False
+            self.dialogue_summary = "本轮修改超出已确认的范围，原逐字稿保持不变。"
+            return
         from app.schemas.verbatim_v2 import verbatim_v2_to_markdown
 
         self.draft_markdown = verbatim_v2_to_markdown(content)
         # 无真实变更 → no_change（保留原版，不创建空版本）。
-        source_content = self.source_artifact.content_json if self.source_artifact else None
         if source_content is not None:
             source_norm = None
             if source_content.get("schema_version") == VERBATIM_V2:
@@ -512,6 +615,8 @@ class VerbatimAgentRuntime(AgentRuntimeState):
         self.result_status = "applied"
         self.changed = True
         self.publishable = True
+        if self.active_intent == "COURSE_METADATA_UPDATE":
+            self.dialogue_summary = f"课程名称已更新为“{self.pending_course_title}”，逐字稿正文和时间轴保持不变。"
 
 
 # ---------------------------------------------------------------------------

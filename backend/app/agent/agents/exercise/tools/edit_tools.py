@@ -270,6 +270,58 @@ class AddQuestionGroupInput(BaseModel):
     group: dict = Field(description="完整题组对象（kind=question_group，含 title/stimuli/sub_questions）")
 
 
+class MoveQuestionInput(BaseModel):
+    question_id: str = Field(description="要移动的既有顶层题目 ID")
+    destination_section_id: str = Field(description="目标分区 ID")
+
+
+async def _exercise_move_question(tc: ToolContext, inp: MoveQuestionInput) -> ToolResult:
+    """原子移动既有题目，不允许模型重写题目，并同步重算分区分值。"""
+    from app.agent.agents.exercise.builder import ExerciseBuilder
+
+    builder = _builder(tc)
+    question, source, group = builder.find_question(inp.question_id)
+    destination = builder.find_section(inp.destination_section_id)
+    if question is None or source is None:
+        return ToolResult(ok=False, error=f"题目不存在：{inp.question_id}", error_code="question_not_found")
+    if group is not None:
+        return ToolResult(ok=False, error="题组子题不能脱离共享材料单独移动", error_code="group_question_move_unsupported")
+    if destination is None:
+        return ToolResult(ok=False, error=f"分区不存在：{inp.destination_section_id}", error_code="section_not_found")
+    source_path = builder.question_json_path(inp.question_id)
+    destination_index = next(
+        index for index, item in enumerate(builder.sections) if item.get("id") == inp.destination_section_id
+    )
+    _lock_guard(tc, [source_path, f"$.sections[{destination_index}].blocks"])
+    _scope_guard(tc, question_ids=[inp.question_id])
+    candidate = ExerciseBuilder(builder.to_content())
+    try:
+        result = candidate.move_question(inp.question_id, inp.destination_section_id)
+        validated = ExerciseContent.model_validate(candidate.to_content()).model_dump()
+    except Exception as exc:
+        return ToolResult(
+            ok=False,
+            error=f"题目移动未应用：{str(exc)[:500]}",
+            error_code="question_move_rejected",
+            retryable=True,
+            output={"rolled_back": True, "builder_revision": builder.revision},
+        )
+    if result["moved"]:
+        builder.replace_content(validated, revision=builder.revision + 1)
+    runtime = getattr(tc, "runtime", None)
+    if runtime is not None:
+        runtime.affected_section_ids = sorted({
+            result["source_section_id"], result["destination_section_id"],
+        })
+    return ToolResult(output={
+        "ok": True,
+        **result,
+        "path": builder.question_json_path(inp.question_id),
+        "section_scores": [{"id": s.get("id"), "score": s.get("score")} for s in builder.sections],
+        "note": "既有题目已原样移动；分区分值已按各区题目分值之和同步重算。",
+    })
+
+
 async def _exercise_add_question_group(tc: ToolContext, inp: AddQuestionGroupInput) -> ToolResult:
     """向指定分区添加一个共享材料题组。"""
     builder = _builder(tc)
@@ -423,6 +475,10 @@ def _register_edit_tools() -> None:
     register_tool(Tool(
         "exercise_add_question", "向指定分区添加一道独立题目",
         AddQuestionInput, _exercise_add_question,
+    ))
+    register_tool(Tool(
+        "exercise_move_question", "原子移动一道既有顶层题目到目标分区，并保持题目内容不变",
+        MoveQuestionInput, _exercise_move_question,
     ))
     register_tool(Tool(
         "exercise_apply_question_batch",

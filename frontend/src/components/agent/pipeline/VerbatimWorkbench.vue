@@ -315,6 +315,7 @@ watch(
     >
       <VerbatimPreviewWorkbench
         :content="content"
+        :course-title="projectStore.project?.course?.title || ''"
         :draft="isRunning || pipelineStore.draftArtifact != null"
         @select-section="selectSection"
       />

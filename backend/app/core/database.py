@@ -58,6 +58,10 @@ async def create_schema() -> None:
                     sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN api_mode VARCHAR(50) NOT NULL DEFAULT 'text_chat'"))
                 if "adapter_config_json" not in columns:
                     sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN adapter_config_json JSON NOT NULL DEFAULT '{}'"))
+                if "model_category" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN model_category VARCHAR(20) NOT NULL DEFAULT 'text'"))
+                if "model_purpose" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN model_purpose VARCHAR(40) NOT NULL DEFAULT 'text_chat'"))
 
             for table_name in ("course_projects", "course_intake_sessions"):
                 if table_name in inspector.get_table_names():

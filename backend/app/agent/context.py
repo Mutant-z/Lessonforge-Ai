@@ -61,6 +61,7 @@ class ContextState:
     upstream: dict[str, Any] = field(default_factory=dict)   # {kind: content_json}
     template: dict[str, Any] = field(default_factory=dict)   # resolve_ppt_template 结果
     extra_notes: list[str] = field(default_factory=list)
+    dialogue_context: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[ContextBlock] = field(default_factory=list)
     _order: int = 0
     decisions: list[dict[str, Any]] = field(default_factory=list)
@@ -123,6 +124,9 @@ class ContextState:
             blocks.append(ContextBlock("knowledge", "PPT 设计知识库", self.knowledge))
         if self.user_instruction:
             blocks.append(ContextBlock("user_instruction", "用户/教师指令", self.user_instruction))
+        dialogue = getattr(self, "dialogue_context", None)
+        if dialogue:
+            blocks.append(ContextBlock("dialogue", "最近逐字稿对话", dialogue))
         if self.locks:
             paths = [getattr(lock, "json_path", None) or (lock.get("json_path") if isinstance(lock, dict) else None) for lock in self.locks]
             blocks.append(ContextBlock("locks", "锁定路径", [p for p in paths if p]))

@@ -9,6 +9,7 @@ const emit=defineEmits<{edit:[scene:VideoGenerationScene];recompose:[]}>();
 const player=ref<HTMLVideoElement|null>(null),videoUrl=ref(''),subtitleUrl=ref(''),activeSceneId=ref(props.content.scenes[0]?.id||''),loading=ref(false),mediaError=ref('');
 const activeScene=computed(()=>props.content.scenes.find(s=>s.id===activeSceneId.value)||props.content.scenes[0]);
 const duration=computed(()=>props.content.outputs.duration_seconds||props.content.scenes.at(-1)?.end_seconds||0);
+const resolutionLabel=computed(()=>props.content.production_settings.resolution==='854x480'?'480p':'720p');
 const money=(fen:number|undefined)=>`¥${((fen||0)/100).toFixed(2)}`;
 const timecode=(seconds:number)=>`${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(Math.round(seconds%60)).padStart(2,'0')}`;
 async function signedUrl(id?:string|null){if(!id)return '';const{data}=await api.post<{token:string}>(`/video-assets/${id}/token`);return `/api/v1/video-assets/${id}/stream?token=${encodeURIComponent(data.token)}`}
@@ -21,7 +22,7 @@ watch(()=>[props.content.outputs.preview_asset_id,props.content.outputs.final_as
 
 <template>
   <div class="native-preview">
-    <header class="masthead"><div><span>SEEDANCE NATIVE / V{{ version }}</span><h1>原生有声分段微课</h1><p>视频脚本 V{{ content.source_versions.video_script }} · {{ content.production_settings.model_name }}</p></div><dl><div><dt>时长</dt><dd>{{ timecode(duration) }}</dd></div><div><dt>片段</dt><dd>{{ content.scenes.length }}</dd></div><div><dt>实耗</dt><dd>{{ money(Number(content.cost_summary.actual_cost_fen)) }}</dd></div><div><dt>规格</dt><dd>720p / 25fps</dd></div></dl></header>
+    <header class="masthead"><div><span>SEEDANCE NATIVE / V{{ version }}</span><h1>原生有声分段微课</h1><p>视频脚本 V{{ content.source_versions.video_script }} · {{ content.production_settings.model_name }}</p></div><dl><div><dt>时长</dt><dd>{{ timecode(duration) }}</dd></div><div><dt>片段</dt><dd>{{ content.scenes.length }}</dd></div><div><dt>实耗</dt><dd>{{ money(Number(content.cost_summary.actual_cost_fen)) }}</dd></div><div><dt>规格</dt><dd>{{ resolutionLabel }} / 25fps</dd></div></dl></header>
     <section class="player-grid">
       <div class="player"><div v-if="loading" class="state"><el-icon class="is-loading"><VideoCamera/></el-icon>加载视频</div><video v-else-if="videoUrl" ref="player" controls playsinline @timeupdate="sync"><source :src="videoUrl" type="video/mp4"/><track v-if="subtitleUrl" kind="subtitles" srclang="zh" label="中文" :src="subtitleUrl" default/></video><div v-else class="state">{{ mediaError||'视频资源不可用' }}</div></div>
       <aside v-if="activeScene"><span>{{ activeScene.id }} / {{ activeScene.continuity_group }}</span><h2>片段 {{ String(activeScene.sequence).padStart(2,'0') }}</h2><div class="status" :class="activeScene.qa?.status">{{ activeScene.qa?.status==='passed'?'事实 QA 通过':'事实 QA 待处理' }}</div><label>计划口播</label><p>{{ activeScene.spoken_text }}</p><label>ASR 实际文本</label><p>{{ activeScene.actual_transcript||'尚未转写' }}</p><dl><div><dt>Provider 任务</dt><dd>{{ activeScene.provider_job_id||'复用缓存' }}</dd></div><div><dt>片段实耗</dt><dd>{{ money(activeScene.actual_cost_fen) }}</dd></div><div><dt>连续性依赖</dt><dd>{{ activeScene.reference_scene_ids.join('、')||'无' }}</dd></div></dl><el-button :icon="Edit" :disabled="disabled" @click="emit('edit',activeScene)">修改完整片段</el-button></aside>

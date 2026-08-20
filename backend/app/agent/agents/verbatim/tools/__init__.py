@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.agent.agents.verbatim.tools.check_tools import _register_check_tools
 from app.agent.agents.verbatim.tools.edit_tools import _register_edit_tools
+from app.agent.agents.verbatim.tools.metadata_tools import _register_metadata_tools
 from app.agent.agents.verbatim.tools.read_tools import _register_read_tools
 
 _loaded = False
@@ -16,6 +17,7 @@ def register_verbatim_tools() -> None:
         return
     _register_read_tools()
     _register_edit_tools()
+    _register_metadata_tools()
     _register_check_tools()
     _loaded = True
 

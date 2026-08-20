@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     task_sheet_agent_runtime_enabled: bool = True
     # 视频脚本 Agent V4 动态工具化流水线开关（动态章节 + 意图识别 + 工具 + QA 返修）；
     # 关闭时回退旧单次生成路径。
-    video_script_agent_runtime_enabled: bool = False
+    video_script_agent_runtime_enabled: bool = True
     # 教师逐字稿 Agent V2 动态工具化流水线开关（意图识别 + 工具修改候选稿 + QA 返修 +
     # 流式可视化）；关闭时回退旧的单次确定性派生路径。默认开启。
     verbatim_agent_runtime_enabled: bool = True

@@ -19,6 +19,77 @@ function isCompleteSlidePatch(value: unknown): value is Record<string, any> {
     && RENDER_MODES.has(String(slide.render_mode || ''));
 }
 
+function cloneDraft<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function applyVideoScriptPatch(
+  current: Record<string, any>,
+  operations: Array<Record<string, any>>,
+): { draft: Record<string, any>; applied: boolean } {
+  let draft = cloneDraft(current || {});
+  let applied = false;
+  const sections = () => ((draft.outline ??= { sections: [] }).sections ??= []) as any[];
+  const scenes = () => ((draft.scenes ??= []) as any[]);
+  for (const operation of operations) {
+    const path = String(operation.path || '');
+    if (operation.op === 'replace' && path === '' && operation.value) {
+      draft = cloneDraft(operation.value);
+      applied = true;
+      continue;
+    }
+    const setting = path.match(/^\/production_settings\/([^/]+)$/);
+    if (setting && operation.op === 'replace') {
+      (draft.production_settings ??= {})[decodeURIComponent(setting[1])] = cloneDraft(operation.value);
+      applied = true;
+      continue;
+    }
+    const section = path.match(/^\/outline\/sections\/([^/]+)(?:\/([^/]+))?$/);
+    if (section) {
+      const id = decodeURIComponent(section[1]);
+      const field = section[2] ? decodeURIComponent(section[2]) : '';
+      const index = sections().findIndex(item => String(item.id) === id);
+      if (operation.op === 'add' && !field && operation.value && index < 0) sections().push(cloneDraft(operation.value));
+      else if (operation.op === 'remove' && !field && index >= 0) sections().splice(index, 1);
+      else if (['replace', 'add'].includes(String(operation.op)) && !field && operation.value) {
+        if (index >= 0) sections()[index] = cloneDraft(operation.value);
+        else sections().push(cloneDraft(operation.value));
+      } else if (operation.op === 'replace' && field && index >= 0) sections()[index][field] = cloneDraft(operation.value);
+      applied = true;
+      continue;
+    }
+    if (path === '/scenes' && operation.op === 'replace' && Array.isArray(operation.value)) {
+      const values = operation.value as any[];
+      const complete = values.every(item => item && item.title && item.section_id);
+      if (complete) draft.scenes = cloneDraft(values);
+      else {
+        const byId = new Map(values.map(item => [String(item.id), item]));
+        draft.scenes = scenes().map(scene => ({ ...scene, ...(byId.get(String(scene.id)) || {}) }));
+      }
+      applied = true;
+      continue;
+    }
+    const scene = path.match(/^\/scenes\/([^/]+)(?:\/(.+))?$/);
+    if (scene) {
+      const id = decodeURIComponent(scene[1]);
+      const field = scene[2] ? decodeURIComponent(scene[2]) : '';
+      const index = scenes().findIndex(item => String(item.id) === id);
+      if (operation.op === 'add' && !field && operation.value && index < 0) scenes().push(cloneDraft(operation.value));
+      else if (operation.op === 'remove' && !field && index >= 0) scenes().splice(index, 1);
+      else if (['replace', 'add'].includes(String(operation.op)) && !field && operation.value) {
+        if (index >= 0) scenes()[index] = cloneDraft(operation.value);
+        else scenes().push(cloneDraft(operation.value));
+      } else if (operation.op === 'replace' && field && index >= 0) scenes()[index][field] = cloneDraft(operation.value);
+      applied = true;
+    }
+  }
+  if (applied) {
+    sections().sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
+    scenes().sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
+  }
+  return { draft, applied };
+}
+
 /** 流水线时间线条目（SSE 事件与历史事件统一） */
 export interface PipelineTimelineItem {
   id: number;
@@ -43,6 +114,10 @@ export const usePipelineStore = defineStore('pipeline', {
     draftRunId: '' as string,
     draftCourseId: '' as string,
     draftTaskId: '' as string,
+    draftRevision: 0,
+    draftNeedsRefresh: false,
+    lastAffectedSectionIds: [] as string[],
+    lastAffectedSceneIds: [] as string[],
     processedEventIds: new Set<number>(),
     canonicalEvents: [] as ReturnType<typeof adaptPPTAgentEvent>[],
     selectedSlideIds: [] as string[],
@@ -178,6 +253,16 @@ export const usePipelineStore = defineStore('pipeline', {
         this.statusTexts[agentKey] = String(data.text || this.statusTexts[agentKey] || '');
         this.statusRunIds[agentKey] = runId;
       }
+      if (type === 'run.instruction.merged' && this.detail?.instructions) {
+        let remaining = Number(data.instruction_count ?? data.payload?.instruction_count ?? 0);
+        for (const instruction of this.detail.instructions) {
+          if (remaining <= 0) break;
+          if (instruction.status === 'queued') {
+            instruction.status = 'merged';
+            remaining -= 1;
+          }
+        }
+      }
       if (type === 'artifact_patch' && data.patch) {
         if (['completed', 'failed', 'cancelled'].includes(this.status)) return;
         const project = useProjectStore();
@@ -187,6 +272,35 @@ export const usePipelineStore = defineStore('pipeline', {
           || String(data.task_id || currentTask.id) !== currentTask.id
           || runId !== String(this.run?.generation_run_id || '')) return;
         const existing = this.draftArtifact || {};
+        if (data.artifact_type === 'video_script') {
+          const incomingRevision = Number(data.draft_revision ?? 0);
+          const baseRevision = Number(data.base_revision ?? incomingRevision);
+          const snapshot = Boolean(data.snapshot) || (data.patch as Array<Record<string, any>>).some(
+            operation => operation.op === 'replace' && operation.path === '',
+          );
+          if (!snapshot && incomingRevision <= this.draftRevision) return;
+          if (!snapshot && baseRevision !== this.draftRevision) {
+            this.draftNeedsRefresh = true;
+            return;
+          }
+          const baseline = Object.keys(existing).length
+            ? existing
+            : cloneDraft(currentTask.current_artifact?.content_json || {});
+          const result = applyVideoScriptPatch(baseline, data.patch as Array<Record<string, any>>);
+          if (!result.applied) return;
+          result.draft.last_patch = data.patch;
+          result.draft.artifact_id = data.artifact_id;
+          result.draft.artifact_type = 'video_script';
+          this.draftArtifact = result.draft;
+          this.draftRevision = incomingRevision;
+          this.draftNeedsRefresh = false;
+          this.lastAffectedSectionIds = (data.affected_section_ids || []).map(String);
+          this.lastAffectedSceneIds = (data.affected_scene_ids || []).map(String);
+          this.draftRunId = runId;
+          this.draftCourseId = currentTask.course_id;
+          this.draftTaskId = currentTask.id;
+          return;
+        }
         const draft = { ...existing } as Record<string, any>;
         // 任务单 V3：sections 目录树 / Block 局部更新；初始化与迁移整文档替换。
         const isTaskSheetV3Draft = Array.isArray(draft.sections) || data.artifact_type === 'task_sheet';
@@ -289,6 +403,16 @@ export const usePipelineStore = defineStore('pipeline', {
           return null;
         }
         this.detail = detail;
+        if (detail.draft_snapshot && detail.run?.status && !['completed', 'failed', 'cancelled'].includes(detail.run.status)) {
+          this.draftArtifact = cloneDraft(detail.draft_snapshot);
+          this.draftArtifact.artifact_type = taskType;
+          this.draftArtifact.artifact_id = `draft:${detail.run.generation_run_id}`;
+          this.draftRevision = Number(detail.draft_revision || 0);
+          this.draftRunId = detail.run.generation_run_id;
+          this.draftCourseId = courseId;
+          this.draftTaskId = project.currentTask?.id || '';
+          this.draftNeedsRefresh = false;
+        }
         return this.detail;
       } catch (cause: any) {
         this.error = cause?.message || '流水线详情加载失败';
@@ -327,6 +451,10 @@ export const usePipelineStore = defineStore('pipeline', {
       this.draftRunId = '';
       this.draftCourseId = '';
       this.draftTaskId = '';
+      this.draftRevision = 0;
+      this.draftNeedsRefresh = false;
+      this.lastAffectedSectionIds = [];
+      this.lastAffectedSceneIds = [];
       this.processedEventIds = new Set<number>();
       this.canonicalEvents = [];
       this.selectedSlideIds = [];
@@ -341,6 +469,10 @@ export const usePipelineStore = defineStore('pipeline', {
       this.draftRunId = '';
       this.draftCourseId = '';
       this.draftTaskId = '';
+      this.draftRevision = 0;
+      this.draftNeedsRefresh = false;
+      this.lastAffectedSectionIds = [];
+      this.lastAffectedSceneIds = [];
       this.processedEventIds = new Set<number>();
       this.canonicalEvents = [];
     },
@@ -349,6 +481,10 @@ export const usePipelineStore = defineStore('pipeline', {
       this.draftRunId = '';
       this.draftCourseId = '';
       this.draftTaskId = '';
+      this.draftRevision = 0;
+      this.draftNeedsRefresh = false;
+      this.lastAffectedSectionIds = [];
+      this.lastAffectedSceneIds = [];
     },
   },
 });

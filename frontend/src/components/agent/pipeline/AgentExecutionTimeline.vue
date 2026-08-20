@@ -106,6 +106,7 @@ function friendlyToolError(node: Extract<AgentStreamNode, { kind: 'tool' }>): st
 /** QA / 修复类事件：可展开查看 severity/rule/message 明细 */
 const ISSUE_EVENT_TYPES = new Set([
   'qa_issue_found', 'qa.issue', 'qa_completed', 'qa.completed',
+  'validation.issue',
   'repair.started', 'revision_started',
 ]);
 
@@ -453,6 +454,8 @@ function eventIcon(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
     case 'artifact_created': case 'artifact_started': case 'artifact_patch': return '📄';
     case 'asset_generated': return '🖼';
     case 'qa_completed': case 'qa_issue_found': case 'qa.issue': case 'qa.completed': return '🧪';
+    case 'validation.completed': return 'OK';
+    case 'validation.issue': return '!';
     case 'revision_started': case 'revision_completed': case 'repair.started': case 'repair.completed': return '🔄';
     case 'layout.compile.result': return '📐';
     case 'polish.result': return '✅';
@@ -496,6 +499,13 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
     }
     case 'qa_issue_found': case 'qa.issue':
       return `发现 QA 问题：${d.issue?.message || d.payload?.issue?.message || ''}`;
+    case 'validation.completed': {
+      const count = Number(d.payload?.blocking_count ?? d.blocking_count ?? 0);
+      return d.message || (count ? `发布前检查仍有 ${count} 个阻断问题` : '发布前约束已检查');
+    }
+    case 'validation.issue':
+      return d.message || '发现需要定向修复的发布阻断问题';
+    case 'plan.revised': return d.message || '已根据追加要求更新执行计划';
     case 'revision_started': case 'repair.started':
       return d.message || `自动修订（第 ${d.round ?? d.payload?.round ?? 1}/${d.max_rounds ?? d.payload?.max_rounds ?? '?'} 轮）${d.reason || ''}`;
     case 'revision_completed': case 'repair.completed':
@@ -551,7 +561,7 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
   }
 }
 
-/** 执行前契约卡片：仅教学设计流水线的 intent/snapshot/rejected 事件渲染为卡片。 */
+/** 教学设计保留契约详情；逐字稿等 LLM 协同流程不显示硬性契约卡片。 */
 const CONTRACT_EVENT_TYPES = new Set(['intent.resolved', 'context.snapshot.created', 'result.rejected']);
 const expandedContracts = ref<Set<string>>(new Set());
 
@@ -888,9 +898,9 @@ onBeforeUnmount(() => {
             <div v-if="!eventIssues(node).length" class="issue-row empty">该事件没有附带问题明细。</div>
           </div>
 
-          <!-- 执行前契约卡片（教学设计：intent.resolved + context.snapshot.created） -->
+          <!-- 教学设计可展开查看契约；逐字稿等流程只保留普通轨迹和真实拒绝事件。 -->
           <section
-            v-if="node.kind === 'event' && (node.type === 'intent.resolved' || node.type === 'context.snapshot.created')"
+            v-if="node.kind === 'event' && node.type !== 'result.rejected' && task?.task_type === 'lesson_plan' && (node.type === 'intent.resolved' || node.type === 'context.snapshot.created')"
             class="contract-card"
             @click.stop
           >

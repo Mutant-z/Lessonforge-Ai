@@ -335,10 +335,14 @@ async def process_exercise_visuals(
         AgentChatSession.course_id == course.id,
         AgentChatSession.module_type == "exercise",
     ))
-    if not session or not session.image_model_config_id or not session.vision_model_config_id:
+    if not session or not session.image_model_config_id:
         return content, assets, notes
     image_config = await db.get(ModelConfig, session.image_model_config_id)
-    vision_config = await db.get(ModelConfig, session.vision_model_config_id)
+    if session.vision_model_config_id:
+        vision_config = await db.get(ModelConfig, session.vision_model_config_id)
+    else:
+        from app.services.model_config_service import resolve_model_config
+        vision_config = await resolve_model_config(db, course.owner_id, model_category="vision")
     if (
         not image_config or image_config.owner_id != course.owner_id
         or not vision_config or vision_config.owner_id != course.owner_id

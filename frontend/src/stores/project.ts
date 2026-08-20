@@ -1,8 +1,10 @@
 import { defineStore } from 'pinia';
 import { api, errorMessage } from '../api/client';
 import { pipelineApi } from '../api/pipeline';
+import type { VideoScriptMode } from '../api/pipeline';
 import type { Artifact, ArtifactUpdateSource, CourseProjectWorkspace, CourseTask, HydrationStatus, PPTPolishModality, ProjectAgentMessage, ProjectTaskEvent, SlideRepairNotes } from '../types';
 import { useCourseStore } from './courses';
+import { isNativeVideoResolution } from '../utils/videoResolution';
 
 const TASK_EVENTS = [
   'project_planning_updated',
@@ -60,12 +62,16 @@ const TASK_EVENTS = [
   'artifact.created', 'artifact.updated', 'slide.planned', 'slide.started',
   'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
   'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed',
-  'qa.started', 'qa.issue', 'qa.completed', 'repair.started', 'repair.completed',
+  'qa.started', 'qa.issue', 'qa.completed', 'validation.completed', 'validation.issue', 'repair.started', 'repair.completed',
+  'draft.update.started', 'draft.update.completed',
   'layout.compile.result', 'polish.result',
   'human.required', 'run.instruction.queued', 'run.instruction.merged',
   'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
   // 共享项目记忆事件
   'project_memory.updated', 'context.snapshot_created', 'artifact.published', 'memory.source_read',
+  // 视频生成偏好设置
+  'video_generation.setting.updated',
+  'course.metadata.updated',
 ];
 
 /** 流水线事件被路由到项目 store 的收件箱，工作台据此渲染时间线 */
@@ -81,7 +87,8 @@ const PIPELINE_EVENT_TYPES = new Set([
   'tool.started', 'tool.progress', 'tool.completed', 'tool.failed',
   'artifact.created', 'artifact.updated', 'slide.planned', 'slide.started',
   'slide.content.updated', 'slide.layout.updated', 'slide.asset.updated', 'slide.rendering',
-  'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed', 'qa.started', 'qa.issue',
+  'slide.rendered', 'slide.qa', 'slide.completed', 'slide.failed', 'qa.started', 'qa.issue', 'validation.completed', 'validation.issue',
+  'draft.update.started', 'draft.update.completed',
   'repair.started', 'repair.completed', 'human.required', 'run.instruction.queued', 'run.instruction.merged',
   'layout.compile.result', 'polish.result',
   'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
@@ -129,14 +136,33 @@ function reconcileArtifact(
   return { artifact: incoming, conflict: false };
 }
 
-function reconcileTaskArtifact(incoming: CourseTask, existing: CourseTask | null | undefined, source: ArtifactUpdateSource): {
+function reconcileTaskArtifact(
+  incoming: CourseTask,
+  existing: CourseTask | null | undefined,
+  source: ArtifactUpdateSource,
+  latestResolutionEventId = 0,
+): {
   task: CourseTask;
   conflict: boolean;
 } {
-  const existingArtifact = existing?.id === incoming.id ? existing.current_artifact : null;
-  const result = reconcileArtifact(incoming.current_artifact, existingArtifact, source);
+  let guardedIncoming = incoming;
+  if (
+    existing?.id === incoming.id
+    && ['video_script', 'video_generation'].includes(incoming.task_type)
+    && Number(incoming.event_cursor || 0) < latestResolutionEventId
+    && isNativeVideoResolution(existing.preferred_video_resolution)
+  ) {
+    guardedIncoming = {
+      ...incoming,
+      preferred_video_resolution: existing.preferred_video_resolution,
+    };
+  }
+  const existingArtifact = existing?.id === guardedIncoming.id ? existing.current_artifact : null;
+  const result = reconcileArtifact(guardedIncoming.current_artifact, existingArtifact, source);
   return {
-    task: result.artifact === incoming.current_artifact ? incoming : { ...incoming, current_artifact: result.artifact },
+    task: result.artifact === guardedIncoming.current_artifact
+      ? guardedIncoming
+      : { ...guardedIncoming, current_artifact: result.artifact },
     conflict: result.conflict,
   };
 }
@@ -175,6 +201,7 @@ export const useProjectStore = defineStore('project', {
     loading: false,
     connectionError: '',
     lastEventId: 0,
+    videoResolutionEventId: 0,
     connectedCourseId: null as string | null,
     connectingCourseId: null as string | null,
     eventSource: null as EventSource | null,
@@ -241,10 +268,12 @@ export const useProjectStore = defineStore('project', {
         const { data } = await api.get<CourseProjectWorkspace>(`/courses/${courseId}/project`);
         if (epoch !== this.projectRequestEpoch) return data;
         const previousTasks = this.project?.course.id === courseId ? this.project.tasks : [];
+        const resolutionGuard = this.project?.course.id === courseId ? this.videoResolutionEventId : 0;
         data.tasks = data.tasks.map(task => reconcileTaskArtifact(
           task,
           previousTasks.find(item => item.id === task.id),
           'project_snapshot',
+          resolutionGuard,
         ).task);
         const courseChanged = Boolean(this.project && this.project.course.id !== courseId);
         this.project = data;
@@ -254,6 +283,7 @@ export const useProjectStore = defineStore('project', {
         if (courseChanged) {
           this.pipelineEvents = [];
           this.pipelineStatus = '';
+          this.videoResolutionEventId = 0;
           this.slideRepairNotes = {};
           this.officialArtifact = null;
           this.viewedArtifact = null;
@@ -293,6 +323,7 @@ export const useProjectStore = defineStore('project', {
         data,
         this.currentTask || this.project?.tasks.find(item => item.id === data.id),
         'task_snapshot',
+        this.videoResolutionEventId,
       );
       const hydrated = result.task;
       if (result.conflict) {
@@ -311,7 +342,9 @@ export const useProjectStore = defineStore('project', {
       if (!this.project) return;
       const index = this.project.tasks.findIndex(item => item.id === task.id);
       if (index >= 0) {
-        const result = reconcileTaskArtifact(task, this.project.tasks[index], 'refresh');
+        const result = reconcileTaskArtifact(
+          task, this.project.tasks[index], 'refresh', this.videoResolutionEventId,
+        );
         this.project.tasks[index] = { ...this.project.tasks[index], ...result.task };
       }
     },
@@ -592,7 +625,7 @@ export const useProjectStore = defineStore('project', {
       content: string,
       selectedSectionIds: string[] = [],
       selectedSceneIds: string[] = [],
-      mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+      mode: VideoScriptMode = 'auto',
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -661,7 +694,9 @@ export const useProjectStore = defineStore('project', {
     },
     async approveTask(courseId: string, taskType: string) {
       const { data } = await api.post<CourseTask>(`/courses/${courseId}/tasks/${taskType}/approve`);
-      const result = reconcileTaskArtifact(data, this.currentTask, 'approve');
+      const result = reconcileTaskArtifact(
+        data, this.currentTask, 'approve', this.videoResolutionEventId,
+      );
       this.currentTask = { ...(this.currentTask || result.task), ...result.task };
       this.syncOfficialArtifact();
       this.replaceTask(result.task);
@@ -761,6 +796,41 @@ export const useProjectStore = defineStore('project', {
       // 共享项目记忆：版本推进 → 刷新任务快照（获取最新 available_sources）。
       if (type === 'project_memory.updated') {
         this.refreshTasks();
+        return;
+      }
+      if (type === 'course.metadata.updated') {
+        const title = event.payload?.title || (event as any).title;
+        if (title && this.project) {
+          this.project.course.title = title;
+          const courses = useCourseStore();
+          if (courses.current?.id === this.project.course.id) courses.current.title = title;
+          const index = courses.items.findIndex(item => item.id === this.project?.course.id);
+          if (index >= 0) courses.items[index] = { ...courses.items[index], title } as any;
+        }
+        return;
+      }
+      // 视频生成偏好设置更新：立即刷新当前任务快照，使脚本页分辨率标签反映最新值。
+      if (type === 'video_generation.setting.updated') {
+        const resolution = event.payload?.resolution || (event as any).resolution;
+        if (isNativeVideoResolution(resolution)) {
+          this.videoResolutionEventId = Math.max(this.videoResolutionEventId, event.event_id || 0);
+          // 事件由后端在设置事务提交后发出，可直接作为当前 UI 的权威增量。
+          // 同步更新脚本/视频任务，避免轮询中的旧快照在异步 refresh 完成前继续显示旧值。
+          if (this.project) {
+            for (const task of this.project.tasks) {
+              if (task.task_type === 'video_script' || task.task_type === 'video_generation') {
+                task.preferred_video_resolution = resolution;
+              }
+            }
+          }
+          if (
+            this.currentTask
+            && (this.currentTask.task_type === 'video_script' || this.currentTask.task_type === 'video_generation')
+          ) {
+            this.currentTask.preferred_video_resolution = resolution;
+          }
+        }
+        void this.refreshCurrentTask();
         return;
       }
       if (type === 'memory.source_read') {
@@ -905,7 +975,9 @@ export const useProjectStore = defineStore('project', {
           if (epoch !== this.taskRequestEpoch) return;
           if (!this.currentTask || this.currentTask.id !== data.id) return;
           const currentArtifact = this.currentTask.current_artifact;
-          const result = reconcileTaskArtifact(data, this.currentTask, 'poll');
+          const result = reconcileTaskArtifact(
+            data, this.currentTask, 'poll', this.videoResolutionEventId,
+          );
           const hydrated = result.task;
           if (result.conflict) {
             this.artifactConflict = { source: 'poll', task_id: data.id, incoming_artifact_id: data.current_artifact?.id };
@@ -943,6 +1015,7 @@ export const useProjectStore = defineStore('project', {
         task,
         this.project?.tasks.find(item => item.id === task.id),
         'refresh',
+        this.videoResolutionEventId,
       ).task);
       if (this.currentTask) {
         const next = this.project.tasks.find(item => item.id === this.currentTask?.id);
@@ -957,7 +1030,9 @@ export const useProjectStore = defineStore('project', {
       const epoch = ++this.taskRequestEpoch;
       const { data } = await api.get<CourseTask>(`/courses/${this.project.course.id}/tasks/${this.currentTask.task_type}`);
       if (epoch !== this.taskRequestEpoch || !this.currentTask) return;
-      const result = reconcileTaskArtifact(data, this.currentTask, 'refresh');
+      const result = reconcileTaskArtifact(
+        data, this.currentTask, 'refresh', this.videoResolutionEventId,
+      );
       const hydrated = result.task;
       if (result.conflict) {
         this.artifactConflict = { source: 'refresh', task_id: data.id, incoming_artifact_id: data.current_artifact?.id };

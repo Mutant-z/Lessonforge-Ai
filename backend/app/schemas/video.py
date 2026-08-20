@@ -7,6 +7,15 @@ from pydantic import BaseModel, Field, model_validator
 VideoSceneStatus = Literal["pending", "generating", "ready", "failed"]
 VideoVisualMode = Literal["hybrid_director", "ppt_only", "ai_visual_first"]
 
+# 原生有声视频支持的分辨率与其 Provider 规格标记。
+NativeVideoResolution = Literal["1280x720", "854x480"]
+NATIVE_VIDEO_RESOLUTIONS: tuple[NativeVideoResolution, ...] = ("1280x720", "854x480")
+RESOLUTION_LABELS: dict[str, str] = {"1280x720": "720p", "854x480": "480p"}
+
+
+def resolution_label(resolution: str) -> str:
+    return RESOLUTION_LABELS.get(resolution, resolution)
+
 
 class VideoShot(BaseModel):
     id: str = Field(min_length=1)
@@ -151,7 +160,7 @@ NativeVideoSceneStatus = Literal["pending", "generating", "ready", "failed", "qa
 
 class SeedanceNativeSettings(BaseModel):
     aspect_ratio: Literal["16:9"] = "16:9"
-    resolution: Literal["1280x720"] = "1280x720"
+    resolution: NativeVideoResolution = "1280x720"
     subtitle_enabled: bool = True
     native_audio: Literal[True] = True
     continuity_policy: Literal["grouped"] = "grouped"
@@ -223,7 +232,7 @@ class SeedanceVideoGenerationContent(BaseModel):
 
 
 class VideoGenerationQuoteRequest(BaseModel):
-    resolution: Literal["1280x720"] = "1280x720"
+    resolution: Literal["1280x720", "854x480"] | None = None
     subtitle_enabled: bool = True
     continuity_policy: Literal["grouped"] = "grouped"
     target_scene_id: str | None = None

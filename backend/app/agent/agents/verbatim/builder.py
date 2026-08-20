@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any
 
 from app.schemas.verbatim_v2 import (
@@ -68,10 +69,48 @@ class VerbatimBuilder:
     def speaking_rate_cps(self) -> float:
         return float(self._content.get("speaking_rate_cps") or DEFAULT_SPEAKING_RATE_CPS)
 
+    def canonical_section_id(self, raw_id: str | Any) -> str | None:
+        """智能解析并归一化章节标识符（支持 seg_01, scene_01, VB-01, 序号等）。"""
+        if not raw_id:
+            return None
+        raw = str(raw_id).strip()
+        # 1. 直接匹配 id (如 VB-01)
+        for item in self.sections:
+            if item.get("id") == raw or str(item.get("id", "")).lower() == raw.lower():
+                return item.get("id")
+        # 2. 匹配关联场景 scene_id (如 scene_01 / SCENE-01)
+        for item in self.sections:
+            sid = str(item.get("scene_id", ""))
+            if sid == raw or sid.lower() == raw.lower() or sid.replace("-", "_").lower() == raw.replace("-", "_").lower():
+                return item.get("id")
+        # 3. 匹配 seg_XX / segment_XX / 纯数字序号
+        match = re.search(r"(\d+)", raw)
+        if match:
+            num = int(match.group(1))
+            target_vb = f"VB-{num:02d}"
+            for item in self.sections:
+                if item.get("id") == target_vb:
+                    return item.get("id")
+            if 1 <= num <= len(self.sections):
+                return self.sections[num - 1].get("id")
+        return None
+
     def find_section(self, section_id: str) -> dict[str, Any] | None:
-        return next((item for item in self.sections if item.get("id") == section_id), None)
+        canonical = self.canonical_section_id(section_id)
+        if not canonical:
+            return None
+        return next((item for item in self.sections if item.get("id") == canonical), None)
+
+    def _require_section(self, section_id: str) -> dict[str, Any]:
+        section = self.find_section(section_id)
+        if section is None:
+            raise ValueError(f"章节不存在：{section_id}")
+        return section
 
     def find_section_by_scene(self, scene_id: str) -> dict[str, Any] | None:
+        canonical = self.canonical_section_id(scene_id)
+        if canonical:
+            return next((item for item in self.sections if item.get("id") == canonical), None)
         return next((item for item in self.sections if item.get("scene_id") == scene_id), None)
 
     def all_section_ids(self) -> list[str]:
@@ -96,6 +135,19 @@ class VerbatimBuilder:
 
     def _recompute_course_duration(self) -> None:
         self._content["course_info"]["duration_seconds"] = self.total_duration()
+
+    # ------------------------------------------------------------------
+    # 文档元数据（课程名称是课程项目的投影，不是正文）
+    # ------------------------------------------------------------------
+
+    def update_course_title(self, title: str) -> str:
+        title = str(title).strip()
+        if not title:
+            raise ValueError("课程名称不能为空")
+        if len(title) > 200:
+            raise ValueError("课程名称不能超过 200 个字符")
+        self._content.setdefault("course_info", {})["course_title"] = title
+        return title
 
     # ------------------------------------------------------------------
     # 内容编辑（verbatim_director / timing_engine 主路径）

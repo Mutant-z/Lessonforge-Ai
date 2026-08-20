@@ -19,6 +19,7 @@ const props = withDefaults(defineProps<{
   quickPrompts?: string[];
   placeholder?: string;
   unitName?: string;
+  submit?: (text: string, modality: PPTPolishModality) => Promise<void>;
 }>(), {
   targetSlide: null,
   targetSlides: () => [],
@@ -97,10 +98,11 @@ const defaultQuickPromptsByTask: Record<string, string[]> = {
     '强化重难点讲解细节',
   ],
   video_script: [
-    '优化分镜画面与视觉提示',
-    '调整解说词节奏与时长',
-    '增强视频转场衔接设计',
-    '补充板书与字幕设计',
+    '重组章节并调整分镜归属',
+    '精简目标分镜的口播',
+    '优化画面与声音设计',
+    '统一人物与场景连续性',
+    '重新平衡分镜时长与节奏',
   ],
 };
 
@@ -157,19 +159,29 @@ function applyQuickPrompt(promptText: string) {
   });
 }
 
-function handleGenerateImage() {
-  if (props.isRunning) return;
-  
-  // 特殊指令触发图片生成
-  const imagePrompt = '生成一张高清图片，风格专业，适合PPT插入';
-  const finalText = `[图片生成] ${imagePrompt}`;
-
-  emit('send', finalText, modality.value);
-  input.value = '';
-  adjustHeight();
+async function dispatch(text: string, selectedModality: PPTPolishModality) {
+  if (props.submit) {
+    await props.submit(text, selectedModality);
+  } else {
+    emit('send', text, selectedModality);
+  }
 }
 
-function handleSubmit() {
+async function handleGenerateImage() {
+  if (props.isRunning) return;
+
+  const imagePrompt = '生成一张高清图片，风格专业，适合PPT插入';
+  const finalText = `[图片生成] ${imagePrompt}`;
+  try {
+    await dispatch(finalText, modality.value);
+    input.value = '';
+    adjustHeight();
+  } catch {
+    return;
+  }
+}
+
+async function handleSubmit() {
   const rawText = input.value.trim();
   if (!rawText) return;
   if (props.showImageModel && isImageGenerationInstruction(rawText) && !props.imageModelConfigId) {
@@ -180,9 +192,13 @@ function handleSubmit() {
   // Page scope travels in target_slide_ids/active_slide_id. Keep the user's
   // sentence untouched so text parsing cannot conflict with the same
   // structured selection.
-  emit('send', rawText, modality.value);
-  input.value = '';
-  adjustHeight();
+  try {
+    await dispatch(rawText, modality.value);
+    input.value = '';
+    adjustHeight();
+  } catch {
+    return;
+  }
 }
 
 function clearSlideTarget() {

@@ -130,6 +130,7 @@ class GeminiInteractionsVideoAdapter:
         return {
             "model": self.config.model_name,
             "resolution": "720p",
+            "resolutions": ["1280x720"],
             "duration_seconds": [3, 10],
             "native_audio": True,
             "delivery": str((self.config.adapter_config_json or {}).get("delivery") or "uri"),

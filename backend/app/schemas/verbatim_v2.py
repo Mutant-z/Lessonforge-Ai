@@ -184,7 +184,10 @@ def _parse_clock(value: Any) -> float:
 
 def _parse_v1_time_range(time_range: str) -> tuple[float, float]:
     """把 V1 的 00:00—00:15 解析为 (start, end) 秒；失败返回 (0, 0)。"""
-    parts = [part.strip() for part in str(time_range or "").replace("~", "—").split("—")]
+    parts = [
+        part.strip()
+        for part in str(time_range or "").replace("~", "—").replace("-", "—").split("—")
+    ]
     if len(parts) != 2:
         return 0.0, 0.0
     try:
@@ -209,39 +212,83 @@ def _pedagogical_action_from_role(role: str) -> str:
     }.get(role, "scenario_connect")
 
 
+def _coerce_speaking_rate(content: dict[str, Any]) -> float:
+    """兼容 V1 的文字语速（如 standard/slow/fast）与 V2 数值语速。"""
+    raw = content.get("speaking_rate_cps")
+    if raw is None:
+        raw = content.get("speaking_rate")
+    if isinstance(raw, str):
+        presets = {"slow": 3.0, "standard": DEFAULT_SPEAKING_RATE_CPS, "normal": DEFAULT_SPEAKING_RATE_CPS, "fast": 5.0}
+        value = presets.get(raw.strip().lower(), raw.strip())
+    else:
+        value = raw
+    try:
+        rate = float(value or DEFAULT_SPEAKING_RATE_CPS)
+    except (TypeError, ValueError):
+        rate = DEFAULT_SPEAKING_RATE_CPS
+    return max(1.0, min(12.0, rate))
+
+
+def _canonical_legacy_section_id(raw_id: Any, index: int) -> str:
+    """将旧版 seg_01/segment-01 等展示 ID 迁移为 V2 稳定章节 ID。"""
+    raw = str(raw_id or "").strip()
+    if raw.upper().startswith("VB-") and raw[3:]:
+        suffix = raw[3:].upper().replace("_", "-")
+        if suffix.replace("-", "").isalnum():
+            return f"VB-{suffix}"
+    import re
+    match = re.search(r"(\d+)", raw)
+    if match:
+        return f"VB-{int(match.group(1)):02d}"
+    return f"VB-{index + 1:02d}"
+
+
 def upgrade_verbatim_v2(
     v1_content: dict[str, Any],
     video_script_raw: dict[str, Any] | None = None,
     course_info_override: dict[str, Any] | None = None,
 ) -> VerbatimContentV2:
-    """V1 → V2 确定性适配（首次修改/同步时使用），不改写旧 Artifact。
+    """V1/历史混合结构 → V2 适配；保留旧 Artifact，不修改历史版本。
 
-    - 数值时间轴优先取视频脚本场景的真实 start/end；缺失时解析 V1 的 time_range。
-    - 语速、必讲、补充、语气、重音、互动、停顿字段无损迁移。
+    数值时间轴优先取视频脚本场景的真实 start/end；缺失时解析 V1 的 time_range。
+    旧版 seg_01 等展示 ID、文字语速和缺失 course_info 均在此处归一化。
     """
-    if (v1_content or {}).get("schema_version") == VERBATIM_V2:
-        return VerbatimContentV2.model_validate(v1_content)
+    v1_content = dict(v1_content or {})
+    if v1_content.get("schema_version") == VERBATIM_V2:
+        # 合法 V2 原样保留；历史数据偶尔带了错误的 schema_version，失败时继续走兼容迁移。
+        try:
+            return VerbatimContentV2.model_validate(v1_content)
+        except Exception:  # noqa: BLE001
+            pass
     scenes: dict[str, dict[str, Any]] = {}
     if video_script_raw:
         for scene in video_script_raw.get("scenes", []) or []:
             scenes[str(scene.get("id", ""))] = scene
     course_info = course_info_override or v1_content.get("course_info") or {}
-    duration_seconds = float(course_info.get("duration_seconds") or 0)
-    speaking_rate = float(v1_content.get("speaking_rate_cps") or DEFAULT_SPEAKING_RATE_CPS)
+    try:
+        duration_seconds = float(course_info.get("duration_seconds") or 0)
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    speaking_rate = _coerce_speaking_rate(v1_content)
     sections: list[VerbatimSectionV2] = []
     for index, section in enumerate((v1_content.get("sections") or [])):
+        section = dict(section or {})
         scene = scenes.get(str(section.get("scene_id") or ""), {})
         if scene:
-            start = float(scene.get("start_seconds", 0))
-            end = float(scene.get("end_seconds", 0))
+            start = float(scene.get("start_seconds", 0) or 0)
+            end = float(scene.get("end_seconds", 0) or 0)
         else:
             start, end = _parse_v1_time_range(section.get("time_range", ""))
         if end <= start:
             end = start + MIN_SECTION_SECONDS
         required_text = str(section.get("required_text") or "")
-        pause = float(section.get("pause_seconds") or 0)
+        try:
+            pause = float(section.get("pause_seconds") or 0)
+        except (TypeError, ValueError):
+            pause = 0.0
+        pause = max(0.0, min(pause, end - start))
         sections.append(VerbatimSectionV2(
-            id=str(section.get("id") or f"VB-{index + 1:02d}"),
+            id=_canonical_legacy_section_id(section.get("id"), index),
             scene_id=str(section.get("scene_id") or f"SCENE-{index + 1:02d}"),
             slide_ids=list(section.get("slide_ids") or []),
             start_seconds=start,
@@ -256,8 +303,25 @@ def upgrade_verbatim_v2(
             word_count=verbatim_word_count(required_text),
             estimated_duration_seconds=verbatim_section_seconds(required_text, speaking_rate, pause),
         ))
-    if duration_seconds <= 0:
-        duration_seconds = max(section.end_seconds for section in sections) if sections else 0
+    # 历史版本有时只写了文档总时长，章节时间轴却存在空档或未延伸到末尾。
+    # 迁移时修复时间轴连续性，避免兼容层把旧数据直接送入 V2 门禁而失败。
+    if sections:
+        cursor = 0.0
+        for section in sections:
+            duration = max(MIN_SECTION_SECONDS, section.end_seconds - section.start_seconds)
+            section.start_seconds = round(max(0.0, cursor), 2)
+            section.end_seconds = round(section.start_seconds + duration, 2)
+            cursor = section.end_seconds
+        if duration_seconds <= 0:
+            duration_seconds = cursor
+        elif abs(cursor - duration_seconds) > TIMELINE_TOLERANCE:
+            # 保留已有段落时长；将最后一段延伸/收束到文档总时长。
+            if duration_seconds > cursor:
+                sections[-1].end_seconds = round(duration_seconds, 2)
+            else:
+                duration_seconds = cursor
+    elif duration_seconds <= 0:
+        duration_seconds = 0
     return VerbatimContentV2.model_validate({
         "schema_version": VERBATIM_V2,
         "course_info": {

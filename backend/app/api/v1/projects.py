@@ -39,7 +39,7 @@ from app.services.course_task_service import (
     task_jobs,
     task_payload,
 )
-from app.services.model_config_service import owned_model_config, resolve_provider
+from app.services.model_config_service import owned_model_config, resolve_model_config, resolve_provider
 from app.services.project_planning_service import start_blueprint_run
 from app.services.agent_initialization_service import (
     create_initialization_run,
@@ -221,7 +221,7 @@ async def get_project(course_id: str, user: User = Depends(current_user), db: As
             "error": planning_run.error_json if planning_run and planning_run.status == "failed" else None,
         },
         "agent_initialization": await initialization_summary(db, course_id),
-        "tasks": [await task_payload(db, item) for item in tasks],
+        "tasks": [await task_payload(db, item, event_cursor=event_cursor) for item in tasks],
         "quality": await _quality_summary(db, course_id),
         "memory": {
             "revision": memory_revision,
@@ -274,9 +274,10 @@ async def retry_project_planning(course_id: str, user: User = Depends(current_us
 @router.get("/courses/{course_id}/tasks")
 async def list_tasks(course_id: str, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     await owned_course(course_id, user, db)
+    event_cursor = await _course_event_cursor(db, course_id)
     tasks = await ensure_course_tasks(db, course_id)
     await db.commit()
-    return [await task_payload(db, item) for item in tasks]
+    return [await task_payload(db, item, event_cursor=event_cursor) for item in tasks]
 
 
 @router.get("/courses/{course_id}/tasks/{task_type}")
@@ -295,6 +296,12 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
         AgentChatSession.module_type == task_type,
     ))
     _, config = await resolve_provider(db, user.id, (chat_session.model_config_id if chat_session else None) or course.model_config_id)
+    vision_config = await resolve_model_config(
+        db, user.id, chat_session.vision_model_config_id if chat_session else None, "vision",
+    )
+    video_config = await resolve_model_config(
+        db, user.id, chat_session.video_model_config_id if chat_session else None, "video",
+    )
     payload = await task_payload(db, task)
     payload["event_cursor"] = event_cursor
     payload["snapshot_at"] = snapshot_at
@@ -309,8 +316,8 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
     } for row in rows]
     payload["model_config_id"] = config.id if config else None
     payload["image_model_config_id"] = chat_session.image_model_config_id if chat_session else None
-    payload["vision_model_config_id"] = chat_session.vision_model_config_id if chat_session else None
-    payload["video_model_config_id"] = chat_session.video_model_config_id if chat_session else None
+    payload["vision_model_config_id"] = vision_config.id if vision_config else None
+    payload["video_model_config_id"] = video_config.id if video_config else None
     payload["speech_model_config_id"] = chat_session.speech_model_config_id if chat_session else None
     return payload
 
@@ -447,21 +454,29 @@ async def change_task_model(course_id: str, task_type: str, payload: TaskModelRe
         db.add(session)
     if payload.model_config_id:
         config = await owned_model_config(db, user.id, payload.model_config_id)
+        if config.model_category != "text" or config.model_purpose != "text_chat":
+            raise HTTPException(422, "文本任务只能选择文本模型配置")
         session.model_config_id = config.id
     if payload.image_model_config_id:
         image_config = await owned_model_config(db, user.id, payload.image_model_config_id)
         if "image_generation" not in (image_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明图片生成能力")
+        if image_config.model_category != "vision" or image_config.model_purpose != "image_generation":
+            raise HTTPException(422, "所选配置不是图片生成服务")
         session.image_model_config_id = image_config.id
     if payload.vision_model_config_id:
         vision_config = await owned_model_config(db, user.id, payload.vision_model_config_id)
         if "vision_review" not in (vision_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明视觉复核能力")
+        if vision_config.model_category != "vision" or vision_config.model_purpose != "vision_chat":
+            raise HTTPException(422, "所选配置不是多模态视觉理解模型")
         session.vision_model_config_id = vision_config.id
     if payload.video_model_config_id:
         video_config = await owned_model_config(db, user.id, payload.video_model_config_id)
         if "video_generation" not in (video_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明视频生成能力")
+        if video_config.model_category != "video":
+            raise HTTPException(422, "所选配置不是视频模型")
         if task_type == "video_generation" and "native_audio_video_generation" not in (video_config.capabilities_json or []):
             raise HTTPException(422, "视频生成任务只接受声明原生有声视频能力的模型配置")
         if not media_transport_supports(video_config.provider, video_config.api_mode, "video_generation"):
@@ -471,6 +486,8 @@ async def change_task_model(course_id: str, task_type: str, payload: TaskModelRe
         speech_config = await owned_model_config(db, user.id, payload.speech_model_config_id)
         if "speech_generation" not in (speech_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明语音生成能力")
+        if speech_config.model_category != "video" or speech_config.model_purpose != "speech_generation":
+            raise HTTPException(422, "所选配置不是视频列的语音生成服务")
         if not media_transport_supports(speech_config.provider, speech_config.api_mode, "speech_generation"):
             raise HTTPException(422, "所选模型的接口模式不支持语音生成，请配置自定义语音 HTTP 接口")
         session.speech_model_config_id = speech_config.id

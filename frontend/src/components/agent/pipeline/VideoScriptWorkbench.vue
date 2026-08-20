@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 视频脚本 V4 工作台：左侧 Agent 执行时间线（意图/工具/QA/返修流式显示）+ 右侧动态章节预览。
+/** 视频脚本 V4 工作台：左侧 Agent 执行摘要与发布前校验 + 右侧动态章节候选稿预览。
  *
  * 复用通用执行组件（AgentExecutionTimeline / AgentComposer / ModelSelector / pipeline store），
  * 消息走 /courses/{course_id}/tasks/video_script/runs（携带章节/分镜作用域与 mode）。
@@ -7,6 +7,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { VideoPause, VideoPlay } from '@element-plus/icons-vue';
+import { errorMessage } from '../../../api/client';
 import { pipelineApi } from '../../../api/pipeline';
 import { useProjectStore } from '../../../stores/project';
 import { usePipelineStore } from '../../../stores/pipeline';
@@ -29,10 +30,9 @@ const pipelineStore = usePipelineStore();
 const modelConfigStore = useModelConfigStore();
 
 const task = computed(() => projectStore.currentTask);
+const activeRunId = computed(() => task.value?.active_run_id || pipelineStore.run?.generation_run_id || '');
 const pipelineMatchesActiveRun = computed(() => {
-  const activeRunId = task.value?.active_run_id;
-  const detailRunId = pipelineStore.run?.generation_run_id;
-  if (activeRunId) return activeRunId === detailRunId;
+  if (task.value?.active_run_id) return task.value.active_run_id === pipelineStore.run?.generation_run_id;
   return true;
 });
 const status = computed(() => {
@@ -42,6 +42,7 @@ const status = computed(() => {
 const paused = computed(() => status.value === 'paused');
 const pausing = computed(() => status.value === 'pausing');
 const isRunning = computed(() => ['queued', 'running', 'pausing'].includes(status.value));
+const queuedCount = computed(() => (pipelineStore.detail?.instructions || []).filter(item => item.status === 'queued').length);
 const humanResponsePending = ref('');
 const leftPercent = ref(38);
 const isDragging = ref(false);
@@ -63,13 +64,41 @@ const activeSectionId = ref<string | null>(null);
 const mode = ref<VideoScriptMode>('auto');
 
 const artifactContent = computed<VideoScriptContent | VideoScriptContentV4 | null>(() => {
-  const raw = task.value?.current_artifact?.content_json;
+  const draftMatches = Boolean(
+    pipelineStore.draftArtifact?.schema_version
+    && pipelineStore.draftRunId
+    && pipelineStore.draftRunId === (pipelineStore.run?.generation_run_id || task.value?.active_run_id)
+    && !['completed', 'failed', 'cancelled'].includes(status.value),
+  );
+  const raw = draftMatches ? pipelineStore.draftArtifact : task.value?.current_artifact?.content_json;
   return (raw as VideoScriptContent | VideoScriptContentV4) ?? null;
 });
 const isDraft = computed(() => {
-  const draft = pipelineStore.draftArtifact;
-  return Boolean(draft && draft.content_json && draft.content_json.schema_version);
+  return Boolean(pipelineStore.draftArtifact?.schema_version && !['completed', 'failed', 'cancelled'].includes(status.value));
 });
+const activeSceneId = computed(() => selectedSceneIds.value.length === 1 ? selectedSceneIds.value[0] : undefined);
+const selectedScopeLabels = computed(() => {
+  const content = artifactContent.value as any;
+  const sections = Array.isArray(content?.outline?.sections) ? content.outline.sections : [];
+  const scenes = Array.isArray(content?.scenes) ? content.scenes : [];
+  const sectionLabels = selectedSectionIds.value.map(id => {
+    const item = sections.find((section: any) => String(section.id) === id);
+    return item ? `第 ${item.sequence} 章 · ${item.title}` : id;
+  });
+  const sceneLabels = selectedSceneIds.value.map(id => {
+    const item = scenes.find((scene: any) => String(scene.id) === id);
+    return item ? `分镜 ${item.sequence} · ${item.title}` : id;
+  });
+  return [...sectionLabels, ...sceneLabels];
+});
+const modeOptions: Array<{ value: VideoScriptMode; label: string }> = [
+  { value: 'auto', label: '自动' },
+  { value: 'structure', label: '章节结构' },
+  { value: 'narration', label: '口播' },
+  { value: 'visual', label: '画面与声音' },
+  { value: 'continuity', label: '连续性' },
+  { value: 'timing', label: '时长节奏' },
+];
 
 function selectSection(sectionId: string | null) {
   activeSectionId.value = sectionId;
@@ -106,24 +135,37 @@ async function loadDetail() {
 }
 
 async function send(content: string, modality: string = 'auto') {
-  const modeValue = (['auto', 'content', 'structure', 'timing', 'qa'].includes(modality) ? modality : 'auto') as VideoScriptMode;
-  const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
-  if (paused.value && runId) {
-    await resume();
-    pipelineStore.beginRun();
-    await projectStore.createVideoScriptRun(props.courseId, content, selectedSectionIds.value, selectedSceneIds.value, modeValue);
-    await loadDetail();
-    startPolling();
-  } else if (isRunning.value) {
-    // 运行中的指令排队由后端 create_task_run 拦截（409），这里给出明确提示。
-    ElMessage.info('Agent 正在执行中，请等待当前任务完成后再发送新指令，或先暂停。');
-    return;
-  } else {
-    pipelineStore.beginRun();
-    await projectStore.createVideoScriptRun(props.courseId, content, selectedSectionIds.value, selectedSceneIds.value, modeValue);
-    await loadDetail();
+  const modeValue = (modality !== 'auto' ? modality : mode.value) as VideoScriptMode;
+  const runId = activeRunId.value;
+  try {
+    if ((paused.value || isRunning.value) && runId) {
+      if (!pipelineMatchesActiveRun.value) {
+        await loadDetail();
+      }
+      if (!pipelineMatchesActiveRun.value) {
+        throw new Error('当前执行进度正在同步，请稍后重试。');
+      }
+      const result = await pipelineApi.enqueueVideoScriptInstruction(
+        props.courseId, runId, content, selectedSectionIds.value, selectedSceneIds.value,
+        modeValue, paused.value, crypto.randomUUID(), activeSectionId.value || undefined, activeSceneId.value,
+      );
+      ElMessage.success(result.status === 'resumed' ? '已恢复运行并加入当前执行' : '指令已加入当前执行，将在安全边界合并');
+      if (paused.value) {
+        pipelineStore.beginRun();
+        startPolling();
+      }
+      await loadDetail();
+    } else {
+      pipelineStore.beginRun();
+      await projectStore.createVideoScriptRun(props.courseId, content, selectedSectionIds.value, selectedSceneIds.value, modeValue);
+      await loadDetail();
+      startPolling();
+    }
+    clearTargetSections();
+  } catch (cause) {
+    ElMessage.error(`指令未提交：${errorMessage(cause)}`);
+    throw cause;
   }
-  clearTargetSections();
 }
 
 async function pause() {
@@ -143,7 +185,7 @@ async function handleHumanResponse(requestId: string, choice: string, data: Reco
   if (!runId || !requestId || humanResponsePending.value) return;
   humanResponsePending.value = requestId;
   try {
-    const result = await pipelineApi.agentRunHumanResponse(runId, requestId, choice, data);
+    const result = await pipelineApi.videoScriptHumanResponse(props.courseId, runId, requestId, choice, data);
     if (result.continuation_run_id) {
       ElMessage.success('已确认方案，正在继续生成');
       pipelineStore.beginRun();
@@ -205,9 +247,12 @@ function startPolling() {
   stopPolling();
   pollTimer = window.setInterval(() => {
     const s = pipelineStore.run?.status;
-    if (s && ['queued', 'running', 'pausing', 'paused'].includes(s)) void loadDetail();
-    else if (['running', 'pausing'].includes(status.value)) void loadDetail();
-  }, 2000);
+    const realtimeUnavailable = !projectStore.eventSource || Boolean(projectStore.connectionError);
+    const snapshotPending = Boolean(activeRunId.value) && !pipelineMatchesActiveRun.value;
+    if (pipelineStore.draftNeedsRefresh || snapshotPending || ['pausing', 'paused'].includes(s || '') || realtimeUnavailable) {
+      void loadDetail();
+    }
+  }, 5000);
 }
 
 function stopPolling() {
@@ -248,6 +293,10 @@ watch(
   () => pipelineStore.syncThoughts(),
   { deep: true },
 );
+
+watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
+  if (needsRefresh) void loadDetail();
+});
 </script>
 
 <template>
@@ -274,6 +323,7 @@ watch(
           <el-tag :type="statusType" size="small" class="status-tag">
             {{ PIPELINE_STATUS_LABELS[status] || status || '未运行' }}
           </el-tag>
+          <el-tag v-if="queuedCount" type="warning" size="small">待合并 {{ queuedCount }}</el-tag>
         </div>
         <div class="pane-controls">
           <el-button v-if="['running', 'queued'].includes(status) && !pausing" size="small" :loading="pipelineStore.pauseLoading" @click="pause">
@@ -297,6 +347,26 @@ watch(
         @human-response="handleHumanResponse"
       />
 
+      <div v-if="selectedScopeLabels.length" class="video-scope-bar">
+        <span class="video-scope-label">当前范围</span>
+        <span v-for="label in selectedScopeLabels" :key="label" class="video-scope-chip">{{ label }}</span>
+        <button type="button" class="video-scope-clear" @click="clearTargetSections">清除</button>
+      </div>
+
+      <div class="video-mode-bar" role="group" aria-label="视频脚本修改类型">
+        <span class="video-mode-label">修改类型</span>
+        <button
+          v-for="option in modeOptions"
+          :key="option.value"
+          type="button"
+          class="video-mode-button"
+          :class="{ active: mode === option.value }"
+          @click="mode = option.value"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+
       <AgentComposer
         :target-slide="activeSectionId as any"
         :target-slides="selectedSectionIds as any"
@@ -305,6 +375,7 @@ watch(
         :model-config-id="task?.model_config_id"
         task-type="video_script"
         unit-name="镜"
+        :submit="send"
         @send="send"
         @pause="pause"
         @clear-target-slide="clearTargetSections"
@@ -334,6 +405,9 @@ watch(
         :content="artifactContent"
         :source-versions="task?.current_artifact?.source_versions_json"
         :draft="isDraft"
+        :affected-section-ids="pipelineStore.lastAffectedSectionIds"
+        :affected-scene-ids="pipelineStore.lastAffectedSceneIds"
+        :preferred-resolution="task?.preferred_video_resolution"
         @select-section="selectSection"
         @select-scene="selectScene"
       />
@@ -365,6 +439,73 @@ watch(
   border-right: 1px solid var(--border-default, #e2e8f0);
   min-width: 320px;
   overflow: hidden;
+}
+
+.video-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 0;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+  overflow-x: auto;
+}
+
+.video-scope-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px 0;
+  border-top: 1px solid #e5e7eb;
+  background: #ffffff;
+  overflow-x: auto;
+}
+
+.video-scope-label {
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.video-scope-chip {
+  padding: 4px 7px;
+  border: 1px solid #bfdbfe;
+  border-radius: 5px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.video-scope-clear {
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.video-mode-label {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.video-mode-button {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid #dbe3ef;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.video-mode-button.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
 }
 
 .pane-header {

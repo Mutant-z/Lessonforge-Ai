@@ -69,7 +69,8 @@ async def test_model_capabilities_defaults_and_updates(client, auth_headers):
     )
     assert updated.status_code == 200, updated.text
     assert updated.json()["context_window_tokens"] == 128_000
-    assert updated.json()["supports_multimodal"] is True
+    # 多模态状态现在由 vision_chat 用途派生，不能再通过旧布尔字段把文本模型伪装成视觉模型。
+    assert updated.json()["supports_multimodal"] is False
 
     invalid = await client.patch(
         f"/api/v1/settings/models/{created.json()['id']}",
@@ -120,6 +121,56 @@ async def test_media_capabilities_require_matching_transport(client, auth_header
     )
     assert incompatible_update.status_code == 422
     assert "语音生成" in incompatible_update.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_text_vision_and_video_have_independent_defaults(client, auth_headers):
+    text_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "默认文本", "provider": "openai_compatible", "base_url": "https://chat.example/v1",
+        "model_name": "chat", "api_mode": "text_chat", "model_category": "text",
+        "model_purpose": "text_chat", "is_active": True,
+    })
+    assert text_model.status_code == 200, text_model.text
+    vision_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "默认视觉", "provider": "openai_compatible", "base_url": "https://vision.example/v1",
+        "model_name": "vision", "api_mode": "text_chat", "model_category": "vision",
+        "model_purpose": "vision_chat", "is_active": True,
+    })
+    assert vision_model.status_code == 200, vision_model.text
+    assert vision_model.json()["capabilities"] == ["text_generation", "structured_output", "vision_review"]
+    video_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "默认视频", "provider": "openai_compatible", "base_url": "https://video.example/v1",
+        "model_name": "video", "api_mode": "custom_video_async_http", "model_category": "video",
+        "model_purpose": "video_generation", "adapter_config": {"endpoint_path": "/videos/generations"},
+        "is_active": True,
+    })
+    assert video_model.status_code == 200, video_model.text
+
+    settings = (await client.get("/api/v1/settings", headers=auth_headers)).json()
+    assert settings["active_config_id"] == text_model.json()["id"]
+    assert settings["active_config_ids"] == {
+        "text": text_model.json()["id"],
+        "vision": vision_model.json()["id"],
+        "video": video_model.json()["id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_model_keeps_encrypted_key_without_exposing_secret(client, auth_headers):
+    secret = "sk-duplicate-private-key"
+    source = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "文本端点", "provider": "openai_compatible", "base_url": "https://chat.example/v1",
+        "model_name": "multimodal", "api_key": secret, "model_category": "text",
+        "model_purpose": "text_chat", "api_mode": "text_chat", "is_active": False,
+    })
+    duplicated = await client.post(
+        f"/api/v1/settings/models/{source.json()['id']}/duplicate", headers=auth_headers,
+        json={"model_category": "vision", "model_purpose": "vision_chat"},
+    )
+    assert duplicated.status_code == 200, duplicated.text
+    assert duplicated.json()["model_category"] == "vision"
+    assert duplicated.json()["api_key_configured"] is True
+    assert secret not in duplicated.text
 
 
 @pytest.mark.asyncio

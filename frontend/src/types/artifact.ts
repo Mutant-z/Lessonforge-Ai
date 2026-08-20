@@ -480,9 +480,11 @@ export interface VideoScriptContentV4 {
   scenes: VideoSceneV4[];
 }
 
+export type NativeVideoResolution = '1280x720' | '854x480';
+
 export interface VideoGenerationSettings {
   aspect_ratio: '16:9';
-  resolution: '1280x720';
+  resolution: NativeVideoResolution;
   subtitle_enabled: boolean;
   native_audio: true;
   continuity_policy: 'grouped';
@@ -551,7 +553,7 @@ export interface VideoGenerationQuote {
   model_name: string;
   provider: string;
   api_mode: string;
-  resolution: '1280x720';
+  resolution: NativeVideoResolution;
   scene_count: number;
   reusable_scene_count: number;
   duration_seconds: number;

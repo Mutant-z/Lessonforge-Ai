@@ -7,11 +7,15 @@
  */
 import { computed, ref, watch } from 'vue';
 import type { VideoScriptContent, VideoScriptContentV4 } from '../../../types';
+import { videoResolutionLabel } from '../../../utils/videoResolution';
 
 const props = defineProps<{
   content: VideoScriptContent | VideoScriptContentV4 | null;
   sourceVersions?: Record<string, number>;
   draft?: boolean;
+  affectedSectionIds?: string[];
+  affectedSceneIds?: string[];
+  preferredResolution?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -88,7 +92,12 @@ function getRoleStyle(role: string) {
   return roleColors[role] || { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' };
 }
 
-watch(() => props.content, () => { activeSectionId.value = null; selectedSceneIds.value = []; });
+watch(() => props.content, () => {
+  const sectionIds = new Set(sections.value.map(item => String(item.id)));
+  const sceneIds = new Set(scenes.value.map(item => String(item.id)));
+  if (activeSectionId.value && !sectionIds.has(activeSectionId.value)) activeSectionId.value = null;
+  selectedSceneIds.value = selectedSceneIds.value.filter(id => sceneIds.has(id));
+});
 </script>
 
 <template>
@@ -141,7 +150,7 @@ watch(() => props.content, () => { activeSectionId.value = null; selectedSceneId
       <div class="contract-label"><span class="contract-icon">📋</span>生产契约</div>
       <div class="contract-tags">
         <span class="contract-tag">📐 16:9 画幅</span>
-        <span class="contract-tag">📺 720p 分辨率</span>
+        <span class="contract-tag">📺 {{ videoResolutionLabel(props.preferredResolution) }} 分辨率</span>
         <span class="contract-tag">
           ⏱️ {{ content?.production_settings?.min_clip_seconds && content?.production_settings?.max_clip_seconds ? `${content.production_settings.min_clip_seconds}–${content.production_settings.max_clip_seconds} 秒/段` : '8–15 秒/段' }}
         </span>
@@ -245,7 +254,7 @@ watch(() => props.content, () => { activeSectionId.value = null; selectedSceneId
           :key="section.id"
           type="button"
           class="section-card"
-          :class="{ active: activeSectionId === section.id }"
+          :class="{ active: activeSectionId === section.id, updated: affectedSectionIds?.includes(section.id) }"
           @click="selectSection(activeSectionId === section.id ? null : section.id)"
         >
           <div class="section-num">{{ section.sequence }}</div>
@@ -272,7 +281,7 @@ watch(() => props.content, () => { activeSectionId.value = null; selectedSceneId
               v-for="scene in scenes.filter(item => item.section_id === section.id)"
               :key="scene.id"
               class="storyboard-card"
-              :class="{ selected: selectedSceneIds.includes(scene.id) }"
+              :class="{ selected: selectedSceneIds.includes(scene.id), updated: affectedSceneIds?.includes(scene.id) }"
               @click="toggleScene(scene.id)"
             >
               <header class="card-header">
@@ -647,6 +656,12 @@ watch(() => props.content, () => { activeSectionId.value = null; selectedSceneId
   box-shadow: 0 8px 24px rgba(99, 102, 241, 0.16);
 }
 
+.storyboard-card.updated {
+  border-color: #2563eb;
+  box-shadow: inset 3px 0 0 #2563eb;
+  animation: revision-highlight 1.4s ease-out;
+}
+
 .card-header {
   display: flex;
   align-items: center;
@@ -902,6 +917,17 @@ watch(() => props.content, () => { activeSectionId.value = null; selectedSceneId
   border-color: #6366f1;
   background: #f5f7ff;
   box-shadow: 0 4px 16px rgba(99, 102, 241, 0.12);
+}
+
+.section-card.updated {
+  border-color: #2563eb;
+  box-shadow: inset 3px 0 0 #2563eb;
+  animation: revision-highlight 1.4s ease-out;
+}
+
+@keyframes revision-highlight {
+  from { background: #dbeafe; }
+  to { background: #ffffff; }
 }
 
 .section-num {

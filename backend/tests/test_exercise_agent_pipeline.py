@@ -365,6 +365,42 @@ def test_add_block_idempotent_upsert_keeps_stable_id(bp, exercise_data):
     assert builder.find_question("ex_multi_01")[0]["stem"] == "第三版"
 
 
+def test_move_question_is_identity_preserving_and_recomputes_section_scores(exercise_data):
+    from app.agent.registry import execute_tool
+
+    builder = ExerciseBuilder(exercise_data)
+    question_id = next(
+        item["id"] for item in builder.question_snapshot()
+        if item["section_id"] == "basic_consolidation" and item["group_id"] is None
+    )
+    original = copy.deepcopy(builder.find_question(question_id)[0])
+    tc = _tool_context(builder)
+    tc.runtime.intent_plan = ExerciseIntentDecision(
+        intent="STRUCTURE_EDIT",
+        operation="move_question",
+        target_question_ids=[question_id],
+        target_section_ids=["understanding_application"],
+        destination_section_id="understanding_application",
+    )
+
+    result = asyncio.run(execute_tool("exercise_move_question", tc, {
+        "question_id": question_id,
+        "destination_section_id": "understanding_application",
+    }))
+
+    assert result.ok, result.error
+    moved, section, _ = builder.find_question(question_id)
+    assert moved == original
+    assert section["id"] == "understanding_application"
+    assert sum(section["score"] for section in builder.sections) == 100
+    for item in builder.sections:
+        actual = sum(
+            snapshot["score"] for snapshot in builder.question_snapshot()
+            if snapshot["section_id"] == item["id"]
+        )
+        assert item["score"] == actual
+
+
 def test_update_question_supports_group_sub_question(exercise_data):
     from app.agent.registry import execute_tool
 
@@ -651,6 +687,27 @@ def test_intent_llm_filters_hallucinated_target_ids():
     assert result2.target_question_ids == ["q6", "ex_06"]
 
 
+def test_numbered_question_move_is_resolved_deterministically_before_llm():
+    provider = _ScriptedIntentProvider(ExerciseIntentDecision(intent="QA_ONLY"))
+    result = asyncio.run(infer_exercise_intent(
+        provider,
+        "message",
+        "第十题的单选题应该是放到一、基础巩固区中",
+        # IDs are intentionally unrelated to their displayed positions.  This
+        # mirrors a document whose questions have already been regrouped.
+        available_question_ids=[
+            "ex_01", "ex_04", "ex_07", "ex_08", "ex_09",
+            "ex_10", "ex_14", "ex_15", "ex_16", "ex_02", "ex_05",
+        ],
+    ))
+
+    assert result.intent == "STRUCTURE_EDIT"
+    assert result.operation == "move_question"
+    assert result.target_question_ids == ["ex_02"]
+    assert result.destination_section_id == "basic_consolidation"
+    assert provider.calls == 0
+
+
 # ---------------------------------------------------------------------------
 # Runtime 全链路（Mock）
 # ---------------------------------------------------------------------------
@@ -720,6 +777,35 @@ def test_runtime_message_mock_no_change_for_qa_only():
     asyncio.run(runtime.run())
     assert runtime.result_status == "no_change"
     assert runtime.changed is False
+
+
+def test_runtime_numbered_question_move_publishes_real_structure_change(exercise_data):
+    from app.providers.llm.mock import MockProvider
+
+    source_builder = ExerciseBuilder(exercise_data)
+    # The second displayed question has a stable ID that does not encode 2.
+    # The runtime must resolve the display ordinal, not hallucinate ``ex_02``.
+    second_id = source_builder.all_question_ids()[1]
+    source_builder.find_question(second_id)[0]["id"] = "ex_99"
+    source_content = source_builder.to_content()
+    original_question = copy.deepcopy(source_builder.find_question("ex_99")[0])
+    runtime = _make_runtime(
+        MockProvider(),
+        trigger="message",
+        instruction="第二题应该放到二、理解应用区中",
+    )
+    runtime.source_artifact = SimpleNamespace(
+        content_json=source_content, version=3, content_markdown="",
+    )
+    runtime.context.source_artifact = runtime.source_artifact
+
+    asyncio.run(runtime.run())
+
+    assert runtime.result_status == "applied"
+    moved, section, _ = runtime.builder.find_question("ex_99")
+    assert section["id"] == "understanding_application"
+    assert moved == original_question
+    assert sum(item["score"] for item in runtime.draft_content["sections"]) == 100
 
 
 class _CountEditProvider:

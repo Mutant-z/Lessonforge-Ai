@@ -7,6 +7,13 @@ from app.providers.llm.base import LLMProvider
 from app.providers.llm.router import get_provider_for_config
 
 
+DEFAULT_PURPOSES = {
+    "text": ("text_chat",),
+    "vision": ("vision_chat",),
+    "video": ("video_generation", "native_audio_video_generation"),
+}
+
+
 async def owned_model_config(
     db: AsyncSession,
     owner_id: str,
@@ -27,6 +34,7 @@ async def resolve_model_config(
     db: AsyncSession,
     owner_id: str,
     preferred_id: str | None = None,
+    model_category: str = "text",
 ) -> ModelConfig | None:
     if preferred_id:
         config = await db.scalar(
@@ -40,13 +48,18 @@ async def resolve_model_config(
     config = await db.scalar(
         select(ModelConfig).where(
             ModelConfig.owner_id == owner_id,
+            ModelConfig.model_category == model_category,
             ModelConfig.is_active.is_(True),
         ).order_by(ModelConfig.updated_at.desc())
     )
     if config:
         return config
     return await db.scalar(
-        select(ModelConfig).where(ModelConfig.owner_id == owner_id)
+        select(ModelConfig).where(
+            ModelConfig.owner_id == owner_id,
+            ModelConfig.model_category == model_category,
+            ModelConfig.model_purpose.in_(DEFAULT_PURPOSES.get(model_category, ())),
+        )
         .order_by(ModelConfig.updated_at.desc())
     )
 
@@ -55,8 +68,9 @@ async def resolve_provider(
     db: AsyncSession,
     owner_id: str,
     preferred_id: str | None = None,
+    model_category: str = "text",
 ) -> tuple[LLMProvider, ModelConfig | None]:
-    config = await resolve_model_config(db, owner_id, preferred_id)
+    config = await resolve_model_config(db, owner_id, preferred_id, model_category)
     return get_provider_for_config(config), config
 
 

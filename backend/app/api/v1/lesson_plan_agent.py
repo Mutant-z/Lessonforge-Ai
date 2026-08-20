@@ -248,7 +248,7 @@ async def resolve_human_response(run_id: str, payload: HumanResponseRequest, use
         AgentMessage.run_id == run_id, AgentMessage.role == "user",
     ).order_by(AgentMessage.created_at.desc()))
     continuation = AgentMessage(
-        course_id=task.course_id, task_id=task.id, module_type=TASK_TYPE,
+        course_id=task.course_id, task_id=task.id, module_type=task.task_type,
         role="user", content=(source_message.content if source_message else "继续执行"),
         status="pending",
         metadata_json={

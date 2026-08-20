@@ -154,6 +154,21 @@ def _stage_title(lesson_plan_raw: dict[str, Any] | None, stage_id: str) -> str |
     return None
 
 
+def _is_ppt_dependent_prompt(value: str) -> bool:
+    """判断画面提示词是否依赖 PPT / 幻灯片 / 信息图 / 课件页面。"""
+    lowered = (value or "").lower()
+    return any(marker in lowered for marker in ("ppt", "幻灯片", "课件", "信息图", "软件界面"))
+
+
+def _real_scene_prompt(audience: str, title: str, spoken_text: str) -> str:
+    """生成不依赖 PPT 的真实教学影像画面描述（与 make_seedance_video_script 同风格）。"""
+    topic = (title or "").strip() or (spoken_text or "").strip()[:20]
+    return (
+        f"面向{audience or '学生'}的真实教学影像，围绕「{topic}」呈现一个可观察、科学准确的场景；"
+        "主体动作清楚，环境简洁，镜头稳定，关键观察对象始终清晰。"
+    )
+
+
 def upgrade_video_script_v4(
     raw: dict[str, Any],
     lesson_plan_raw: dict[str, Any] | None = None,
@@ -163,6 +178,7 @@ def upgrade_video_script_v4(
     - 保留全部分镜 ID、口播、镜头、事实与时间轴；
     - 章节标题取教学设计真实环节名称，缺失时用环节 ID 兜底；
     - 章节覆盖范围为所属分镜的目标/知识点并集；
+    - 清洗依赖 PPT 的画面提示词：原生视频模式必须以真实教学影像为主画面；
     - 不执行内容润色，结构变化本身不强制重新生成媒体。
     """
     if (raw or {}).get("schema_version") == VIDEO_SCRIPT_V4:
@@ -170,7 +186,14 @@ def upgrade_video_script_v4(
     if (raw or {}).get("schema_version") != "3.0":
         raise ValueError("V4 适配器仅接受 V3 或 V4 视频脚本")
     v3 = SeedanceVideoScriptContent.model_validate(raw)
+    audience = (v3.course_info.audience if hasattr(v3.course_info, "audience") else "") or ""
     scenes = [scene.model_dump() for scene in v3.scenes]
+    for scene in scenes:
+        prompt = scene.get("visual_prompt") or ""
+        if _is_ppt_dependent_prompt(prompt):
+            scene["visual_prompt"] = _real_scene_prompt(
+                audience, scene.get("title") or "", scene.get("spoken_text") or "",
+            )
     # 按连续 lesson_stage_id 分组（保持时间轴顺序）
     runs: list[list[dict[str, Any]]] = []
     for scene in scenes:

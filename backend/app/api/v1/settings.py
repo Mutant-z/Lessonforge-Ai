@@ -24,6 +24,39 @@ ModelCapability = Literal[
     "video_generation", "native_audio_video_generation", "speech_generation",
     "speech_recognition", "media_composition",
 ]
+ModelCategory = Literal["text", "vision", "video"]
+ModelPurpose = Literal[
+    "text_chat", "vision_chat", "image_generation", "video_generation",
+    "native_audio_video_generation", "speech_generation", "speech_recognition",
+    "media_composition",
+]
+PURPOSE_SPECS: dict[str, tuple[str, list[str], set[str]]] = {
+    "text_chat": ("text", ["text_generation", "structured_output"], {"text_chat"}),
+    "vision_chat": (
+        "vision", ["text_generation", "structured_output", "vision_review"],
+        {"text_chat", "google_vision", "anthropic_vision"},
+    ),
+    "image_generation": (
+        "vision", ["image_generation"],
+        {"openai_images", "google_gemini_image", "custom_image_http", "mock_media"},
+    ),
+    "video_generation": (
+        "video", ["video_generation"],
+        {"custom_video_async_http", "volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+    ),
+    "native_audio_video_generation": (
+        "video", ["video_generation", "native_audio_video_generation"],
+        {"volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+    ),
+    "speech_generation": ("video", ["speech_generation"], {"custom_speech_http", "mock_media"}),
+    "speech_recognition": ("video", ["speech_recognition"], {"volcengine_asr", "mock_media"}),
+    "media_composition": ("video", ["media_composition"], {"local_ffmpeg", "mock_media"}),
+}
+DEFAULT_PURPOSES = {
+    "text": {"text_chat"},
+    "vision": {"vision_chat"},
+    "video": {"video_generation", "native_audio_video_generation"},
+}
 ALLOWED_API_MODES = {
     "text_chat", "openai_images", "google_gemini_image", "google_vision",
     "anthropic_vision", "custom_image_http", "custom_video_async_http",
@@ -61,6 +94,8 @@ class ModelConfigItem(BaseModel):
     capabilities: list[ModelCapability]
     api_mode: str
     adapter_config: dict[str, Any]
+    model_category: ModelCategory
+    model_purpose: ModelPurpose
     api_key_configured: bool
     api_key_masked: str
     is_active: bool
@@ -80,6 +115,8 @@ class ModelConfigCreate(BaseModel):
     capabilities: list[ModelCapability] = Field(default_factory=lambda: ["text_generation", "structured_output"])
     api_mode: str = "text_chat"
     adapter_config: dict[str, Any] = Field(default_factory=dict)
+    model_category: ModelCategory | None = None
+    model_purpose: ModelPurpose | None = None
     is_active: bool = True
 
 
@@ -95,7 +132,15 @@ class ModelConfigUpdate(BaseModel):
     capabilities: list[ModelCapability] | None = None
     api_mode: str | None = None
     adapter_config: dict[str, Any] | None = None
+    model_category: ModelCategory | None = None
+    model_purpose: ModelPurpose | None = None
     is_active: bool | None = None
+
+
+class ModelConfigDuplicate(BaseModel):
+    model_category: ModelCategory
+    model_purpose: ModelPurpose
+    name: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -106,7 +151,7 @@ class TestConnectionRequest(BaseModel):
     api_key: str = ""
     timeout_seconds: int = 15
     test_capability: Literal[
-        "text_generation", "image_generation", "video_generation", "speech_generation", "speech_recognition",
+        "text_generation", "vision_review", "image_generation", "video_generation", "speech_generation", "speech_recognition",
     ] = "text_generation"
     api_mode: str | None = None
     adapter_config: dict[str, Any] | None = None
@@ -121,6 +166,7 @@ class UserPreferencesUpdate(BaseModel):
 class FullSettingsResponse(BaseModel):
     configs: list[ModelConfigItem]
     active_config_id: str | None
+    active_config_ids: dict[ModelCategory, str | None]
     preferences: dict[str, Any]
     # 兼容旧单配置字段
     provider: str
@@ -240,9 +286,56 @@ def _validate_model_capabilities(provider: str, api_mode: str, capabilities: lis
         )
 
 
+def _infer_model_purpose(capabilities: list[str], api_mode: str) -> str:
+    values = set(capabilities)
+    if "native_audio_video_generation" in values:
+        return "native_audio_video_generation"
+    for purpose in (
+        "video_generation", "image_generation", "speech_generation",
+        "speech_recognition", "media_composition", "vision_chat",
+    ):
+        capability = "vision_review" if purpose == "vision_chat" else purpose
+        if capability in values:
+            return purpose
+    if api_mode in {"google_vision", "anthropic_vision"}:
+        return "vision_chat"
+    return "text_chat"
+
+
+def _normalized_model_role(
+    *,
+    provider: str,
+    api_mode: str,
+    capabilities: list[str],
+    model_category: str | None,
+    model_purpose: str | None,
+) -> tuple[str, str, list[str], str]:
+    purpose = model_purpose or _infer_model_purpose(capabilities, api_mode)
+    if purpose not in PURPOSE_SPECS:
+        raise HTTPException(422, "不支持的模型用途")
+    expected_category, canonical_capabilities, allowed_modes = PURPOSE_SPECS[purpose]
+    category = model_category or expected_category
+    if category != expected_category:
+        raise HTTPException(422, f"模型用途 {purpose} 必须归入 {expected_category} 类别")
+    normalized_mode = api_mode or "text_chat"
+    if normalized_mode not in allowed_modes and provider != "mock":
+        _validate_model_capabilities(provider, normalized_mode, canonical_capabilities)
+        raise HTTPException(422, f"模型用途 {purpose} 不支持接口模式 {normalized_mode}")
+    normalized_capabilities = list(canonical_capabilities)
+    _validate_model_capabilities(provider, normalized_mode, normalized_capabilities)
+    return category, purpose, normalized_capabilities, normalized_mode
+
+
+def _can_be_default(category: str, purpose: str) -> bool:
+    return purpose in DEFAULT_PURPOSES.get(category, set())
+
+
 def _format_config(c: ModelConfig) -> ModelConfigItem:
     has_key = bool(c.encrypted_api_key)
     raw_key = decrypt_secret(c.encrypted_api_key) if has_key else ""
+    capabilities = c.capabilities_json or (["text_generation", "structured_output", "vision_review"] if c.supports_multimodal else ["text_generation", "structured_output"])
+    purpose = c.model_purpose or _infer_model_purpose(capabilities, c.api_mode or "text_chat")
+    category = c.model_category or PURPOSE_SPECS[purpose][0]
     return ModelConfigItem(
         id=c.id,
         name=c.name or f"{c.provider.upper()} - {c.model_name}",
@@ -252,9 +345,11 @@ def _format_config(c: ModelConfig) -> ModelConfigItem:
         timeout_seconds=c.timeout_seconds,
         context_window_tokens=c.context_window_tokens,
         supports_multimodal=c.supports_multimodal,
-        capabilities=c.capabilities_json or (["text_generation", "structured_output", "vision_review"] if c.supports_multimodal else ["text_generation", "structured_output"]),
+        capabilities=capabilities,
         api_mode=c.api_mode or "text_chat",
         adapter_config=c.adapter_config_json or {},
+        model_category=category,
+        model_purpose=purpose,
         api_key_configured=has_key,
         api_key_masked=_mask_key(raw_key),
         is_active=c.is_active,
@@ -272,7 +367,13 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
     raw_configs = list(configs_query.all())
 
     items = [_format_config(c) for c in raw_configs]
-    active_c = next((c for c in raw_configs if c.is_active), raw_configs[0] if raw_configs else None)
+    active_by_category = {
+        category: next((c for c in raw_configs if c.is_active and (c.model_category or "text") == category), None)
+        for category in ("text", "vision", "video")
+    }
+    active_c = active_by_category["text"] or next(
+        (c for c in raw_configs if (c.model_category or "text") == "text"), None
+    )
     active_id = active_c.id if active_c else None
 
     # 获取偏好设置
@@ -298,6 +399,7 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
     return FullSettingsResponse(
         configs=items,
         active_config_id=active_id,
+        active_config_ids={category: config.id if config else None for category, config in active_by_category.items()},
         preferences={
             "default_language": default_lang,
             "default_grade_level": default_grade,
@@ -317,17 +419,23 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
 
 @router.post("/models", response_model=ModelConfigItem)
 async def create_model_config(payload: ModelConfigCreate, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    _validate_model_transport(payload.provider, payload.api_mode, payload.base_url, payload.adapter_config)
-    _validate_model_capabilities(payload.provider, payload.api_mode, payload.capabilities)
-    if payload.is_active:
-        # 如果新设为激活，则取消其他配置的激活
-        existing = await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == user.id, ModelConfig.is_active.is_(True)))
+    category, purpose, capabilities, api_mode = _normalized_model_role(
+        provider=payload.provider, api_mode=payload.api_mode, capabilities=payload.capabilities,
+        model_category=payload.model_category, model_purpose=payload.model_purpose,
+    )
+    _validate_model_transport(payload.provider, api_mode, payload.base_url, payload.adapter_config)
+    should_activate = payload.is_active and _can_be_default(category, purpose)
+    if should_activate:
+        existing = await db.scalars(select(ModelConfig).where(
+            ModelConfig.owner_id == user.id, ModelConfig.model_category == category,
+            ModelConfig.is_active.is_(True),
+        ))
         for item in existing:
             item.is_active = False
 
     name = payload.name.strip() if payload.name else f"{payload.provider.upper()} - {payload.model_name}"
     normalized_base_url = payload.base_url
-    if payload.api_mode == "gemini_interactions_video":
+    if api_mode == "gemini_interactions_video":
         from app.services.gemini_interactions_video_service import normalize_gateway_origin
         normalized_base_url = normalize_gateway_origin(payload.base_url)
     config = ModelConfig(
@@ -338,11 +446,13 @@ async def create_model_config(payload: ModelConfigCreate, user: User = Depends(c
         model_name=payload.model_name,
         timeout_seconds=payload.timeout_seconds,
         context_window_tokens=payload.context_window_tokens,
-        supports_multimodal=payload.supports_multimodal,
-        capabilities_json=list(dict.fromkeys(payload.capabilities)),
-        api_mode=payload.api_mode,
+        supports_multimodal=purpose == "vision_chat",
+        capabilities_json=capabilities,
+        api_mode=api_mode,
         adapter_config_json=payload.adapter_config,
-        is_active=payload.is_active,
+        model_category=category,
+        model_purpose=purpose,
+        is_active=should_activate,
     )
     if payload.api_key:
         config.encrypted_api_key = encrypt_secret(payload.api_key)
@@ -364,18 +474,30 @@ async def update_model_config(
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
 
+    if payload.model_category is not None and payload.model_category != config.model_category:
+        raise HTTPException(409, "模型类别不能直接修改，请使用复制为其他角色")
+    if payload.model_purpose is not None and payload.model_purpose != config.model_purpose:
+        raise HTTPException(409, "模型用途不能直接修改，请新建对应用途配置")
+
     resolved_provider = payload.provider if payload.provider is not None else config.provider
     resolved_api_mode = payload.api_mode if payload.api_mode is not None else config.api_mode
+    if payload.capabilities is not None and payload.model_purpose is None:
+        canonical = PURPOSE_SPECS[config.model_purpose][1]
+        if set(payload.capabilities) != set(canonical):
+            _validate_model_capabilities(resolved_provider, resolved_api_mode, payload.capabilities)
+            raise HTTPException(422, "模型能力必须通过模型用途配置，不能组合多个接口用途")
+    resolved_category, resolved_purpose, resolved_capabilities, resolved_api_mode = _normalized_model_role(
+        provider=resolved_provider,
+        api_mode=resolved_api_mode,
+        capabilities=payload.capabilities if payload.capabilities is not None else (config.capabilities_json or []),
+        model_category=payload.model_category if payload.model_category is not None else config.model_category,
+        model_purpose=payload.model_purpose if payload.model_purpose is not None else config.model_purpose,
+    )
     _validate_model_transport(
         resolved_provider,
         resolved_api_mode,
         payload.base_url if payload.base_url is not None else config.base_url,
         payload.adapter_config if payload.adapter_config is not None else (config.adapter_config_json or {}),
-    )
-    _validate_model_capabilities(
-        resolved_provider,
-        resolved_api_mode,
-        payload.capabilities if payload.capabilities is not None else (config.capabilities_json or []),
     )
 
     if payload.name is not None:
@@ -390,12 +512,11 @@ async def update_model_config(
         config.timeout_seconds = payload.timeout_seconds
     if payload.context_window_tokens is not None:
         config.context_window_tokens = payload.context_window_tokens
-    if payload.supports_multimodal is not None:
-        config.supports_multimodal = payload.supports_multimodal
-    if payload.capabilities is not None:
-        config.capabilities_json = list(dict.fromkeys(payload.capabilities))
-    if payload.api_mode is not None:
-        config.api_mode = payload.api_mode
+    config.supports_multimodal = resolved_purpose == "vision_chat"
+    config.capabilities_json = resolved_capabilities
+    config.api_mode = resolved_api_mode
+    config.model_category = resolved_category
+    config.model_purpose = resolved_purpose
     if payload.adapter_config is not None:
         config.adapter_config_json = payload.adapter_config
     if config.api_mode == "gemini_interactions_video":
@@ -405,7 +526,12 @@ async def update_model_config(
         config.encrypted_api_key = encrypt_secret(payload.api_key)
 
     if payload.is_active is True:
-        existing = await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == user.id, ModelConfig.id != config_id, ModelConfig.is_active == True))
+        if not _can_be_default(resolved_category, resolved_purpose):
+            raise HTTPException(422, "该辅助模型用途不能设为本列默认模型")
+        existing = await db.scalars(select(ModelConfig).where(
+            ModelConfig.owner_id == user.id, ModelConfig.id != config_id,
+            ModelConfig.model_category == resolved_category, ModelConfig.is_active.is_(True),
+        ))
         for item in existing:
             item.is_active = False
         config.is_active = True
@@ -423,13 +549,69 @@ async def activate_model_config(config_id: str, user: User = Depends(current_use
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
 
-    all_configs = await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == user.id))
+    if not _can_be_default(config.model_category, config.model_purpose):
+        raise HTTPException(422, "该辅助模型用途不能设为本列默认模型")
+    all_configs = await db.scalars(select(ModelConfig).where(
+        ModelConfig.owner_id == user.id,
+        ModelConfig.model_category == config.model_category,
+    ))
     for c in all_configs:
         c.is_active = (c.id == config_id)
 
     await db.commit()
     await db.refresh(config)
     return _format_config(config)
+
+
+@router.post("/models/{config_id}/duplicate", response_model=ModelConfigItem)
+async def duplicate_model_config(
+    config_id: str,
+    payload: ModelConfigDuplicate,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    source = await db.scalar(select(ModelConfig).where(ModelConfig.id == config_id, ModelConfig.owner_id == user.id))
+    if not source:
+        raise HTTPException(status_code=404, detail="指定的模型配置不存在")
+    duplicate_mode = {
+        "text_chat": "text_chat", "vision_chat": "text_chat",
+        "image_generation": "openai_images", "video_generation": "custom_video_async_http",
+        "native_audio_video_generation": "gemini_interactions_video",
+        "speech_generation": "custom_speech_http", "speech_recognition": "volcengine_asr",
+        "media_composition": "local_ffmpeg",
+    }[payload.model_purpose]
+    category, purpose, capabilities, api_mode = _normalized_model_role(
+        provider=source.provider,
+        api_mode=duplicate_mode,
+        capabilities=source.capabilities_json or [],
+        model_category=payload.model_category,
+        model_purpose=payload.model_purpose,
+    )
+    duplicate_base_url = source.base_url
+    if api_mode == "gemini_interactions_video":
+        from app.services.gemini_interactions_video_service import normalize_gateway_origin
+        duplicate_base_url = normalize_gateway_origin(duplicate_base_url)
+    duplicate = ModelConfig(
+        owner_id=user.id,
+        name=(payload.name or f"{source.name}（{category} 副本）")[:100],
+        provider=source.provider,
+        base_url=duplicate_base_url,
+        model_name=source.model_name,
+        encrypted_api_key=source.encrypted_api_key,
+        timeout_seconds=source.timeout_seconds,
+        context_window_tokens=source.context_window_tokens,
+        supports_multimodal=purpose == "vision_chat",
+        capabilities_json=capabilities,
+        api_mode=api_mode,
+        adapter_config_json=dict(source.adapter_config_json or {}),
+        model_category=category,
+        model_purpose=purpose,
+        is_active=False,
+    )
+    db.add(duplicate)
+    await db.commit()
+    await db.refresh(duplicate)
+    return _format_config(duplicate)
 
 
 @router.delete("/models/{config_id}")
@@ -439,6 +621,7 @@ async def delete_model_config(config_id: str, user: User = Depends(current_user)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
 
     was_active = config.is_active
+    deleted_category = config.model_category
     for model in (CourseIntakeSession, CourseProject, AgentChatSession):
         references = await db.scalars(select(model).where(model.model_config_id == config_id))
         for reference in references:
@@ -459,7 +642,11 @@ async def delete_model_config(config_id: str, user: User = Depends(current_user)
 
     if was_active:
         remaining = await db.scalar(
-            select(ModelConfig).where(ModelConfig.owner_id == user.id).order_by(ModelConfig.updated_at.desc())
+            select(ModelConfig).where(
+                ModelConfig.owner_id == user.id,
+                ModelConfig.model_category == deleted_category,
+                ModelConfig.model_purpose.in_(DEFAULT_PURPOSES.get(deleted_category, set())),
+            ).order_by(ModelConfig.updated_at.desc())
         )
         if remaining:
             remaining.is_active = True
@@ -495,6 +682,35 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
     settings = get_settings()
     if not api_key:
         api_key = settings.openai_api_key
+
+    if payload.test_capability == "vision_review":
+        from PIL import Image
+        from app.services.exercise_visual_service import review_image
+
+        probe = ModelConfig(
+            owner_id=user.id, name="vision-connection-probe", provider=provider_type,
+            base_url=base_url, model_name=model_name,
+            encrypted_api_key=encrypt_secret(api_key) if api_key else "",
+            timeout_seconds=timeout,
+            capabilities_json=["text_generation", "structured_output", "vision_review"],
+            api_mode=api_mode or "text_chat", model_category="vision", model_purpose="vision_chat",
+            is_active=False,
+        )
+        sample = BytesIO()
+        Image.new("RGB", (2, 2), "blue").save(sample, format="PNG")
+        try:
+            result = await review_image(probe, sample.getvalue(), "image/png", {"connection_test": True})
+            return {
+                "success": True, "message": "视觉模型已成功接收图片并返回结构化复核结果。",
+                "provider": provider_type, "model_name": model_name,
+                "test_capability": payload.test_capability, "vision_passed": result.passed,
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "success": False, "message": f"视觉模型测试失败：{str(exc)[:400]}",
+                "provider": provider_type, "model_name": model_name,
+                "test_capability": payload.test_capability,
+            }
 
     if payload.test_capability in {"video_generation", "speech_generation", "speech_recognition"}:
         resolved_mode = api_mode or (
@@ -637,7 +853,9 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
 async def update_preferences(payload: UserPreferencesUpdate, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     if not get_ppt_template(payload.default_ppt_template):
         raise HTTPException(422, "PPT 模板不存在或已停用")
-    active_c = await db.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id, ModelConfig.is_active.is_(True)))
+    active_c = await db.scalar(select(ModelConfig).where(
+        ModelConfig.owner_id == user.id, ModelConfig.model_category == "text", ModelConfig.is_active.is_(True),
+    ))
     if not active_c:
         active_c = await db.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id).order_by(ModelConfig.updated_at.desc()))
 
@@ -666,7 +884,9 @@ async def update_preferences(payload: UserPreferencesUpdate, user: User = Depend
 # 兼容旧接口 PATCH /api/v1/settings
 @router.patch("")
 async def save_settings_legacy(payload: dict[str, Any], user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    saved = await db.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id, ModelConfig.is_active.is_(True)))
+    saved = await db.scalar(select(ModelConfig).where(
+        ModelConfig.owner_id == user.id, ModelConfig.model_category == "text", ModelConfig.is_active.is_(True),
+    ))
     if not saved:
         saved = await db.scalar(select(ModelConfig).where(ModelConfig.owner_id == user.id).order_by(ModelConfig.updated_at.desc()))
     if not saved:

@@ -34,6 +34,34 @@ def test_schemas_rules_and_timing():
     assert estimate_chinese_minutes("教" * 440) == 2
 
 
+def test_validate_resources_accepts_v4_video_script():
+    """回归：发布 V4 视频脚本后 _refresh_quality 调用 validate_resources，
+    不得再落入 LegacyVideoScriptContent（V2）校验而抛异常——否则收尾会
+    报「任务生成暂时失败」且已提交的新版本被标记为 failed。"""
+    from app.agents.generators import make_seedance_video_script
+    from app.schemas.video_script_v4 import upgrade_video_script_v4
+
+    bp = make_blueprint(sample_course())
+    ppt, exercise = make_ppt(bp), make_exercises(bp)
+    lesson = make_lesson_plan(bp)
+    script_v3 = make_video_script(bp, lesson, ppt)
+    v4 = upgrade_video_script_v4(
+        make_seedance_video_script(bp, lesson).model_dump(),
+        lesson.model_dump(),
+    ).model_dump()
+    assert v4["schema_version"] == "4.0"
+    verbatim = make_verbatim(bp, ppt, script_v3)
+    data = {
+        "lesson_plan": lesson.model_dump(),
+        "ppt": ppt.model_dump(),
+        "exercise": exercise.model_dump(),
+        "video_script": v4,
+        "verbatim": verbatim.model_dump(),
+    }
+    issues = validate_resources(bp, data)  # 不应抛 ValidationError
+    assert all(item.get("artifact_type") != "video_script" for item in issues)
+
+
 def test_safe_filenames():
     assert safe_filename("../../教案?.pdf").endswith(".pdf")
     assert "/" not in safe_package_name("物理/力学:第一课")

@@ -6,6 +6,7 @@ from app.agent.agents.video_script.tools.check_tools import _register_check_tool
 from app.agent.agents.video_script.tools.outline_tools import _register_outline_tools
 from app.agent.agents.video_script.tools.read_tools import _register_read_tools
 from app.agent.agents.video_script.tools.scene_tools import _register_scene_tools
+from app.agent.agents.video_script.tools.project_settings_tools import _register_project_settings_tools
 
 _loaded = False
 
@@ -18,6 +19,7 @@ def register_video_script_tools() -> None:
     _register_read_tools()
     _register_outline_tools()
     _register_scene_tools()
+    _register_project_settings_tools()
     _register_check_tools()
     _loaded = True
 

@@ -214,6 +214,42 @@ class ExerciseBuilder:
                             return copy.deepcopy(removed)
         raise ValueError(f"题目/题组不存在：{block_id}")
 
+    def move_question(self, question_id: str, destination_section_id: str) -> dict[str, Any]:
+        """Move a top-level question intact and make section scores follow content."""
+        question, source_section, group = self.find_question(question_id)
+        destination = self.find_section(destination_section_id)
+        if question is None or source_section is None:
+            raise ValueError(f"题目不存在：{question_id}")
+        if destination is None:
+            raise ValueError(f"分区不存在：{destination_section_id}")
+        if group is not None:
+            raise ValueError("题组子题不能脱离共享材料单独移动，请移动或拆分整个题组")
+        source_section_id = str(source_section.get("id") or "")
+        if source_section_id == destination_section_id:
+            return {
+                "question_id": question_id,
+                "source_section_id": source_section_id,
+                "destination_section_id": destination_section_id,
+                "moved": False,
+            }
+        preserved = copy.deepcopy(question)
+        source_section["blocks"] = [
+            block for block in source_section.get("blocks", []) if block.get("id") != question_id
+        ]
+        destination.setdefault("blocks", []).append(preserved)
+        for section in self.sections:
+            section["score"] = sum(
+                int(item.get("score") or 0)
+                for item, owner, _ in _iter_questions(self._content)
+                if owner is section
+            )
+        return {
+            "question_id": question_id,
+            "source_section_id": source_section_id,
+            "destination_section_id": destination_section_id,
+            "moved": True,
+        }
+
     def update_section_score(self, section_id: str, score: int) -> dict[str, Any]:
         section = self.find_section(section_id)
         if section is None:

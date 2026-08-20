@@ -9,7 +9,8 @@ import { settingsApi } from '../api/settings';
 import { pipelineApi } from '../api/pipeline';
 import { useProjectStore } from '../stores/project';
 import { useAutoScroll } from '../composables/useAutoScroll';
-import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationQuote, VideoGenerationScene, VideoScriptContent } from '../types';
+import type { Artifact, ExerciseContent, NativeVideoResolution, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationQuote, VideoGenerationScene, VideoScriptContent } from '../types';
+import { isNativeVideoResolution } from '../utils/videoResolution';
 import ProjectShell from '../components/project/ProjectShell.vue';
 import ModelSelector from '../components/agent/ModelSelector.vue';
 import MarkdownRenderer from '../components/content-renderers/MarkdownRenderer.vue';
@@ -66,7 +67,18 @@ const blueprintRef = ref<{
 const exerciseDraft = ref<ExerciseContent | null>(null);
 const videoScriptDraft = ref<VideoScriptContent | null>(null);
 const selectedVideoSceneId = ref('');
-const videoResolution = ref<'1280x720'>('1280x720');
+const videoResolution = ref<NativeVideoResolution>('1280x720');
+const videoResolutionDirty = ref(false);
+const videoResolutionOptions = computed(() => {
+  const supported = new Set(
+    store.currentTask?.video_generation_capabilities?.supported_resolutions?.map(item => item.value)
+      || ['1280x720', '854x480'],
+  );
+  return [
+    { value: '1280x720' as NativeVideoResolution, label: '1280 × 720', hint: '720p · 高清', supported: supported.has('1280x720') },
+    { value: '854x480' as NativeVideoResolution, label: '854 × 480', hint: '480p · 标清', supported: supported.has('854x480') },
+  ];
+});
 const videoSubtitleEnabled = ref(true);
 const regeneratingScene = ref(false);
 const videoQuote = ref<VideoGenerationQuote | null>(null);
@@ -200,8 +212,13 @@ async function load() {
   exerciseDraft.value = null;
   videoScriptDraft.value = null;
   selectedVideoSceneId.value = '';
+  videoResolutionDirty.value = false;
   try {
     await store.openTask(courseId.value, taskType.value);
+    const preferred = store.currentTask?.preferred_video_resolution;
+    if (isNativeVideoResolution(preferred)) {
+      videoResolution.value = preferred;
+    }
     if (taskType.value === 'task_sheet') {
       try {
         const { data } = await api.get(`/courses/${courseId.value}/blueprints`);
@@ -636,6 +653,25 @@ function applyQuickPrompt(prompt: string) {
 }
 
 watch(taskType, load);
+watch(
+  () => store.currentTask?.preferred_video_resolution,
+  preferred => {
+    if (!videoResolutionDirty.value && isNativeVideoResolution(preferred)) {
+      videoResolution.value = preferred;
+    }
+  },
+);
+watch(
+  () => store.currentTask?.video_generation_capabilities?.supported_resolutions,
+  supported => {
+    const values = supported?.map(item => item.value) || [];
+    if (values.length && !values.includes(videoResolution.value)) {
+      videoResolution.value = values[0];
+      videoResolutionDirty.value = false;
+    }
+  },
+  { deep: true },
+);
 watch(() => artifact.value?.id, () => {
   mobilePane.value = 'file';
   previewTemplateId.value = currentTemplateId.value;
@@ -929,13 +965,22 @@ onUnmounted(() => {
                 @change="setVideoModel"
               />
               <ModelSelector
-                v-if="isPpt"
+                v-if="isPpt || taskType === 'exercise'"
                 :model-value="task.image_model_config_id || null"
                 capability="image_generation"
                 compact
                 label="图片"
                 :disabled="isRunning"
                 @change="setImageModel"
+              />
+              <ModelSelector
+                v-if="taskType === 'exercise'"
+                :model-value="task.vision_model_config_id || null"
+                capability="vision_review"
+                compact
+                label="视觉"
+                :disabled="isRunning"
+                @change="setVisionModel"
               />
               <RouterLink
                 v-if="isPpt && !task.image_model_config_id"
@@ -1082,13 +1127,22 @@ onUnmounted(() => {
                   <span>固定生产契约</span>
                 </div>
                 <div class="native-contract-grid">
-                  <div><b>1280 × 720</b><span>16:9 · 25fps</span></div>
+                  <div><b>{{ videoResolution === '1280x720' ? '1280 × 720' : '854 × 480' }}</b><span>16:9 · 25fps</span></div>
                   <div><b>原生语音</b><span>禁止独立 TTS</span></div>
                   <div><b>分段生成</b><span>Gemini 3–10 秒 · Seedance 4–15 秒</span></div>
                   <div><b>并发上限 2</b><span>失败片段最多重试一次</span></div>
                 </div>
                 <div class="native-options-row">
                   <ModelSelector :model-value="task.video_model_config_id || null" capability="native_audio_video_generation" label="原生有声视频模型" @change="setVideoModel" />
+                  <el-select
+                    v-model="videoResolution"
+                    size="default"
+                    class="video-resolution-select"
+                    aria-label="输出分辨率"
+                    @change="videoResolutionDirty = true"
+                  >
+                    <el-option v-for="option in videoResolutionOptions" :key="option.value" :value="option.value" :disabled="!option.supported" :label="`${option.label} · ${option.hint}${option.supported ? '' : '（当前模型不支持）'}`" />
+                  </el-select>
                   <el-switch v-model="videoSubtitleEnabled" active-text="封装 ASR 字幕轨" />
                 </div>
               </div>
@@ -1126,7 +1180,7 @@ onUnmounted(() => {
     <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration || isPpt || isLessonPlan" @select="selectVersion" @restore="confirmRestoreVersion" @close="closeVersions" />
     <el-dialog v-model="quoteDialogVisible" width="680px" class="video-quote-dialog" title="确认原生有声视频报价" destroy-on-close>
       <div v-if="videoQuote" class="quote-sheet">
-        <header><span>QUOTE / 15 MIN VALID</span><h3>{{ pendingSceneRegeneration ? '单片段修改报价' : '首版分段生成报价' }}</h3><p>{{ videoQuote.provider }} · {{ videoQuote.model_name }} · 720p · 原生音频</p></header>
+        <header><span>QUOTE / 15 MIN VALID</span><h3>{{ pendingSceneRegeneration ? '单片段修改报价' : '首版分段生成报价' }}</h3><p>{{ videoQuote.provider }} · {{ videoQuote.model_name }} · {{ videoQuote.resolution === '854x480' ? '480p' : '720p' }} · 原生音频</p></header>
         <dl class="quote-metrics">
           <div><dt>片段数</dt><dd>{{ videoQuote.scene_count }}</dd></div>
           <div><dt>预计时长</dt><dd>{{ videoQuote.duration_seconds.toFixed(1) }}s</dd></div>

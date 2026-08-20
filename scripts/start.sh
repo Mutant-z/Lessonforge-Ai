@@ -37,66 +37,66 @@ fi
 
 "$PROJECT_DIR/scripts/init_db.sh"
 
-if launchd_service_exists "$BACKEND_LAUNCH_LABEL"; then
-  backend_pid="$(launchd_service_pid "$BACKEND_LAUNCH_LABEL" || true)"
-  [ -n "$backend_pid" ] && printf '%s\n' "$backend_pid" > "$BACKEND_PID_FILE"
-  echo "后端已由 launchd 托管${backend_pid:+（PID ${backend_pid}）}"
+if launchd_service_exists "$BACKEND_LAUNCH_LABEL" && backend_pid="$(launchd_service_pid "$BACKEND_LAUNCH_LABEL" || true)" && [ -n "$backend_pid" ]; then
+  printf '%s\n' "$backend_pid" > "$BACKEND_PID_FILE"
+  echo "后端已由 launchd 托管（PID ${backend_pid}）"
 elif is_running "$BACKEND_PID_FILE"; then
   echo "后端已在运行（PID $(read_pid "$BACKEND_PID_FILE")）"
 else
-  assert_port_available "后端" 8000
+  assert_port_available "后端" "$BACKEND_PORT"
   echo "正在启动后端…"
   if launchd_available; then
+    remove_launchd_service "$BACKEND_LAUNCH_LABEL"
     launchctl submit \
       -l "$BACKEND_LAUNCH_LABEL" \
       -o "$BACKEND_LAUNCH_LOG" \
       -e "$BACKEND_LAUNCH_LOG" \
-      -- /bin/sh -c 'cd "$1" && export PYTHONPATH="$2"; exec "$3" -m uvicorn app.main:app --host 0.0.0.0 --port 8000' \
-      lessonforge-backend "$PROJECT_DIR/backend" "$BACKEND_SITE_PACKAGES" "$BACKEND_PYTHON"
+      -- /bin/sh -c 'cd "$1" && export PYTHONPATH="$2"; exec "$3" -m uvicorn app.main:app --host "$4" --port "$5"' \
+      lessonforge-backend "$PROJECT_DIR/backend" "$BACKEND_SITE_PACKAGES" "$BACKEND_PYTHON" "$BACKEND_HOST" "$BACKEND_PORT"
     backend_pid="$(launchd_service_pid "$BACKEND_LAUNCH_LABEL" || true)"
     [ -n "$backend_pid" ] && printf '%s\n' "$backend_pid" > "$BACKEND_PID_FILE"
   else
     (
       cd "$PROJECT_DIR/backend"
-      nohup "$PROJECT_DIR/.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port 8000 >> "$BACKEND_LOG" 2>&1 &
+      nohup "$PROJECT_DIR/.venv/bin/uvicorn" app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" >> "$BACKEND_LOG" 2>&1 &
       printf '%s\n' "$!" > "$BACKEND_PID_FILE"
     )
   fi
 fi
 
-if launchd_service_exists "$FRONTEND_LAUNCH_LABEL"; then
-  frontend_pid="$(launchd_service_pid "$FRONTEND_LAUNCH_LABEL" || true)"
-  [ -n "$frontend_pid" ] && printf '%s\n' "$frontend_pid" > "$FRONTEND_PID_FILE"
-  echo "前端已由 launchd 托管${frontend_pid:+（PID ${frontend_pid}）}"
+if launchd_service_exists "$FRONTEND_LAUNCH_LABEL" && frontend_pid="$(launchd_service_pid "$FRONTEND_LAUNCH_LABEL" || true)" && [ -n "$frontend_pid" ]; then
+  printf '%s\n' "$frontend_pid" > "$FRONTEND_PID_FILE"
+  echo "前端已由 launchd 托管（PID ${frontend_pid}）"
 elif is_running "$FRONTEND_PID_FILE"; then
   echo "前端已在运行（PID $(read_pid "$FRONTEND_PID_FILE")）"
 else
-  assert_port_available "前端" 5173
+  assert_port_available "前端" "$FRONTEND_PORT"
   echo "正在启动前端…"
   if launchd_available; then
+    remove_launchd_service "$FRONTEND_LAUNCH_LABEL"
     node_bin="$(command -v node)"
     launchctl submit \
       -l "$FRONTEND_LAUNCH_LABEL" \
       -o "$FRONTEND_LAUNCH_LOG" \
       -e "$FRONTEND_LAUNCH_LOG" \
-      -- "$node_bin" "$PROJECT_DIR/frontend/node_modules/vite/bin/vite.js" "$PROJECT_DIR/frontend" --host 0.0.0.0 --port 5173
+      -- "$node_bin" "$PROJECT_DIR/frontend/node_modules/vite/bin/vite.js" "$PROJECT_DIR/frontend" --host "$FRONTEND_HOST" --port "$FRONTEND_PORT"
     frontend_pid="$(launchd_service_pid "$FRONTEND_LAUNCH_LABEL" || true)"
     [ -n "$frontend_pid" ] && printf '%s\n' "$frontend_pid" > "$FRONTEND_PID_FILE"
   else
     (
       cd "$PROJECT_DIR/frontend"
-      nohup "$PROJECT_DIR/frontend/node_modules/.bin/vite" --host 0.0.0.0 --port 5173 >> "$FRONTEND_LOG" 2>&1 &
+      nohup "$PROJECT_DIR/frontend/node_modules/.bin/vite" --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" >> "$FRONTEND_LOG" 2>&1 &
       printf '%s\n' "$!" > "$FRONTEND_PID_FILE"
     )
   fi
 fi
 
-if ! wait_for_http "后端" "http://127.0.0.1:8000/health"; then
+if ! wait_for_http "后端" "http://127.0.0.1:${BACKEND_PORT}/health"; then
   remove_launchd_service "$BACKEND_LAUNCH_LABEL"
   echo "后端启动失败，请运行 ./scripts/logs.sh backend 查看日志。" >&2
   exit 1
 fi
-if ! wait_for_http "前端" "http://127.0.0.1:5173/"; then
+if ! wait_for_http "前端" "http://127.0.0.1:${FRONTEND_PORT}/"; then
   remove_launchd_service "$FRONTEND_LAUNCH_LABEL"
   remove_launchd_service "$BACKEND_LAUNCH_LABEL"
   echo "前端启动失败，请运行 ./scripts/logs.sh frontend 查看日志。" >&2
@@ -104,6 +104,6 @@ if ! wait_for_http "前端" "http://127.0.0.1:5173/"; then
 fi
 
 echo "LessonForge AI 已启动"
-echo "前端：http://localhost:5173"
-echo "API：http://localhost:8000/docs"
+echo "前端：http://localhost:${FRONTEND_PORT}"
+echo "API：http://localhost:${BACKEND_PORT}/docs"
 echo "日志：./scripts/logs.sh"

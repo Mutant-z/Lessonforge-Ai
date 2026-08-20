@@ -1,4 +1,4 @@
-import type { Artifact } from './artifact';
+import type { Artifact, NativeVideoResolution } from './artifact';
 
 export type HydrationStatus =
   | 'idle'
@@ -88,6 +88,16 @@ export interface CourseTask {
   vision_model_config_id?: string | null;
   video_model_config_id?: string | null;
   speech_model_config_id?: string | null;
+  /** 视频生成任务：课程级偏好分辨率（由视频脚本 Agent 保存）。 */
+  preferred_video_resolution?: NativeVideoResolution | null;
+  video_generation_capabilities?: {
+    provider: string;
+    model_name: string;
+    api_mode: string;
+    supported_resolutions: Array<{ value: NativeVideoResolution; label: string }>;
+    duration_seconds: [number, number];
+    source: string;
+  } | null;
   activity_run_id?: string | null;
   activities?: TaskActivity[];
   current_activity?: TaskActivity | null;

@@ -34,7 +34,7 @@ export interface PPTHumanResponseResult {
 export type LessonPlanMode = 'auto' | 'content' | 'structure' | 'timing' | 'qa';
 
 /** 视频脚本 V4 运行模式（最终意图仍由 Agent 识别）。 */
-export type VideoScriptMode = 'auto' | 'content' | 'structure' | 'timing' | 'qa';
+export type VideoScriptMode = 'auto' | 'content' | 'structure' | 'narration' | 'visual' | 'continuity' | 'timing' | 'qa';
 
 export interface LessonPlanRunResult {
   run_id: string;
@@ -189,6 +189,53 @@ export const pipelineApi = {
       mode: mode ?? 'auto',
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
+    return data;
+  },
+  /** 视频脚本运行中指令：合并到当前 Run，并保留章节与分镜作用域。 */
+  async enqueueVideoScriptInstruction(
+    courseId: string,
+    runId: string,
+    content: string,
+    selectedSectionIds: string[] = [],
+    selectedSceneIds: string[] = [],
+    mode: VideoScriptMode = 'auto',
+    resumeIfPaused = false,
+    clientInstructionId = '',
+    activeSectionId?: string,
+    activeSceneId?: string,
+  ): Promise<{
+    instruction_id: string;
+    message_id: string;
+    message: { id: string; role: 'user'; content: string; run_id: string; status: 'completed' };
+    status: string;
+  }> {
+    const { data } = await api.post(
+      `/courses/${courseId}/tasks/video_script/runs/${runId}/instructions`,
+      {
+        content,
+        selected_section_ids: selectedSectionIds,
+        selected_scene_ids: selectedSceneIds,
+        mode: mode ?? 'auto',
+        resume_if_paused: resumeIfPaused,
+        ...(clientInstructionId ? { client_instruction_id: clientInstructionId } : {}),
+        ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
+        ...(activeSceneId ? { active_scene_id: activeSceneId } : {}),
+      },
+    );
+    return data;
+  },
+
+  async videoScriptHumanResponse(
+    courseId: string,
+    runId: string,
+    requestId: string,
+    choice: string,
+    responseData: PPTHumanResponseData = {},
+  ): Promise<AgentRunHumanResponseResult> {
+    const { data } = await api.post<AgentRunHumanResponseResult>(
+      `/courses/${courseId}/tasks/video_script/runs/${runId}/human-responses/${requestId}`,
+      { choice, data: responseData },
+    );
     return data;
   },
   /** 学习任务单 V3 运行创建（方案 §3.3：空闲时创建新运行）。 */

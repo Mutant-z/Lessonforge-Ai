@@ -6,12 +6,13 @@ from pydantic import ValidationError
 
 from app.models.entities import ModelConfig
 from app.schemas.video import (
+    NATIVE_VIDEO_RESOLUTIONS,
     SeedanceNativeScene,
     SeedanceNativeSettings,
     SeedanceVideoGenerationContent,
     VideoGenerationQuoteRequest,
 )
-from app.services.seedance_video_generation_service import _fact_qa, _request_hash
+from app.services.seedance_video_generation_service import _dimensions_for_resolution, _fact_qa, _request_hash
 from app.services import seedance_provider_service
 
 
@@ -73,6 +74,32 @@ def test_request_hash_covers_native_audio_edit_fields():
     assert _request_hash(original, config, "1280x720") != _request_hash(
         original, config, "1280x720", "教师动作更克制",
     )
+    # 不同分辨率必须产生不同的缓存键。
+    assert _request_hash(original, config, "1280x720") != _request_hash(
+        original, config, "854x480",
+    )
+
+
+def test_native_video_resolution_support():
+    assert "854x480" in NATIVE_VIDEO_RESOLUTIONS
+    assert seedance_provider_service._resolution_label("854x480") == "480p"
+    assert seedance_provider_service._resolution_label("1280x720") == "720p"
+    assert seedance_provider_service._resolution_label("1080p") is None
+    assert _dimensions_for_resolution("854x480") == (854, 480)
+    assert _dimensions_for_resolution("garbage") == (1280, 720)
+
+
+def test_quote_request_accepts_480p():
+    quote = VideoGenerationQuoteRequest(resolution="854x480", subtitle_enabled=False)
+    assert quote.resolution == "854x480"
+    assert quote.subtitle_enabled is False
+
+
+def test_seedance_adapter_capabilities_include_480p():
+    from app.services.native_audio_video_provider import native_audio_video_provider
+
+    provider = native_audio_video_provider(model_config())
+    assert provider.capabilities()["resolutions"] == ["1280x720", "854x480"]
 
 
 def test_fact_qa_requires_terms_numbers_and_conclusion():
@@ -94,7 +121,7 @@ def test_scene_quote_accepts_exact_edit_snapshot():
         duration_seconds=9,
         include_dependents=True,
     )
-    assert quote.resolution == "1280x720"
+    assert quote.resolution is None  # 未显式选择时由报价接口用课程偏好解析
     assert quote.duration_seconds == 9
     assert quote.include_dependents is True
 
@@ -185,3 +212,34 @@ async def test_seedance_contract_forces_native_audio_and_resume_only_polls(monke
     )
     assert resumed.provider_job_id == "provider-job-1"
     assert sum(request.method == "POST" for request in requests) == post_count
+
+
+@pytest.mark.asyncio
+async def test_seedance_480p_contract_sends_480p_marker(monkeypatch):
+    def handler(request: httpx.Request):
+        if request.method == "POST":
+            payload = __import__("json").loads(request.content)
+            assert payload["resolution"] == "480p"
+            return httpx.Response(200, json={"id": "provider-job-480"})
+        return httpx.Response(200, json={
+            "status": "completed",
+            "content": {"video_url": "https://media.example.com/result-480.mp4"},
+            "usage": {"total_tokens": 5000},
+        })
+
+    def client_factory(*args, **kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def safe_download(*args, **kwargs):
+        return b"native-video-480p", "video/mp4"
+
+    monkeypatch.setattr(seedance_provider_service, "build_async_client", client_factory)
+    monkeypatch.setattr(seedance_provider_service, "_safe_remote_media", safe_download)
+    created = await seedance_provider_service.generate_seedance_video(
+        model_config(),
+        prompt="教学片段",
+        duration_seconds=10,
+        resolution="854x480",
+        idempotency_key="idem-480",
+    )
+    assert created.provider_job_id == "provider-job-480"

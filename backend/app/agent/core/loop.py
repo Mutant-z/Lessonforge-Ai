@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from app.agent.context import estimate_tokens
 from app.agent.core.error import AgentError
+from app.agent.pipeline import PipelinePaused
 from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext, execute_tool, get_tool, summarize
 from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan, ToolCall, ToolResult
@@ -37,14 +38,6 @@ logger = logging.getLogger(__name__)
 MAX_TOTAL_STEPS = 40
 MAX_ESTIMATED_TOKENS = 60_000
 RETRY_ATTEMPTS = 2
-
-
-class PipelinePaused(Exception):
-    """Agent 边界暂停信号（由任务服务捕获持久化为 paused）。
-
-    复用 app/agent/pipeline.PipelinePaused 的语义；course_task_service 从
-    ``app.agent.pipeline`` 导入该类捕获，因此此处从该模块直接引用同一异常类。
-    """
 
 
 def normalize_handoff(
@@ -115,7 +108,8 @@ async def _checkpoint_agent(
                 row.current_agent = agent_key
                 row.current_step_index = step_index + 1
                 row.status = "running"
-                row.checkpoint_json = {
+                checkpoint = {
+                    **(row.checkpoint_json or {}),
                     "step_index": step_index + 1,
                     "produced_artifact_ids": [artifact_id] if artifact_id else [],
                     "context_hash": runtime.context.context_hash(),
@@ -124,6 +118,10 @@ async def _checkpoint_agent(
                     "locks": [getattr(lock, "json_path", "") for lock in runtime.locks] if getattr(runtime, "locks", None) else [],
                     "agents_done": [item["agent"] for item in runtime.context.decisions],
                 }
+                checkpoint_hook = getattr(runtime, "checkpoint_payload", None)
+                if callable(checkpoint_hook):
+                    checkpoint.update(checkpoint_hook())
+                row.checkpoint_json = checkpoint
                 row.token_usage_json = runtime.token_usage
                 await db.commit()
     if generation_run is not None:
@@ -148,7 +146,11 @@ async def _persist_paused(runtime: AgentRuntimeState, step_index: int, agent_key
             row.status = "paused"
             row.current_agent = agent_key
             row.current_step_index = step_index
-            row.checkpoint_json = {**row.checkpoint_json, "step_index": step_index, "paused_agent": agent_key}
+            checkpoint = {**(row.checkpoint_json or {}), "step_index": step_index, "paused_agent": agent_key}
+            checkpoint_hook = getattr(runtime, "checkpoint_payload", None)
+            if callable(checkpoint_hook):
+                checkpoint.update(checkpoint_hook())
+            row.checkpoint_json = checkpoint
             await db.commit()
 
 
@@ -232,25 +234,34 @@ async def _execute_tool_call(
             "message": result.error,
             "retryable": result.retryable,
         }
-        # 致命工具错误（不可重试的契约/守卫错误）：立即终止当前 Agent，
-        # 不再空转重试或伪装成 agent_no_progress。领域 runtime 负责捕获并
-        # 决定发布结果（教学设计 → rejected）。
+        # 致命工具错误（不可重试的契约/守卫错误）：
+        # 允许 LLM 进行 1~2 次 Reflection 自愈，避免单次参数/路径小偏差导致直接硬中断
         fatal_codes = getattr(runtime, "fatal_tool_error_codes", frozenset()) or frozenset()
         if result.error_code in fatal_codes:
-            raise AgentError(
-                "fatal_tool_error",
-                _fatal_tool_error_message(agent_key, call.tool_name, result),
-                retryable=False,
-                details={
-                    "agent_key": agent_key,
-                    "tool_name": call.tool_name,
-                    "error_code": result.error_code,
-                    "requested_target": (result.output or {}).get("requested_target"),
-                    "allowed_scope": (result.output or {}).get("allowed_scope"),
-                    "suggestion": (result.output or {}).get("suggestion"),
-                    "message": result.error,
-                },
-            )
+            consecutive_fatal = runtime.agent_stats.setdefault(agent_key, {}).get("consecutive_fatal_errors", 0) + 1
+            runtime.agent_stats[agent_key]["consecutive_fatal_errors"] = consecutive_fatal
+            allow_self_correction = getattr(runtime, "allow_fatal_self_correction", True)
+            if not allow_self_correction or consecutive_fatal > 2:
+                raise AgentError(
+                    "fatal_tool_error",
+                    _fatal_tool_error_message(agent_key, call.tool_name, result),
+                    retryable=False,
+                    details={
+                        "agent_key": agent_key,
+                        "tool_name": call.tool_name,
+                        "error_code": result.error_code,
+                        "requested_target": (result.output or {}).get("requested_target"),
+                        "allowed_scope": (result.output or {}).get("allowed_scope"),
+                        "suggestion": (result.output or {}).get("suggestion"),
+                        "message": result.error,
+                    },
+                )
+            else:
+                runtime.context.add_note(
+                    f"【操作契约提示】Agent {agent_key} 调用 {call.tool_name} 被限制（{result.error_code}）："
+                    f"{result.error or '修改超出本轮契约允许范围'}。"
+                    f"建议：{(result.output or {}).get('suggestion') or '请根据教学目标调整修改目标或调用其他工具进行自愈修复。'}"
+                )
     return result
 
 
@@ -409,11 +420,19 @@ async def run_agent_loop(
                     )
                     if not result.ok:
                         stats["failed_tool_calls"] += 1
+                        # 设置工具的结构化拒绝也必须回到领域 runtime，不能被当成无上下文失败。
+                        if call.tool_name == "vs_set_video_generation_resolution":
+                            mutation_hook = getattr(runtime, "record_tool_mutation", None)
+                            if mutation_hook is not None:
+                                await mutation_hook(spec.key, call, result)
                     elif cache_hit:
                         # 缓存命中会把既有成功结果重新回喂给模型，但不算新进展。
                         pass
                     else:
                         batch_had_progress = True
+                        mutation_hook = getattr(runtime, "record_tool_mutation", None)
+                        if mutation_hook is not None:
+                            await mutation_hook(spec.key, call, result)
                         if tool is not None and tool.idempotent and signature:
                             runtime.tool_result_cache[signature] = result.model_copy(deep=True)
                 if batch_had_progress:
@@ -422,10 +441,10 @@ async def run_agent_loop(
                     streak = runtime.no_progress_rounds.get(spec.key, 0) + 1
                     runtime.no_progress_rounds[spec.key] = streak
                     stats["no_progress_rounds"] += 1
-                    if streak == 1:
+                    if streak <= 2:
                         runtime.context.add_note(
                             f"Agent {spec.key} 上一轮工具调用没有获得新信息；"
-                            "请使用已有结果完成当前步骤，或调用能够产生新状态的工具。"
+                            "请使用已有结果完成当前步骤，或调整参数调用能够产生新状态的工具。"
                         )
                     else:
                         runtime.termination_reason = "agent_no_progress"

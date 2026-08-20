@@ -51,7 +51,8 @@ class ExerciseIntentDecision(BaseModel):
     plan_steps: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     rationale: str = ""
-    operation: Literal["edit_questions", "ensure_question_type_count"] = "edit_questions"
+    operation: Literal["edit_questions", "ensure_question_type_count", "move_question"] = "edit_questions"
+    destination_section_id: str | None = None
     question_type: str | None = None
     target_count: int | None = Field(default=None, ge=0)
     count_mode: Literal["exact"] | None = None
@@ -163,6 +164,66 @@ _QUESTION_TYPE_MARKERS = {
 
 _COUNT_ADD_MARKERS = ("补充", "增加", "添加", "扩充")
 _COUNT_REDUCE_MARKERS = ("缩减", "减少", "删减", "减到", "缩到", "只保留", "保留到")
+
+_SECTION_ALIASES = {
+    "基础巩固区": "basic_consolidation",
+    "基础巩固": "basic_consolidation",
+    "理解应用区": "understanding_application",
+    "理解应用": "understanding_application",
+    "迁移挑战区": "transfer_challenge",
+    "迁移挑战": "transfer_challenge",
+}
+
+
+def _parse_move_question_intent(
+    instruction: str,
+    available_question_ids: list[str] | None,
+) -> ExerciseIntentDecision | None:
+    """Resolve a displayed question ordinal to its real stable ID.
+
+    The preview numbers questions from their current document order.  After a
+    structure edit, the tenth displayed question is not necessarily ``ex_10``;
+    ``available_question_ids`` is deliberately supplied in preview order so the
+    ordinal must index that sequence instead of being guessed from an ID suffix.
+    """
+    if not any(marker in instruction for marker in ("放到", "移到", "移动到", "归入", "归属", "放入")):
+        return None
+    destination = next(
+        (section_id for label, section_id in _SECTION_ALIASES.items() if label in instruction),
+        None,
+    )
+    if destination is None:
+        return None
+    match = re.search(r"第\s*([0-9]+|[一二两三四五六七八九十])\s*(?:道|个)?题", instruction)
+    if match is None:
+        return None
+    raw = match.group(1)
+    number = int(raw) if raw.isdigit() else _CHINESE_NUMBERS.get(raw)
+    if number is None:
+        return None
+    ordered_ids = available_question_ids or []
+    if number < 1 or number > len(ordered_ids):
+        return None
+    question_id = str(ordered_ids[number - 1])
+    return ExerciseIntentDecision(
+        intent="STRUCTURE_EDIT",
+        target_question_ids=[str(question_id)],
+        target_section_ids=[destination],
+        structural=True,
+        destructive=False,
+        confidence=1.0,
+        operation="move_question",
+        destination_section_id=destination,
+        preserve_section_scores=False,
+        summary=f"将 {question_id} 移入 {destination}",
+        plan_steps=["读取既有题目", "原子移动题目并重算分区分值", "验证目标分区与总分"],
+        acceptance_criteria=[
+            f"{question_id} 位于 {destination}",
+            "题目内容、答案和题目分值不变",
+            "分区分值与题目之和一致且总分仍为 100",
+        ],
+        rationale="deterministic-displayed-ordinal-question-move",
+    )
 
 
 def _parse_target_count(instruction: str) -> tuple[str, int, str] | None:
@@ -351,8 +412,8 @@ async def infer_exercise_intent(
 ) -> ExerciseIntentDecision:
     """识别意图：initial 确定性 GENERATE；message 走 LLM，失败回退确定性路由。
 
-    available_question_ids 提供文档中的真实题目 ID 列表，供 LLM 选择目标题目，
-    并在返回后过滤掉编造的 ID，避免 target_question_ids 携带幻觉 ID。
+    available_question_ids 按当前卷面显示顺序提供真实题目 ID，既用于把“第 N 题”
+    解析成稳定 ID，也用于过滤 LLM 编造的 target_question_ids。
     """
     if trigger_type == "sync_context":
         return ExerciseIntentDecision(
@@ -368,6 +429,9 @@ async def infer_exercise_intent(
             acceptance_criteria=["练习含三区/计分题/评分点", "总分 100"],
             summary="首次生成完整课后练习", rationale="deterministic-initial",
         )
+    move_decision = _parse_move_question_intent(instruction, available_question_ids)
+    if move_decision is not None:
+        return move_decision
     if provider is None or provider.__class__.__name__ == "MockProvider":
         return normalize_count_intent(
             _fallback_intent(instruction, mode, selected_section_ids),
@@ -391,7 +455,7 @@ async def infer_exercise_intent(
         f"教师指令：\n{instruction}\n"
         f"用户选中的分区：{selected_section_ids or '无'}\n"
         f"用户显式模式：{mode or 'auto'}\n"
-        f"当前练习可用的题目 ID（target_question_ids 必须从中选择，不得编造新的 ID）："
+        f"当前练习按卷面显示顺序排列的题目 ID（target_question_ids 必须从中选择，不得编造新的 ID）："
         f"{available_question_ids or '无（尚未生成或不可用）'}\n"
         "输出 intent / target_question_ids / target_section_ids / affected_json_paths / "
         "structural / destructive / confidence / summary / requires_confirmation / "

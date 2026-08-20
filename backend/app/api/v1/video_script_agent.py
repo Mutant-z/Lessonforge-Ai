@@ -32,7 +32,8 @@ class VideoScriptMessageRequest(BaseModel):
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
     selected_scene_ids: list[str] = Field(default_factory=list, max_length=100)
     active_section_id: str | None = None
-    mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
+    active_scene_id: str | None = None
+    mode: str = Field(default="auto", pattern="^(auto|content|structure|narration|visual|continuity|timing|qa)$")
 
 
 @video_script_router.post("/courses/{course_id}/tasks/video_script/runs", status_code=202)
@@ -55,11 +56,12 @@ async def create_video_script_run(
         course_id=course_id, task_id=task.id, module_type=TASK_TYPE,
         role="user", content=content, status="pending",
     )
-    if any((payload.selected_section_ids, payload.selected_scene_ids, payload.active_section_id, payload.mode != "auto")):
+    if any((payload.selected_section_ids, payload.selected_scene_ids, payload.active_section_id, payload.active_scene_id, payload.mode != "auto")):
         message.metadata_json = {
             "selected_section_ids": list(payload.selected_section_ids),
             "selected_scene_ids": list(payload.selected_scene_ids),
             "active_section_id": payload.active_section_id,
+            "active_scene_id": payload.active_scene_id,
             "mode": payload.mode,
         }
     db.add(message)

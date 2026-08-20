@@ -66,33 +66,42 @@ async def update_course(course_id: str, payload: CourseUpdate, user: User = Depe
     changes = payload.model_dump(exclude_unset=True)
     context_fields = {"title", "subject", "grade_level", "audience", "duration_minutes", "scenario", "language", "settings_json"}
     context_changed = bool(context_fields & set(changes))
+    title_change = changes.pop("title", None) if "title" in changes else None
     for key, value in changes.items():
         setattr(course, key, value)
     init_run = None
     init_created = False
     if context_changed:
-        latest = await db.scalar(select(CourseRequirement).where(
-            CourseRequirement.course_id == course.id,
-        ).order_by(CourseRequirement.version.desc()))
-        settings = course.settings_json or {}
-        form = {
-            "title": course.title, "subject": course.subject, "grade_level": course.grade_level,
-            "audience": course.audience, "duration_minutes": course.duration_minutes,
-            "scenario": course.scenario, "language": course.language, **settings,
-        }
-        db.add(CourseRequirement(
-            course_id=course.id, version=(latest.version if latest else 0) + 1,
-            form_json=form, raw_prompt="教师更新项目设置",
-        ))
-        await db.flush()
-        blueprint = await db.scalar(select(CourseBlueprint).where(
-            CourseBlueprint.course_id == course.id,
-            CourseBlueprint.version == course.current_blueprint_version,
-            CourseBlueprint.status == "approved",
-        ))
-        if blueprint:
-            from app.services.agent_initialization_service import create_initialization_run
-            init_run, init_created = await create_initialization_run(db, course, "requirement_updated")
+        if title_change is not None:
+            from app.services.course_metadata_service import apply_course_title_update
+
+            update = await apply_course_title_update(
+                db, course, title_change, force_context_update=(len(changes) > 0),
+            )
+            init_run, init_created = update.initialization_run, update.initialization_created
+        else:
+            latest = await db.scalar(select(CourseRequirement).where(
+                CourseRequirement.course_id == course.id,
+            ).order_by(CourseRequirement.version.desc()))
+            settings = course.settings_json or {}
+            form = {
+                "title": course.title, "subject": course.subject, "grade_level": course.grade_level,
+                "audience": course.audience, "duration_minutes": course.duration_minutes,
+                "scenario": course.scenario, "language": course.language, **settings,
+            }
+            db.add(CourseRequirement(
+                course_id=course.id, version=(latest.version if latest else 0) + 1,
+                form_json=form, raw_prompt="教师更新项目设置",
+            ))
+            await db.flush()
+            blueprint = await db.scalar(select(CourseBlueprint).where(
+                CourseBlueprint.course_id == course.id,
+                CourseBlueprint.version == course.current_blueprint_version,
+                CourseBlueprint.status == "approved",
+            ))
+            if blueprint:
+                from app.services.agent_initialization_service import create_initialization_run
+                init_run, init_created = await create_initialization_run(db, course, "requirement_updated")
     await db.commit()
     if init_created and init_run:
         from app.services.agent_initialization_service import start_initialization_run

@@ -18,6 +18,7 @@ ANSWER_ONLY / CLARIFICATION_REQUIRED。
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,7 @@ VerbatimIntent = Literal[
     "TIMING_ADJUST",
     "STYLE_EDIT",
     "INTERACTION_EDIT",
+    "COURSE_METADATA_UPDATE",
     "SYNC_CONTEXT",
     "QA_ONLY",
     "ANSWER_ONLY",
@@ -43,6 +45,8 @@ class VerbatimIntentDecision(BaseModel):
 
     intent: VerbatimIntent = "SECTION_EDIT"
     mutates_document: bool = False
+    mutation_domain: Literal["none", "course_metadata", "document_metadata", "document_content"] = "none"
+    course_title: str | None = Field(default=None, max_length=200)
     target_section_ids: list[str] = Field(default_factory=list, description="受影响的逐字稿章节 ID（空 = 全局）")
     structural: bool = False
     destructive: bool = False
@@ -73,6 +77,7 @@ INTENT_AGENTS: dict[str, list[str]] = {
     "TONE_EDIT": ["intent_planner", "context_researcher", "verbatim_director", "verbatim_qa", "finalizer"],
     "STYLE_EDIT": ["intent_planner", "context_researcher", "verbatim_director", "verbatim_qa", "finalizer"],
     "INTERACTION_EDIT": ["intent_planner", "context_researcher", "verbatim_director", "verbatim_qa", "finalizer"],
+    "COURSE_METADATA_UPDATE": ["intent_planner", "course_metadata", "finalizer"],
     "TIMING_ADJUST": ["intent_planner", "context_researcher", "timing_engine", "verbatim_qa", "finalizer"],
     "SYNC_CONTEXT": ["context_researcher", "verbatim_director", "verbatim_qa", "finalizer"],
     "QA_ONLY": ["verbatim_qa", "finalizer"],
@@ -109,6 +114,54 @@ KEYWORD_INTENTS: list[tuple[tuple[str, ...], str]] = [
 
 # 高风险操作标记 → 必须人工确认
 DESTRUCTIVE_MARKERS = ("删除章节", "删除逐字稿", "解绑", "移除章节")
+_COURSE_TITLE_FIELDS = r"(?:课程(?:名称|标题|名字|名)?|课名)"
+_COURSE_TITLE_VERBS = r"(?:修改为|改为|更名为|重命名为|换成|改成|设为|改名)"
+_COURSE_TITLE_CLARIFICATION_MARKERS = ("修改", "改一下", "进行修改", "重命名")
+
+
+def _clean_course_title(value: str) -> str | None:
+    title = value.strip().strip("\\\"'“”‘’：:，,。；;！!？? ")
+    if not title or len(title) > 200:
+        return None
+    return title
+
+
+def _course_title_request(instruction: str) -> tuple[bool, str | None]:
+    """识别课程改名请求；课程名称永远属于项目元数据。"""
+    text = instruction.strip()
+    if not text:
+        return False, None
+    requested = bool(re.search(_COURSE_TITLE_FIELDS, text)) and (
+        bool(re.search(_COURSE_TITLE_VERBS, text))
+        or any(marker in text for marker in _COURSE_TITLE_CLARIFICATION_MARKERS)
+    )
+    if not requested:
+        return False, None
+    match = re.search(
+        rf"{_COURSE_TITLE_FIELDS}\s*{_COURSE_TITLE_VERBS}\s*(?:为)?\s*[\"'“”‘’]?(.+?)[\"'“”‘’]?\s*$",
+        text,
+    )
+    return True, _clean_course_title(match.group(1)) if match else None
+
+
+def _course_title_decision(title: str | None, *, rationale: str) -> VerbatimIntentDecision:
+    if not title:
+        return VerbatimIntentDecision(
+            intent="CLARIFICATION_REQUIRED", mutation_domain="none", mutates_document=False,
+            confidence=1.0,
+            clarification_question="请告诉我新的课程名称。我只会更新课程名称和逐字稿页眉，不会改动任何口播正文。",
+            assumptions=["等待教师提供新的课程名称"],
+            acceptance_criteria=["已获得有效的新课程名称"],
+            summary="需要补充新的课程名称", rationale=rationale,
+        )
+    return VerbatimIntentDecision(
+        intent="COURSE_METADATA_UPDATE", mutates_document=True, mutation_domain="course_metadata",
+        course_title=title, confidence=1.0,
+        preserve_constraints=["sections[*]", "speaking_rate_cps", "source_versions"],
+        plan_steps=["更新课程主数据名称", "仅同步逐字稿页眉名称", "校验正文和时间轴未变化"],
+        acceptance_criteria=["课程名称已更新", "逐字稿正文、章节和时间轴保持不变"],
+        summary=f"将课程名称更新为“{title}”，不修改口播正文", rationale=rationale,
+    )
 
 
 def _confirm_decision(intent: str, instruction: str, *, reason: str, confidence: float) -> VerbatimIntentDecision:
@@ -130,6 +183,9 @@ def _confirm_decision(intent: str, instruction: str, *, reason: str, confidence:
 
 def _fallback_intent(instruction: str, mode: str | None = None, selected: list[str] | None = None) -> VerbatimIntentDecision:
     """关键字/确定性兜底路由。"""
+    title_requested, course_title = _course_title_request(instruction)
+    if title_requested:
+        return _course_title_decision(course_title, rationale="deterministic-course-title")
     if mode == "structure":
         return VerbatimIntentDecision(
             intent="STRUCTURE_EDIT", mutates_document=True, structural=True,
@@ -173,10 +229,15 @@ def _fallback_intent(instruction: str, mode: str | None = None, selected: list[s
             )
     if destructive:
         return _confirm_decision("SECTION_EDIT", instruction, reason="destructive-default", confidence=0.55)
+    if instruction.strip() in {"嗯", "好", "好的", "知道了", "收到", "明白了", "行"}:
+        return VerbatimIntentDecision(
+            intent="ANSWER_ONLY", mutates_document=False, mutation_domain="none",
+            confidence=0.9, summary="已收到，不修改逐字稿", rationale="deterministic-acknowledgement",
+        )
     return VerbatimIntentDecision(
-        intent="SECTION_EDIT", mutates_document=True, confidence=0.55, target_section_ids=selected or [],
-        plan_steps=["读取当前逐字稿", "修改内容", "验证语义"],
-        acceptance_criteria=["内容已更新", "QA 通过"], summary="修改逐字稿内容", rationale="deterministic-default",
+        intent="CLARIFICATION_REQUIRED", mutates_document=False, mutation_domain="none", confidence=0.55,
+        clarification_question="我还不能确认要修改课程名称、章节口播还是其他内容。请说明具体目标和要修改的值。",
+        acceptance_criteria=["已明确修改对象和目标值"], summary="需要澄清修改目标", rationale="deterministic-default",
     )
 
 
@@ -186,6 +247,7 @@ async def infer_verbatim_intent(
     instruction: str,
     selected_section_ids: list[str] | None = None,
     mode: str | None = None,
+    pending_clarification: dict[str, Any] | None = None,
 ) -> VerbatimIntentDecision:
     """识别意图：initial 确定性 GENERATE；message 走 LLM，失败回退确定性路由。"""
     if trigger_type != "message" or not instruction:
@@ -195,6 +257,13 @@ async def infer_verbatim_intent(
             acceptance_criteria=["每段对齐 scene_id", "口播符合时长", "QA 通过"],
             summary="首次生成完整逐字稿", rationale="deterministic-initial",
         )
+    pending = dict(pending_clarification or {})
+    if pending.get("kind") == "course_title" and pending.get("status") == "pending":
+        title = _clean_course_title(instruction)
+        return _course_title_decision(title, rationale="pending-course-title")
+    title_requested, course_title = _course_title_request(instruction)
+    if title_requested:
+        return _course_title_decision(course_title, rationale="deterministic-course-title")
     if provider is None or provider.__class__.__name__ == "MockProvider":
         return _fallback_intent(instruction, mode, selected_section_ids)
     system = (
@@ -203,20 +272,23 @@ async def infer_verbatim_intent(
         "STRUCTURE_EDIT（新增/删除/移动/重排逐字稿章节）/\n"
         "SCRIPT_EDIT（整体改写口播叙事）/ TONE_EDIT（只改表达语气与措辞）/\n"
         "TIMING_ADJUST（只调整语速/停顿/时间轴节奏）/ STYLE_EDIT（批量统一风格）/\n"
-        "INTERACTION_EDIT（只调整互动/思考提示）/ SYNC_CONTEXT（同步最新项目上下文）/\n"
+        "INTERACTION_EDIT（只调整互动/思考提示）/ COURSE_METADATA_UPDATE（只修改课程项目名称，不改逐字稿正文）/ SYNC_CONTEXT（同步最新项目上下文）/\n"
         "QA_ONLY（仅质量检查）/ ANSWER_ONLY（仅回答关于逐字稿的问题，不创建新版本）/\n"
         "CLARIFICATION_REQUIRED（关键歧义，必须追问才能继续）。\n"
-        "只返回符合 Schema 的 JSON，不展示隐藏推理。口播/语气/停顿修改不要选择 STRUCTURE_EDIT；"
+        "只返回符合 Schema 的 JSON，不展示隐藏推理。课程名称/课程标题/课名属于课程项目元数据，不是章节标题或口播正文；"
+        "课程改名必须选择 COURSE_METADATA_UPDATE，并在 course_title 输出新名称，mutation_domain=course_metadata；"
+        "没有新名称时选择 CLARIFICATION_REQUIRED。口播/语气/停顿修改不要选择 STRUCTURE_EDIT；"
         "只有明确要求增删/移动/重排章节时才选择。删除章节或解绑场景 → destructive=true 且 requires_confirmation=true。"
     )
     prompt = (
         f"教师指令：\n{instruction}\n"
         f"用户选中的逐字稿章节：{selected_section_ids or '无'}\n"
         f"用户显式模式：{mode or 'auto'}\n"
-        "输出 intent / mutates_document / target_section_ids / structural / destructive / "
+        "输出 intent / mutates_document / mutation_domain / course_title / target_section_ids / structural / destructive / "
         "confidence / summary / requires_confirmation / clarification_question / "
         "assumptions / plan_steps / acceptance_criteria / rationale。"
-        "只有 QA_ONLY 和 ANSWER_ONLY 时 mutates_document=false。"
+        "只有 QA_ONLY、ANSWER_ONLY 和 CLARIFICATION_REQUIRED 时 mutates_document=false；"
+        "COURSE_METADATA_UPDATE 的 mutation_domain 必须为 course_metadata。"
         "summary 是给教师看的一两句可见摘要，不要思维链。"
     )
     try:

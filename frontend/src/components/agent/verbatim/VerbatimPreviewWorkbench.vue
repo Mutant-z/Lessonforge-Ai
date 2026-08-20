@@ -10,6 +10,7 @@ import { computed, ref } from 'vue';
 
 const props = defineProps<{
   content: Record<string, any> | null;
+  courseTitle?: string;
   sourceVersions?: Record<string, number>;
   draft?: boolean;
 }>();
@@ -104,7 +105,7 @@ function formatInteractionText(text: string): string {
         </div>
 
         <div class="vb-header-title-row">
-          <h1 class="vb-main-title">{{ courseInfo.course_title || '课堂教师口播逐字稿' }}</h1>
+          <h1 class="vb-main-title">{{ props.courseTitle || courseInfo.course_title || '课堂教师口播逐字稿' }}</h1>
         </div>
 
         <!-- 指标看板胶囊 -->

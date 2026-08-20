@@ -46,7 +46,7 @@ class TaskSheetMessageRequest(BaseModel):
     action: str = Field(default="message", max_length=30)
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
     active_section_id: str | None = None
-    mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
+    mode: str = Field(default="auto", pattern="^(auto|content|structure|narration|visual|continuity|timing|qa)$")
 
 
 class InstructionRequest(BaseModel):
@@ -54,7 +54,10 @@ class InstructionRequest(BaseModel):
     client_instruction_id: str = Field(default="", max_length=120)
     resume_if_paused: bool = False
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
-    mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
+    selected_scene_ids: list[str] = Field(default_factory=list, max_length=100)
+    active_section_id: str | None = None
+    active_scene_id: str | None = None
+    mode: str = Field(default="auto", pattern="^(auto|content|structure|narration|visual|continuity|timing|qa)$")
 
 
 class HumanResponseRequest(BaseModel):
@@ -159,6 +162,9 @@ async def enqueue_instruction(
         content=content,
         metadata_json={
             "selected_section_ids": list(payload.selected_section_ids),
+            "selected_scene_ids": list(payload.selected_scene_ids),
+            "active_section_id": payload.active_section_id,
+            "active_scene_id": payload.active_scene_id,
             "mode": payload.mode,
         },
         status="completed",
@@ -173,6 +179,9 @@ async def enqueue_instruction(
         status="queued",
         metadata_json={
             "selected_section_ids": list(payload.selected_section_ids),
+            "selected_scene_ids": list(payload.selected_scene_ids),
+            "active_section_id": payload.active_section_id,
+            "active_scene_id": payload.active_scene_id,
             "mode": payload.mode,
         },
     )

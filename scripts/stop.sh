@@ -45,5 +45,5 @@ stop_service "后端" "$BACKEND_PID_FILE" "$BACKEND_LAUNCH_LABEL"
 
 # Recover processes started manually or left behind after a stale/missing PID
 # file. Only listeners that can be proven to belong to this project are stopped.
-stop_project_listeners "前端" 5173
-stop_project_listeners "后端" 8000
+stop_project_listeners "前端" "$FRONTEND_PORT"
+stop_project_listeners "后端" "$BACKEND_PORT"

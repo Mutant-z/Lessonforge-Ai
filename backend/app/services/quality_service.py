@@ -461,7 +461,9 @@ def validate_resources(bp: CourseBlueprintSchema, data: dict[str, dict]) -> list
     slide_ids = [x.id for x in ppt.slides]
     if len(slide_ids) != len(set(slide_ids)):
         issues.append(issue("critical", "ppt", "slides", "integrity", "PPT 页面 ID 不唯一", "重新编号页面", "ppt_agent"))
-    if video_raw.get("schema_version") == "3.0":
+    if video_raw.get("schema_version") == "4.0":
+        issues.extend(validate_video_script(bp, video_raw, data.get("lesson_plan"), None))
+    elif video_raw.get("schema_version") == "3.0":
         issues.extend(validate_video_script(bp, video_raw, data.get("lesson_plan"), None))
     elif video_raw.get("schema_version") == "2.0":
         issues.extend(validate_video_script(bp, video_raw, data.get("lesson_plan"), data["ppt"]))

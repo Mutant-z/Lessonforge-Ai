@@ -23,6 +23,7 @@ from app.agent.agents.verbatim.qa import (
 )
 from app.schemas.blueprint import CourseBlueprintSchema
 from app.schemas.verbatim_v2 import (
+    VERBATIM_V2,
     make_seedance_verbatim_v2,
     upgrade_verbatim_v2,
     verbatim_v2_to_markdown,
@@ -111,6 +112,29 @@ def test_upgrade_verbatim_v2_from_v1(bp):
     assert v2.sections[0].word_count == len("同学们，今天学习浮力。")
 
 
+def test_upgrade_verbatim_v2_normalizes_legacy_display_ids_and_rate():
+    """历史工作台 V1 使用 seg_01/scene_01 与文字语速，必须能进入 V2。"""
+    legacy = {
+        "speaking_rate": "standard",
+        "course_info": {"course_title": "浮力", "duration_seconds": 120},
+        "sections": [{
+            "id": "seg_01",
+            "scene_id": "scene_01",
+            "time_range": "00:00-02:00",
+            "required_text": "同学们好，今天我们研究浮力。",
+            "optional_text": "",
+            "key_emphasis": ["浮力"],
+            "interaction": "",
+        }],
+    }
+    v2 = upgrade_verbatim_v2(legacy)
+    assert v2.sections[0].id == "VB-01"
+    assert v2.sections[0].scene_id == "scene_01"
+    assert v2.speaking_rate_cps == 4.0
+    assert v2.sections[0].start_seconds == 0
+    assert v2.sections[0].end_seconds == 120
+
+
 def test_verbatim_v2_to_markdown(v2_data):
     md = verbatim_v2_to_markdown(v2_data)
     assert "教师逐字稿 V2" in md
@@ -121,6 +145,14 @@ def test_verbatim_v2_to_markdown(v2_data):
 # ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
+
+
+def test_builder_update_course_title_preserves_sections(v2_data):
+    builder = VerbatimBuilder(v2_data)
+    original_sections = copy.deepcopy(builder.to_content()["sections"])
+    builder.update_course_title("阿基米德原理与浮力产生的原因")
+    assert builder.to_content()["course_info"]["course_title"] == "阿基米德原理与浮力产生的原因"
+    assert builder.to_content()["sections"] == original_sections
 
 
 def test_builder_update_required_text_recomputes(v2_data):
@@ -239,6 +271,39 @@ async def test_intent_section_by_keyword():
 
 
 @pytest.mark.asyncio
+async def test_intent_course_title_is_metadata_only():
+    plan = await infer_verbatim_intent(_MockIntentProvider(), "message", "课程名称修改为阿基米德原理与浮力产生的原因")
+    assert plan.intent == "COURSE_METADATA_UPDATE"
+    assert plan.mutation_domain == "course_metadata"
+    assert plan.course_title == "阿基米德原理与浮力产生的原因"
+    assert plan.mutates_document
+
+
+@pytest.mark.asyncio
+async def test_intent_course_title_without_value_clarifies():
+    plan = await infer_verbatim_intent(_MockIntentProvider(), "message", "课程名称进行修改")
+    assert plan.intent == "CLARIFICATION_REQUIRED"
+    assert not plan.mutates_document
+
+
+@pytest.mark.asyncio
+async def test_pending_course_title_answer_is_resolved():
+    plan = await infer_verbatim_intent(
+        _MockIntentProvider(), "message", "阿基米德原理与浮力产生的原因",
+        pending_clarification={"kind": "course_title", "status": "pending"},
+    )
+    assert plan.intent == "COURSE_METADATA_UPDATE"
+    assert plan.course_title == "阿基米德原理与浮力产生的原因"
+
+
+@pytest.mark.asyncio
+async def test_unknown_instruction_fails_closed():
+    plan = await infer_verbatim_intent(_MockIntentProvider(), "message", "随便处理一下")
+    assert plan.intent == "CLARIFICATION_REQUIRED"
+    assert not plan.mutates_document
+
+
+@pytest.mark.asyncio
 async def test_intent_destructive_requires_confirmation():
     plan = await infer_verbatim_intent(_MockIntentProvider(), "message", "删除章节 VB-01")
     assert plan.destructive
@@ -348,12 +413,23 @@ async def _make_runtime(course_id, *, instruction="", trigger="message", use_sou
     return runtime
 
 
+def test_verbatim_qa_treats_model_repairable_feedback_as_non_blocking(v2_data):
+    """局部润色的事实/节奏反馈应回馈模型，而不是拒绝发布整份合法候选稿。"""
+    data = copy.deepcopy(v2_data)
+    data["sections"][0]["required_text"] = "同学们，今天我们开始探究。"
+    issues = validate_verbatim_v2(BP, data, SCRIPT)
+    assert any(item["dimension"] == "fact" for item in issues)
+    assert not blocking_issues(issues)
+
+
 @pytest.mark.asyncio
 async def test_runtime_initial_publishes_v2(client, auth_headers, _runtime_course):
     runtime = await _make_runtime(_runtime_course, instruction="", trigger="initial", use_source=False)
     await runtime.run()
     assert runtime.result_status == "applied"
     assert runtime.publishable
+    assert runtime.max_estimated_tokens == 0
+    assert runtime.max_context_tokens == 0
     assert runtime.draft_content["schema_version"] == "2.0"
     assert runtime.draft_markdown
 

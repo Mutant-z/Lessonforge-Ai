@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -10,19 +11,23 @@ from sqlalchemy import select
 from app.agent.agents.video_script.intents import infer_video_script_intent
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import Artifact, CourseBlueprint, CourseProject, CourseTask, GenerationRun, PipelineRun
+from app.models.entities import (
+    AgentHumanRequest, AgentMessage, AgentRunInstruction, Artifact, CourseBlueprint, CourseProject,
+    CourseTask, GenerationEvent, GenerationRun, PipelineRun,
+)
 
 _runtime_course_cache: dict[str, str] = {}
 
 
 @pytest.fixture
 async def _runtime_course(client, auth_headers):
-    """共享课程（模块级缓存）：只建一次，避免多次 ready_course 的后台任务相互干扰。"""
+    """按测试用户复用课程，避免跨用户测试访问同一课程返回 404。"""
     from agent_pipeline_helpers import ready_course
 
-    if not _runtime_course_cache:
-        _runtime_course_cache["course_id"] = await ready_course(client, auth_headers, title="视频脚本运行时课程")
-    return _runtime_course_cache["course_id"]
+    cache_key = auth_headers["Authorization"]
+    if cache_key not in _runtime_course_cache:
+        _runtime_course_cache[cache_key] = await ready_course(client, auth_headers, title="视频脚本运行时课程")
+    return _runtime_course_cache[cache_key]
 
 
 async def _make_runtime(course_id, *, instruction="", trigger="message", corrupt=None, pre_upgrade=False):
@@ -65,7 +70,7 @@ async def _make_runtime(course_id, *, instruction="", trigger="message", corrupt
         artifact.content_json = source_content
         await db.commit()
         await db.refresh(artifact)
-        gen_run = GenerationRun(course_id=course_id, course_task_id=task.id, thread_id=f"vs-{trigger}-{id(artifact)}",
+        gen_run = GenerationRun(course_id=course_id, course_task_id=task.id, thread_id=f"vs-{trigger}-{uuid4()}",
                                 run_type="task", trigger_type=trigger, status="running")
         db.add(gen_run)
         await db.flush()
@@ -100,11 +105,41 @@ async def _make_runtime(course_id, *, instruction="", trigger="message", corrupt
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["narration", "visual", "continuity"])
+async def test_active_run_instruction_accepts_video_modes(client, auth_headers, _runtime_course, mode):
+    runtime = await _make_runtime(_runtime_course, instruction="优化视频脚本")
+    response = await client.post(
+        f"/api/v1/courses/{_runtime_course}/tasks/video_script/runs/{runtime.generation_run.id}/instructions",
+        headers=auth_headers,
+        json={"content": "优化目标分镜", "mode": mode},
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    async with SessionLocal() as db:
+        instruction = await db.get(AgentRunInstruction, payload["instruction_id"])
+    assert instruction is not None
+    assert instruction.metadata_json["mode"] == mode
+
+
+@pytest.mark.asyncio
 async def test_runtime_answer_only_does_not_publish(client, auth_headers, _runtime_course):
     runtime = await _make_runtime(_runtime_course, instruction="这个脚本有几个片段？")
     await runtime.run()
     assert runtime.result_status == "no_change"
     assert not runtime.publishable
+
+
+@pytest.mark.asyncio
+async def test_runtime_inspect_only_has_no_score_and_does_not_publish(client, auth_headers, _runtime_course):
+    runtime = await _make_runtime(_runtime_course, instruction="检查一下脚本质量")
+    await runtime.run()
+    validation = await runtime.artifacts.latest("video_script_validation")
+    data = (validation or {}).get("data") or {}
+    serialized = str(data).lower()
+    assert runtime.result_status == "no_change"
+    assert not runtime.publishable
+    assert "score" not in serialized
 
 
 @pytest.mark.asyncio
@@ -125,6 +160,52 @@ async def test_runtime_restructure_publishes_v4(client, auth_headers, _runtime_c
 
 
 @pytest.mark.asyncio
+async def test_resolution_request_keeps_video_script_unchanged(client, auth_headers, _runtime_course):
+    runtime = await _make_runtime(_runtime_course, instruction="把分辨率调成480")
+    await runtime.run()
+
+    assert runtime.result_status in {"settings_applied", "settings_unchanged"}
+    assert not runtime.publishable
+    assert runtime.pending_video_resolution == "854x480"
+    assert "854x480" in runtime.dialogue_summary
+    # Runtime 只产生待提交副作用，不再自行跨 Session 写库或提前发成功事件。
+    async with SessionLocal() as db:
+        setting_events = list(await db.scalars(select(GenerationEvent).where(
+            GenerationEvent.run_id == runtime.generation_run.id,
+            GenerationEvent.event_type == "video_generation.setting.updated",
+        )))
+    assert setting_events == []
+
+
+@pytest.mark.asyncio
+async def test_video_script_completion_replaces_streaming_body_without_duplicate(client, auth_headers, _runtime_course):
+    from app.services.video_script_pipeline_service import complete_video_script_pipeline_after_publish
+
+    runtime = await _make_runtime(_runtime_course, instruction="把分辨率调成720")
+    reply = "已记录视频生成分辨率偏好：1280x720。视频脚本内容保持不变。"
+    await runtime.emitter.agent_message_started("视频脚本 Agent", mirror_status=False)
+    runtime.dialogue_summary = reply
+    await complete_video_script_pipeline_after_publish(runtime, runtime.source_artifact.id)
+
+    async with SessionLocal() as db:
+        message = await db.scalar(select(AgentMessage).where(
+            AgentMessage.run_id == runtime.generation_run.id,
+            AgentMessage.role == "assistant",
+        ))
+        events = list(await db.scalars(select(GenerationEvent).where(
+            GenerationEvent.run_id == runtime.generation_run.id,
+            GenerationEvent.event_type == "agent_message_delta",
+        ).order_by(GenerationEvent.id)))
+
+    assert message is not None
+    assert message.content == reply
+    assert message.content.count(reply) == 1
+    assert len(events) == 1
+    assert events[0].data_json.get("reset") is True
+    assert events[0].data_json.get("delta") == reply
+
+
+@pytest.mark.asyncio
 async def test_runtime_no_change_when_identical(client, auth_headers, _runtime_course):
     runtime = await _make_runtime(_runtime_course, instruction="保持不变")
     await runtime.run()
@@ -132,17 +213,19 @@ async def test_runtime_no_change_when_identical(client, auth_headers, _runtime_c
 
 
 @pytest.mark.asyncio
-async def test_runtime_qa_gate_blocks_corrupt_references(client, auth_headers, _runtime_course):
-    """故意制造非法目标引用 → QA 阻断、返修无法收敛 → 不发布。"""
+async def test_runtime_no_qa_blocking_for_content_issues(client, auth_headers, _runtime_course):
+    """行为变更：发布前阻断检测与定向返修已彻底移除。内容层面的问题
+    （如非法的目标引用）不再触发 rejected——结构合法即发布，质量由
+    保存后的统一质量报告以问题清单提示，不阻塞任务完成。"""
     def corrupt(source):
         for scene in source["scenes"]:
             scene["objective_ids"] = ["OBJ-NOPE"]
 
     runtime = await _make_runtime(_runtime_course, instruction="把章节重排一下", corrupt=corrupt, pre_upgrade=True)
     await runtime.run()
-    assert runtime.result_status in {"rejected", "no_change"}
-    assert not runtime.publishable
-    assert runtime.blocking_issues, "非法引用必须产生阻断问题"
+    assert runtime.result_status == "applied"
+    assert runtime.publishable
+    assert not runtime.blocking_issues, "内容问题不再产生发布阻断"
 
 
 @pytest.mark.asyncio
@@ -150,3 +233,43 @@ async def test_runtime_intent_resolution_initial(client, auth_headers, _runtime_
     plan = await infer_video_script_intent(None, "initial", "")
     assert plan.intent == "GENERATE"
     assert plan.mutates_document
+
+
+@pytest.mark.asyncio
+async def test_destructive_change_pauses_same_run_for_confirmation(client, auth_headers, _runtime_course):
+    runtime = await _make_runtime(_runtime_course, instruction="删除第一章")
+    await runtime.run()
+    async with SessionLocal() as db:
+        pipeline = await db.get(PipelineRun, runtime.pipeline_run.id)
+        request = await db.scalar(select(AgentHumanRequest).where(
+            AgentHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
+            AgentHumanRequest.status == "pending",
+        ))
+    assert runtime.result_status == "needs_confirmation"
+    assert pipeline.status == "paused"
+    assert request is not None
+    assert not runtime.publishable
+
+
+@pytest.mark.asyncio
+async def test_queued_instruction_merges_scope_and_preservation(client, auth_headers, _runtime_course):
+    runtime = await _make_runtime(_runtime_course, instruction="压缩口播")
+    await runtime._prepare()
+    scene_id = runtime.builder.scenes[0]["id"]
+    async with SessionLocal() as db:
+        db.add(AgentRunInstruction(
+            pipeline_run_id=runtime.pipeline_run.id,
+            content="画面保持不变",
+            status="queued",
+            metadata_json={"selected_scene_ids": [scene_id], "mode": "narration"},
+        ))
+        await db.commit()
+    merged = await runtime._drain_instructions()
+    async with SessionLocal() as db:
+        row = await db.scalar(select(AgentRunInstruction).where(
+            AgentRunInstruction.pipeline_run_id == runtime.pipeline_run.id,
+        ))
+    assert merged == ["画面保持不变"]
+    assert runtime.selected_scene_ids == [scene_id]
+    assert "preserve_visual" in runtime.intent_plan.preserve_constraints
+    assert row.status == "script_merged"

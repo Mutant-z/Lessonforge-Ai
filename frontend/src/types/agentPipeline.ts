@@ -132,6 +132,18 @@ export interface PipelineDetail {
   artifacts: PipelineArtifact[];
   tool_calls: PipelineToolCall[];
   events: PipelineEventItem[];
+  draft_snapshot?: Record<string, any> | null;
+  draft_revision?: number;
+  base_artifact_id?: string | null;
+  base_version?: number;
+  instructions?: Array<{
+    id: string;
+    content: string;
+    status: string;
+    metadata?: Record<string, any>;
+    created_at?: string;
+    applied_at?: string;
+  }>;
 }
 
 /** 页面级 QA 问题 */

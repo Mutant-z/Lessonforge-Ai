@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 
@@ -45,6 +46,43 @@ async def test_model_key_is_never_returned(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_settings_accepts_legacy_double_encoded_preferences(client, auth_headers):
+    import json
+
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.entities import ModelConfig, User
+
+    created = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "旧偏好兼容测试",
+        "provider": "mock",
+        "base_url": "mock://local",
+        "model_name": "legacy-preferences",
+        "model_category": "text",
+        "model_purpose": "text_chat",
+        "is_active": True,
+    })
+    assert created.status_code == 200, created.text
+
+    async with SessionLocal() as db:
+        owner = await db.scalar(select(User).order_by(User.created_at.desc()))
+        config = await db.scalar(select(ModelConfig).where(
+            ModelConfig.id == created.json()["id"], ModelConfig.owner_id == owner.id,
+        ))
+        config.preferences_json = json.dumps({
+            "default_language": "zh-CN",
+            "default_grade_level": "八年级",
+            "default_ppt_template": "lessonforge_deck_academic",
+        })
+        await db.commit()
+
+    loaded = await client.get("/api/v1/settings", headers=auth_headers)
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["preferences"]["default_grade_level"] == "八年级"
+
+
+@pytest.mark.asyncio
 async def test_model_capabilities_defaults_and_updates(client, auth_headers):
     created = await client.post(
         "/api/v1/settings/models",
@@ -81,8 +119,8 @@ async def test_model_capabilities_defaults_and_updates(client, auth_headers):
 
 
 @pytest.mark.asyncio
-async def test_media_capabilities_require_matching_transport(client, auth_headers):
-    mismatched = await client.post(
+async def test_video_capability_is_normalized_to_protocol_transport(client, auth_headers):
+    declared = await client.post(
         "/api/v1/settings/models",
         headers=auth_headers,
         json={
@@ -95,8 +133,10 @@ async def test_media_capabilities_require_matching_transport(client, auth_header
             "is_active": False,
         },
     )
-    assert mismatched.status_code == 422
-    assert "不支持已勾选的能力：视频生成" in mismatched.json()["detail"]
+    assert declared.status_code == 200, declared.text
+    assert declared.json()["model_purpose"] == "video_generation"
+    assert declared.json()["api_mode"] == "protocol_video"
+    assert declared.json()["video_capability_status"] == "unverified"
 
     video = await client.post(
         "/api/v1/settings/models",
@@ -105,14 +145,16 @@ async def test_media_capabilities_require_matching_transport(client, auth_header
             "name": "视频接口配置",
             "provider": "openai_compatible",
             "base_url": "https://media.example/v1",
-            "model_name": "video-model",
-            "capabilities": ["video_generation"],
-            "api_mode": "custom_video_async_http",
-            "adapter_config": {"endpoint_path": "/videos/generations"},
+            "model_name": "gemini-omni-flash-preview",
+            "capabilities": ["video_generation", "native_audio_video_generation"],
+            "api_mode": "gemini_interactions_video",
+            "adapter_config": {"interactions_path": "/v1beta/interactions", "delivery": "uri"},
             "is_active": False,
         },
     )
     assert video.status_code == 200, video.text
+    assert video.json()["api_mode"] == "protocol_video"
+    assert video.json()["adapter_config"] == {}
 
     incompatible_update = await client.patch(
         f"/api/v1/settings/models/{video.json()['id']}",
@@ -121,6 +163,123 @@ async def test_media_capabilities_require_matching_transport(client, auth_header
     )
     assert incompatible_update.status_code == 422
     assert "语音生成" in incompatible_update.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_video_connection_test_does_not_require_video_output(client, auth_headers, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [{"id": "Seedance-2.0"}]})
+
+    monkeypatch.setattr(
+        "app.api.v1.settings.build_async_client",
+        lambda *args, **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    response = await client.post("/api/v1/settings/test-connection", headers=auth_headers, json={
+        "provider": "openai_compatible",
+        "base_url": "https://gateway.example/v1",
+        "model_name": "Seedance-2.0",
+        "api_key": "test-key",
+        "test_capability": "video_generation",
+    })
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert response.json()["message"] == "连接正常，视频能力将在首次生成时验证。"
+
+
+@pytest.mark.asyncio
+async def test_video_connection_timeout_falls_back_to_gateway_reachability(client, auth_headers, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            raise httpx.ReadTimeout("model discovery is slow", request=request)
+        assert request.url.path == "/v1"
+        return httpx.Response(404, json={"detail": "not found"})
+
+    monkeypatch.setattr(
+        "app.api.v1.settings.build_async_client",
+        lambda *args, **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    response = await client.post("/api/v1/settings/test-connection", headers=auth_headers, json={
+        "provider": "openai_compatible",
+        "base_url": "https://gateway.example/v1",
+        "model_name": "Seedance-2.0",
+        "api_key": "test-key",
+        "test_capability": "video_generation",
+    })
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert "网关地址可访问" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_new_default_video_model_rebinds_existing_course_session(client, auth_headers):
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.entities import AgentChatSession, CourseTask
+
+    course_payload = {
+        "title": "默认视频模型切换",
+        "subject": "测试",
+        "grade_level": "八年级",
+        "audience": "学生",
+        "duration_minutes": 5,
+        "scenario": "课堂讲解",
+        "course_task": "验证视频模型默认项同步",
+    }
+    course = await client.post("/api/v1/courses", headers=auth_headers, json=course_payload)
+    assert course.status_code == 201, course.text
+    course_id = course.json()["id"]
+    old_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "旧视频模型",
+        "provider": "anthropic",
+        "base_url": "https://old.example/v1",
+        "model_name": "old-video",
+        "model_category": "video",
+        "model_purpose": "video_generation",
+        "is_active": True,
+    })
+    assert old_model.status_code == 200, old_model.text
+    selected = await client.patch(
+        f"/api/v1/courses/{course_id}/tasks/video_generation/model",
+        headers=auth_headers,
+        json={"video_model_config_id": old_model.json()["id"]},
+    )
+    assert selected.status_code == 200, selected.text
+
+    async with SessionLocal() as db:
+        task = await db.scalar(select(CourseTask).where(
+            CourseTask.course_id == course_id,
+            CourseTask.task_type == "video_generation",
+        ))
+        task.status = "failed"
+        task.error_json = {"message": "旧模型失败"}
+        await db.commit()
+
+    new_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
+        "name": "新默认视频模型",
+        "provider": "openai_compatible",
+        "base_url": "https://new.example/v1",
+        "model_name": "new-video",
+        "model_category": "video",
+        "model_purpose": "video_generation",
+        "is_active": True,
+    })
+    assert new_model.status_code == 200, new_model.text
+
+    async with SessionLocal() as db:
+        session = await db.scalar(select(AgentChatSession).where(
+            AgentChatSession.course_id == course_id,
+            AgentChatSession.module_type == "video_generation",
+        ))
+        task = await db.scalar(select(CourseTask).where(
+            CourseTask.course_id == course_id,
+            CourseTask.task_type == "video_generation",
+        ))
+        assert session.video_model_config_id == new_model.json()["id"]
+        assert task.status == "ready_to_generate"
+        assert task.error_json is None
 
 
 @pytest.mark.asyncio
@@ -140,11 +299,12 @@ async def test_text_vision_and_video_have_independent_defaults(client, auth_head
     assert vision_model.json()["capabilities"] == ["text_generation", "structured_output", "vision_review"]
     video_model = await client.post("/api/v1/settings/models", headers=auth_headers, json={
         "name": "默认视频", "provider": "openai_compatible", "base_url": "https://video.example/v1",
-        "model_name": "video", "api_mode": "custom_video_async_http", "model_category": "video",
-        "model_purpose": "video_generation", "adapter_config": {"endpoint_path": "/videos/generations"},
+        "model_name": "gemini-3.7-flash-high", "api_mode": "gemini_interactions_video", "model_category": "video",
+        "model_purpose": "video_generation", "adapter_config": {"interactions_path": "/v1beta/interactions", "delivery": "uri"},
         "is_active": True,
     })
     assert video_model.status_code == 200, video_model.text
+    assert video_model.json()["api_mode"] == "protocol_video"
 
     settings = (await client.get("/api/v1/settings", headers=auth_headers)).json()
     assert settings["active_config_id"] == text_model.json()["id"]
@@ -153,6 +313,112 @@ async def test_text_vision_and_video_have_independent_defaults(client, auth_head
         "vision": vision_model.json()["id"],
         "video": video_model.json()["id"],
     }
+
+    from app.core.database import SessionLocal
+    from app.models.entities import ModelConfig
+    from app.services.model_config_service import resolve_model_config
+
+    async with SessionLocal() as db:
+        stored_video = await db.get(ModelConfig, video_model.json()["id"])
+        resolved_video = await resolve_model_config(
+            db,
+            stored_video.owner_id,
+            text_model.json()["id"],
+            "video",
+        )
+    assert resolved_video.id == video_model.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_archived_media_config_is_listed_but_cannot_activate(client, auth_headers):
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.entities import ModelConfig, User
+
+    async with SessionLocal() as db:
+        owner = await db.scalar(select(User).order_by(User.created_at.desc()))
+        legacy = ModelConfig(
+            owner_id=owner.id,
+            name="历史语音配置",
+            provider="openai_compatible",
+            base_url="https://speech.example/v1",
+            model_name="legacy-tts",
+            capabilities_json=["speech_generation"],
+            api_mode="custom_speech_http",
+            model_category="video",
+            model_purpose="speech_generation",
+            is_archived=True,
+            is_active=False,
+        )
+        db.add(legacy)
+        await db.commit()
+        legacy_id = legacy.id
+
+    settings = (await client.get("/api/v1/settings", headers=auth_headers)).json()
+    archived = next(item for item in settings["configs"] if item["id"] == legacy_id)
+    assert archived["is_archived"] is True
+    response = await client.post(f"/api/v1/settings/models/{legacy_id}/activate", headers=auth_headers)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_protocol_video_reconciliation_is_idempotent_and_preserves_secrets(client, auth_headers):
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.core.security import encrypt_secret
+    from app.models.entities import ModelConfig, User
+    from app.services.model_config_service import reconcile_protocol_video_configs
+
+    await client.get("/api/v1/settings", headers=auth_headers)
+    encrypted = encrypt_secret("migration-secret")
+    async with SessionLocal() as db:
+        owner = await db.scalar(select(User).order_by(User.created_at.desc()))
+        db.add(ModelConfig(
+            owner_id=owner.id,
+            name="通用 3.7",
+            provider="openai_compatible",
+            base_url="https://gateway.example/v1",
+            model_name="gemini-3.7-flash-high",
+            encrypted_api_key=encrypted,
+            capabilities_json=["text_generation", "structured_output", "video_generation", "native_audio_video_generation"],
+            api_mode="openai_chat_video",
+            model_category="text",
+            model_purpose="text_chat",
+            is_active=True,
+        ))
+        db.add(ModelConfig(
+            owner_id=owner.id,
+            name="旧豆包",
+            provider="volcengine_ark",
+            base_url="https://ark.example",
+            model_name="doubao-seedance-2.5",
+            encrypted_api_key=encrypted,
+            capabilities_json=["video_generation", "native_audio_video_generation"],
+            api_mode="volcengine_ark_video",
+            model_category="video",
+            model_purpose="video_generation",
+            is_active=True,
+        ))
+        await db.commit()
+
+        first = await reconcile_protocol_video_configs(db)
+        second = await reconcile_protocol_video_configs(db)
+        configs = list(await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == owner.id)))
+
+    protocol = [item for item in configs if item.model_purpose == "video_generation" and not item.is_archived]
+    legacy = next(item for item in configs if item.name == "旧豆包")
+    text_config = next(item for item in configs if item.name == "通用 3.7")
+    assert first["created"] == 1
+    assert second["created"] == 0
+    assert len(protocol) == 1
+    assert protocol[0].api_mode == "protocol_video"
+    assert protocol[0].encrypted_api_key == encrypted
+    assert text_config.api_mode == "text_chat"
+    assert "video_generation" not in text_config.capabilities_json
+    assert legacy.is_archived is True
+    assert legacy.encrypted_api_key == encrypted
 
 
 @pytest.mark.asyncio

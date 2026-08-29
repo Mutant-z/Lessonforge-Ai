@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from app.agents.generators import (
     make_exercises,
@@ -54,11 +55,11 @@ from app.schemas.artifact import (
 )
 from app.schemas.video import SeedanceVideoGenerationContent, VideoGenerationContent
 from app.schemas.agent_profile import ExerciseProfile, LessonPlanProfile, TaskSheetProfile, VerbatimProfile, VideoScriptProfile
-from app.schemas.blueprint import CourseBlueprintSchema
+from app.schemas.blueprint import CourseBlueprintSchema, normalize_blueprint_references
 from app.schemas.lesson_plan import LessonPlanContentV2, lesson_plan_to_markdown_v2
 from app.schemas.task_sheet import TASK_SHEET_V3, TaskSheetContentV3, task_sheet_v3_to_markdown
 from app.schemas.verbatim_v2 import VerbatimContentV2, verbatim_v2_to_markdown
-from app.services.model_config_service import resolve_provider, resolved_model_name
+from app.services.model_config_service import normalize_model_preferences, resolve_provider, resolved_model_name
 from app.services.agent_prompt_service import (
     active_prompt_template,
     apply_output_rules,
@@ -145,7 +146,7 @@ OPTIONAL_REFERENCE_TYPES = {
 
 #: 运行输入契约：执行时必须满足的事实条件（video_generation 属于运行输入契约，
 #: 不是 Agent 拓扑依赖——缺少脚本只影响视频生成本身，不阻塞其他 Agent）。
-VIDEO_INPUT_CONTRACT = {"video_script": "执行前必须存在 Seedance V3/V4 视频脚本"}
+VIDEO_INPUT_CONTRACT = {"video_script": "执行前必须存在最新且有效的 Seedance V3/V4 视频脚本"}
 TASK_SCHEMAS = {
     "lesson_plan": LessonPlanContent,
     "ppt": PPTContent,
@@ -158,6 +159,7 @@ TASK_SCHEMAS = {
 
 task_jobs: dict[str, asyncio.Task] = {}
 schedule_locks: dict[str, asyncio.Lock] = {}
+initial_generation_semaphores: dict[str, asyncio.Semaphore] = {}
 GENERATION_HEARTBEAT_SECONDS = 2.0
 
 PHASE_LABELS = {
@@ -204,16 +206,59 @@ def artifact_payload(item: Artifact | None) -> dict | None:
 
 
 def is_publishable_video_artifact(item: Artifact | None) -> bool:
-    """Return true only after the native-audio renderer produced final media."""
+    """Return true when a native artifact has a final video or a playable clip.
+
+    A cancelled multi-scene run may still contain successfully generated scenes.
+    Those clips are valid reviewable outputs and must not be hidden merely because
+    the full timeline was not composed.
+    """
     if not item or item.artifact_type != "video_generation":
         return False
     content = item.content_json or {}
     outputs = content.get("outputs") or {}
+    scenes = content.get("scenes") or []
+    has_ready_clip = any(
+        isinstance(scene, dict)
+        and scene.get("status") == "ready"
+        and scene.get("video_asset_id")
+        for scene in scenes
+    )
     return bool(
         content.get("schema_version") == "3.0"
         and content.get("mode") == "seedance_native"
-        and outputs.get("final_asset_id")
+        and (outputs.get("final_asset_id") or has_ready_clip)
     )
+
+
+async def video_script_generation_readiness(
+    db, course_id: str,
+) -> tuple[Artifact | None, dict | None]:
+    """Resolve the latest script and an actionable waiting reason.
+
+    Approval is deliberately not part of this check: script approval remains a
+    delivery marker, while video generation always consumes the newest valid draft.
+    """
+    script = await db.scalar(select(Artifact).where(
+        Artifact.course_id == course_id,
+        Artifact.artifact_type == "video_script",
+    ).order_by(Artifact.version.desc()))
+    if not script:
+        return None, {
+            "code": "video_script_missing",
+            "message": "请先生成视频脚本；脚本生成完成后即可选择视频模型并获取报价。",
+            "retryable": True,
+        }
+    try:
+        from app.schemas.video_script_v4 import seedance_video_script_for_generation
+
+        seedance_video_script_for_generation(script.content_json or {})
+    except (TypeError, ValueError):
+        return None, {
+            "code": "video_script_invalid",
+            "message": "最新视频脚本结构过旧或无效，请先同步或升级视频脚本。",
+            "retryable": True,
+        }
+    return script, None
 
 
 async def task_payload(db, item: CourseTask, *, event_cursor: int | None = None) -> dict:
@@ -323,8 +368,21 @@ async def _video_generation_capabilities(db, item: CourseTask) -> dict | None:
         from app.services.video_generation_capability_service import get_video_generation_capabilities
         course = await db.get(CourseProject, item.course_id)
         return (await get_video_generation_capabilities(db, course)).payload() if course else None
-    except (ValueError, RuntimeError):
-        return None
+    except (ValueError, RuntimeError) as exc:
+        return {
+            "provider": "unknown",
+            "model_name": "unknown",
+            "api_mode": "",
+            "supported_resolutions": [],
+            "duration_seconds": [0, 0],
+            "source": "preflight_error",
+            "available": False,
+            "error_code": "video_capability_preflight_failed",
+            "unavailable_reason": str(exc),
+            "missing_dependencies": [],
+            "audio_transcription_source": None,
+            "audio_transcription_model": None,
+        }
 
 
 async def _preferred_video_resolution(db, item: CourseTask) -> str | None:
@@ -403,29 +461,10 @@ async def ensure_course_tasks(db, course_id: str) -> list[CourseTask]:
         and not video_task.active_run_id
         and video_task.status in {"waiting_dependency", "ready_to_generate"}
     ):
-        dependencies_ready = True
-        for dependency in video_task.dependency_types_json:
-            dependency_task = by_type.get(dependency)
-            dependency_artifact = (
-                await db.get(Artifact, dependency_task.current_artifact_id)
-                if dependency_task and dependency_task.current_artifact_id
-                else None
-            )
-            if (
-                not dependency_task
-                or dependency_task.status != "approved"
-                or not dependency_artifact
-            ):
-                dependencies_ready = False
-                break
-            if (
-                dependency == "video_script"
-                and (dependency_artifact.content_json or {}).get("schema_version") not in {"3.0", "4.0"}
-            ):
-                dependencies_ready = False
-                break
-        video_task.status = "ready_to_generate" if dependencies_ready else "waiting_dependency"
+        script_ready, waiting_reason = await video_script_generation_readiness(db, course_id)
+        video_task.status = "ready_to_generate" if script_ready else "waiting_dependency"
         video_task.progress = 0
+        video_task.error_json = waiting_reason
     return sorted(by_type.values(), key=lambda item: item.display_order)
 
 
@@ -455,24 +494,42 @@ async def _publish_task_event(
     **data,
 ):
     """Publish an event in a short transaction so SSE can observe it immediately."""
-    async with SessionLocal() as db:
-        run = await db.get(GenerationRun, run_id)
-        task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
-        if not run or not task:
+    # Heartbeat/SSE telemetry is best-effort.  During initial generation the
+    # six task writers and the main task transaction can briefly contend for
+    # SQLite's single writer.  Retrying this short transaction prevents a
+    # telemetry write from turning a successfully generated artifact into a
+    # failed task.
+    for attempt in range(4):
+        try:
+            async with SessionLocal() as db:
+                run = await db.get(GenerationRun, run_id)
+                task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+                if not run or not task:
+                    return
+                if progress is not None and run.status not in {"completed", "failed", "cancelled"}:
+                    run.progress = progress
+                    task.progress = progress
+                await _emit(
+                    db,
+                    run,
+                    event_type,
+                    task,
+                    status=task.status,
+                    progress=progress if progress is not None else task.progress,
+                    **data,
+                )
+                await db.commit()
             return
-        if progress is not None and run.status not in {"completed", "failed", "cancelled"}:
-            run.progress = progress
-            task.progress = progress
-        await _emit(
-            db,
-            run,
-            event_type,
-            task,
-            status=task.status,
-            progress=progress if progress is not None else task.progress,
-            **data,
-        )
-        await db.commit()
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            if attempt == 3:
+                logger.warning(
+                    "Skipped task event after SQLite remained locked",
+                    extra={"run_id": run_id, "event_type": event_type},
+                )
+                return
+            await asyncio.sleep(0.05 * (2 ** attempt))
 
 
 async def _publish_activity(
@@ -559,9 +616,17 @@ async def _execute_dispatched_task_run(run_id: str):
         run = await db.get(GenerationRun, run_id)
         task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
         task_type = task.task_type if task else ""
+        course_id = run.course_id if run else ""
+        trigger_type = run.trigger_type if run else ""
     if task_type == "video_generation":
         from app.services.seedance_video_generation_service import execute_seedance_video_run
         await execute_seedance_video_run(run_id)
+        return
+    if trigger_type == "initial" and course_id:
+        limit = max(1, get_settings().initial_generation_concurrency)
+        semaphore = initial_generation_semaphores.setdefault(course_id, asyncio.Semaphore(limit))
+        async with semaphore:
+            await execute_task_run(run_id)
         return
     await execute_task_run(run_id)
 
@@ -612,29 +677,10 @@ async def _schedule_ready_tasks(course_id: str):
             run.batch_id = batch_id
             run_ids.append(run.id)
         if video_task and not video_task.current_artifact_id and not video_task.active_run_id and video_task.status in {"waiting_dependency", "ready_to_generate"}:
-            dependencies_ready = True
-            for dependency in video_task.dependency_types_json:
-                dependency_task = tasks_by_type.get(dependency)
-                dependency_artifact = (
-                    await db.get(Artifact, dependency_task.current_artifact_id)
-                    if dependency_task and dependency_task.current_artifact_id
-                    else None
-                )
-                if (
-                    not dependency_task
-                    or dependency_task.status != "approved"
-                    or not dependency_artifact
-                ):
-                    dependencies_ready = False
-                    break
-                if (
-                    dependency == "video_script"
-                    and (dependency_artifact.content_json or {}).get("schema_version") not in {"3.0", "4.0"}
-                ):
-                    dependencies_ready = False
-                    break
-            video_task.status = "ready_to_generate" if dependencies_ready else "waiting_dependency"
+            script_ready, waiting_reason = await video_script_generation_readiness(db, course_id)
+            video_task.status = "ready_to_generate" if script_ready else "waiting_dependency"
             video_task.progress = 0
+            video_task.error_json = waiting_reason
         if run_ids:
             course.status = "resource_generating"
         await db.commit()
@@ -890,8 +936,8 @@ def _validate_and_repair_ppt(content: dict):
 
     slides = content.get("slides") or []
     _coerce_unknown_blocks(slides)
-    # blocks 密度与 body 一样需要确定性收敛（逐条 ≤25 字、去装饰前缀、合计 ≤120 字），
-    # 否则结构合法但条目超长的内容仍会在 QA 门禁/最终校验处失败。
+    # 清洗模型生成的装饰前缀。总字数不是结构合法性条件；页面承载能力
+    # 由后续真实渲染、文本溢出和几何 QA 判断。
     from app.agent.slide_rendering import sanitize_slide_density
     for slide in slides:
         sanitize_slide_density(slide)
@@ -951,7 +997,11 @@ def _validate_and_repair_ppt(content: dict):
             return None, f"修复后仍无法通过结构校验：{str(exc)[:300]}"
         remaining = check_ppt_against_knowledge(content)
         if remaining:
-            return None, "；".join(v.message for v in remaining[:3])
+            # Knowledge-base rules describe design preferences, not PPTContent
+            # validity. Keep them as diagnostics so a semantically complete,
+            # schema-valid deck is never rejected for character counts, title
+            # phrasing, density heuristics or other quality advice.
+            return content, "；".join(v.message for v in remaining[:3])
     return content, ""
 
 
@@ -1091,7 +1141,7 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         schema = LessonPlanContentV2
     elif kind == "ppt":
         preferred_template = resolve_ppt_template(
-            (config.preferences_json or {}).get("default_ppt_template") if config else None,
+            normalize_model_preferences(config.preferences_json).get("default_ppt_template") if config else None,
         )["id"]
         mock = make_ppt(bp, preferred_template)
         schema = PPTContent
@@ -1149,10 +1199,75 @@ async def _generate_initial(db, course: CourseProject, task: CourseTask, bluepri
         system, prompt = build_runtime_prompts(
             profile, schema.model_json_schema(), knowledge_context, instruction,
         )
-        value = await provider.structured(system, prompt, schema)
+        try:
+            value = await provider.structured(system, prompt, schema)
+        except Exception as exc:  # noqa: BLE001
+            # First drafts already have a project-specific, schema-valid base
+            # generated from the approved blueprint.  A model occasionally
+            # returns truncated/empty JSON for the very large video-script
+            # schema; that must not make project initialization fail.
+            from pydantic import ValidationError
+
+            if not isinstance(exc, ValidationError) and run.trigger_type != "initial":
+                raise
+            logger.warning(
+                "Initial %s model generation failed; using blueprint draft",
+                kind,
+                extra={
+                    "course_id": course.id,
+                    "run_id": run.id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            value = mock
     if kind == "ppt":
         value.theme = mock.theme
     return value, resolved_model_name(provider, config), profile, source_versions
+
+
+async def _deterministic_initial_result(
+    db, course: CourseProject, task: CourseTask, blueprint: CourseBlueprint,
+):
+    """Build a publishable first draft without calling an external model.
+
+    This is the last-resort path for an initial Agent pipeline: a malformed
+    streamed decision, provider timeout, or pipeline exception must not leave a
+    newly created project with no usable files.  The same project-specific
+    generators used by MockProvider are used here, so the result still follows
+    the approved blueprint and normal schema/QA/save flow.
+    """
+    from app.services.ppt_pipeline_service import PipelineRunResult
+    from app.schemas.lesson_plan import make_lesson_plan_v2
+
+    bp = normalize_blueprint_references(CourseBlueprintSchema.model_validate(blueprint.content_json))
+    profile, provider, config = await _profile_provider(db, course, task)
+    if task.task_type == "lesson_plan":
+        value = make_lesson_plan_v2(bp)
+    elif task.task_type == "ppt":
+        template_id = resolve_ppt_template(
+            normalize_model_preferences(config.preferences_json).get("default_ppt_template") if config else None,
+        )["id"]
+        value = make_ppt(bp, template_id)
+    elif task.task_type == "task_sheet":
+        value = make_task_sheet(bp)
+    elif task.task_type == "exercise":
+        value = make_exercises(bp)
+    elif task.task_type == "video_script":
+        value = make_seedance_video_script(bp, make_lesson_plan(bp))
+    elif task.task_type == "verbatim":
+        value = _basic_verbatim_from_blueprint(bp)
+    else:
+        raise RuntimeError(f"不支持为 {task.task_type} 创建确定性首稿")
+    return PipelineRunResult(
+        content=value.model_dump(),
+        model_name="lessonforge-deterministic-fallback-v1",
+        profile=profile,
+        provider=provider,
+        locks=[],
+        source_versions={},
+        change_summary="首次生成（确定性兜底）",
+        runtime=None,
+    )
 
 
 def _locked_value(content: dict, path: str):
@@ -1610,17 +1725,12 @@ async def _refresh_quality(db, course: CourseProject, blueprint: CourseBlueprint
 async def _refresh_course_status(db, course: CourseProject):
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course.id)))
     content_tasks = [item for item in tasks if item.task_type in CONTENT_TASK_TYPES]
-    video_task = next((item for item in tasks if item.task_type == "video_generation"), None)
     statuses = {item.status for item in content_tasks}
-    if content_tasks and statuses == {"approved"} and (
-        not video_task or video_task.status in {"ready_to_generate", "approved"}
-    ):
+    if content_tasks and statuses == {"approved"}:
         course.status = "completed"
-    elif "failed" in statuses or (video_task and video_task.status == "failed"):
+    elif "failed" in statuses:
         course.status = "needs_attention"
-    elif statuses & {"queued", "running", "waiting_dependency"} or (
-        video_task and video_task.status in {"queued", "running"}
-    ):
+    elif statuses & {"queued", "running", "waiting_dependency"}:
         course.status = "resource_generating"
     else:
         course.status = "teacher_review"
@@ -1659,6 +1769,9 @@ async def execute_task_run(run_id: str):
             ))
             if not blueprint or blueprint.status != "approved":
                 raise RuntimeError("课程内部规划尚未完成")
+            blueprint_schema = normalize_blueprint_references(
+                CourseBlueprintSchema.model_validate(blueprint.content_json)
+            )
 
             run.status = "running"
             run.started_at = utcnow()
@@ -1728,11 +1841,39 @@ async def execute_task_run(run_id: str):
                     from app.services.task_sheet_pipeline_service import run_task_sheet_pipeline
 
                     pipeline_runner = run_task_sheet_pipeline(db, course, task, run, blueprint)
-                generated, generation_elapsed = await _run_with_generation_heartbeat(
-                    run_id,
-                    pipeline_runner,
-                )
-                result = generated
+                try:
+                    generated, generation_elapsed = await _run_with_generation_heartbeat(
+                        run_id,
+                        pipeline_runner,
+                    )
+                    result = generated
+                except Exception:
+                    if run.trigger_type != "initial":
+                        raise
+                    # Initial generation must be recoverable even when a model
+                    # returns malformed streamed JSON or an Agent pipeline
+                    # aborts before producing a candidate.  Roll back partial
+                    # pipeline writes, then continue through the same publish
+                    # and QA path with a deterministic project draft.
+                    logger.exception(
+                        "Initial Agent pipeline failed; using deterministic draft",
+                        extra={"course_id": course.id, "run_id": run.id, "task_type": task.task_type},
+                    )
+                    await db.rollback()
+                    run = await db.get(GenerationRun, run_id)
+                    task = await db.get(CourseTask, run.course_task_id) if run and run.course_task_id else None
+                    course = await db.get(CourseProject, run.course_id) if run else None
+                    blueprint = await db.scalar(select(CourseBlueprint).where(
+                        CourseBlueprint.course_id == course.id,
+                        CourseBlueprint.version == course.current_blueprint_version,
+                    )) if course else None
+                    if not run or not task or not course or not blueprint:
+                        raise RuntimeError("确定性首稿回退时任务上下文不存在")
+                    blueprint_schema = normalize_blueprint_references(
+                        CourseBlueprintSchema.model_validate(blueprint.content_json)
+                    )
+                    result = await _deterministic_initial_result(db, course, task, blueprint)
+                    generation_elapsed = 0
                 content = result.content
                 revision = result.revision
                 user_message = result.user_message
@@ -1895,13 +2036,29 @@ async def execute_task_run(run_id: str):
             if task.task_type == "lesson_plan":
                 # V1/V2 按 schema_version 分派校验；V2 候选稿在保存前再跑统一质量门禁。
                 lesson_issues = validate_lesson_plan(
-                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    blueprint_schema,
                     content,
                     [lock.json_path for lock in locks],
                 )
                 blocking = [item for item in lesson_issues if item["severity"] in {"critical", "major"}]
                 if blocking:
-                    raise TaskValidationError(f"教学设计校验未通过：{blocking[0]['description']}")
+                    if run.trigger_type == "initial":
+                        # A model/Agent can produce schema-valid content whose
+                        # objective-to-stage graph is incomplete.  Initialization
+                        # must still deliver a usable first draft; the deterministic
+                        # draft preserves the approved blueprint and is rechecked
+                        # by the same gate before publish.
+                        from app.schemas.lesson_plan import make_lesson_plan_v2
+
+                        logger.warning(
+                            "Initial lesson plan failed semantic QA; using blueprint draft",
+                            extra={"course_id": course.id, "run_id": run.id},
+                        )
+                        content = make_lesson_plan_v2(blueprint_schema).model_dump()
+                        lesson_issues = validate_lesson_plan(blueprint_schema, content, [])
+                        blocking = [item for item in lesson_issues if item["severity"] in {"critical", "major"}]
+                    if blocking:
+                        raise TaskValidationError(f"教学设计校验未通过：{blocking[0]['description']}")
             if task.task_type == "lesson_plan" and (content or {}).get("schema_version") == "2.0":
                 validated_model = LessonPlanContentV2.model_validate(content)
             elif task.task_type == "task_sheet" and (content or {}).get("schema_version") == TASK_SHEET_V3:
@@ -1913,7 +2070,11 @@ async def execute_task_run(run_id: str):
                 validated_model = SeedanceVideoScriptContentV4.model_validate(content)
             else:
                 validated_model = TASK_SCHEMAS[task.task_type].model_validate(content)
-            if task.task_type == "video_script":
+            # Agentic V4 message runs publish the structurally valid candidate directly.
+            # Content-quality rules (required terms/numbers, narration pacing, fact baseline,
+            # sentence style, etc.) are advisory only and must not block the teacher's edit.
+            # Legacy/non-agentic generation keeps its existing validation behavior.
+            if task.task_type == "video_script" and not use_video_script_pipeline:
                 if isinstance(validated_model, VideoScriptContent):
                     validated_model = repair_video_script_subtitles(validated_model)
                 lesson_artifact = await _latest_artifact(db, course.id, "lesson_plan")
@@ -1921,20 +2082,35 @@ async def execute_task_run(run_id: str):
                 lesson_raw = (
                     lesson_artifact.content_json
                     if lesson_artifact
-                    else make_lesson_plan(CourseBlueprintSchema.model_validate(blueprint.content_json)).model_dump()
+                    else make_lesson_plan(blueprint_schema).model_dump()
                 )
                 video_issues = validate_video_script(
-                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    blueprint_schema,
                     validated_model.model_dump(), lesson_raw, None,
                 )
                 blocking = [item for item in video_issues if item["severity"] in {"critical", "major"}]
                 if blocking:
-                    raise TaskValidationError(f"视频脚本校验未通过：{blocking[0]['description']}")
+                    if run.trigger_type == "initial":
+                        logger.warning(
+                            "Initial video script failed semantic QA; using blueprint draft",
+                            extra={"course_id": course.id, "run_id": run.id},
+                        )
+                        fallback_lesson = make_lesson_plan(blueprint_schema)
+                        fallback_script = make_seedance_video_script(blueprint_schema, fallback_lesson)
+                        content = fallback_script.model_dump()
+                        validated_model = SeedanceVideoScriptContent.model_validate(content)
+                        video_issues = validate_video_script(
+                            blueprint_schema, validated_model.model_dump(),
+                            fallback_lesson.model_dump(), None,
+                        )
+                        blocking = [item for item in video_issues if item["severity"] in {"critical", "major"}]
+                    if blocking:
+                        raise TaskValidationError(f"视频脚本校验未通过：{blocking[0]['description']}")
             if task.task_type == "exercise" and not use_exercise_pipeline:
                 # 旧路径（开关关闭）：后置规则门禁 + LLM 复核修复（只修一次）。
                 task_sheet_artifact = await _latest_artifact(db, course.id, "task_sheet")
                 exercise_issues = validate_exercise(
-                    CourseBlueprintSchema.model_validate(blueprint.content_json),
+                    blueprint_schema,
                     validated_model.model_dump(),
                     task_sheet_artifact.content_json if task_sheet_artifact else None,
                 )

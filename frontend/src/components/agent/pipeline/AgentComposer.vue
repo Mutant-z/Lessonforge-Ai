@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { Close, Loading, MagicStick, Picture, Promotion, VideoPause } from '@element-plus/icons-vue';
+import { Close, Document, Loading, MagicStick, Picture, Promotion, VideoPause } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
+import { pipelineApi } from '../../../api/pipeline';
 import ModelSelector from '../ModelSelector.vue';
 import { isImageGenerationInstruction } from '../../../utils/imageModelSelection';
-import type { PPTPolishModality } from '../../../types/project';
+import type { ChatAttachment, PPTPolishModality } from '../../../types/project';
 
 const props = withDefaults(defineProps<{
   targetSlide?: number | null;
@@ -11,24 +13,30 @@ const props = withDefaults(defineProps<{
   isRunning?: boolean;
   pausing?: boolean;
   modelConfigId?: string | null;
+  visionModelConfigId?: string | null;
   imageModelConfigId?: string | null;
   imageModelAvailableCount?: number;
   showImageModel?: boolean;
+  showVisionModel?: boolean;
+  courseId?: string;
   showModality?: boolean;
   taskType?: string;
   quickPrompts?: string[];
   placeholder?: string;
   unitName?: string;
-  submit?: (text: string, modality: PPTPolishModality) => Promise<void>;
+  submit?: (text: string, modality: PPTPolishModality, attachments: ChatAttachment[]) => Promise<void>;
 }>(), {
   targetSlide: null,
   targetSlides: () => [],
   isRunning: false,
   pausing: false,
   modelConfigId: null,
+  visionModelConfigId: null,
   imageModelConfigId: null,
   imageModelAvailableCount: 0,
   showImageModel: false,
+  showVisionModel: false,
+  courseId: '',
   showModality: false,
   taskType: 'ppt',
   quickPrompts: undefined,
@@ -37,16 +45,22 @@ const props = withDefaults(defineProps<{
 });
 
 const emit = defineEmits<{
-  (e: 'send', text: string, modality: PPTPolishModality): void;
+  (e: 'send', text: string, modality: PPTPolishModality, attachments: ChatAttachment[]): void;
   (e: 'pause'): void;
   (e: 'clear-target-slide'): void;
   (e: 'change-model', modelId: string): void;
+  (e: 'change-vision-model', modelId: string): void;
   (e: 'change-image-model', modelId: string): void;
   (e: 'image-model-required'): void;
 }>();
 
 const input = ref('');
 const inputRef = ref<HTMLTextAreaElement | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const pendingFiles = ref<File[]>([]);
+const uploading = ref(false);
+const hasInput = computed(() => Boolean(input.value.trim() || pendingFiles.value.length));
+const attachmentAccept = '.pdf,.docx,.pptx,.txt,.md,.markdown,.csv,.json,image/png,image/jpeg,image/webp,image/gif';
 
 /** 润色范围选择：auto（自动）| layout（只改布局）| text（只改文字）| image（只改图片） */
 const modality = ref<PPTPolishModality>('auto');
@@ -142,6 +156,7 @@ function adjustHeight() {
 watch(input, adjustHeight);
 
 function onKeydown(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     handleSubmit();
@@ -159,11 +174,39 @@ function applyQuickPrompt(promptText: string) {
   });
 }
 
-async function dispatch(text: string, selectedModality: PPTPolishModality) {
+async function dispatch(text: string, selectedModality: PPTPolishModality, attachments: ChatAttachment[] = []) {
   if (props.submit) {
-    await props.submit(text, selectedModality);
+    await props.submit(text, selectedModality, attachments);
   } else {
-    emit('send', text, selectedModality);
+    emit('send', text, selectedModality, attachments);
+  }
+}
+
+function onFilesSelected(event: Event) {
+  const files = Array.from((event.target as HTMLInputElement).files || []);
+  if (!files.length) return;
+  const remaining = Math.max(0, 5 - pendingFiles.value.length);
+  pendingFiles.value = [...pendingFiles.value, ...files.slice(0, remaining)];
+  if (files.length > remaining) ElMessage.warning('单次最多上传 5 个附件');
+  if (fileInputRef.value) fileInputRef.value.value = '';
+}
+
+function removePendingFile(index: number) {
+  pendingFiles.value = pendingFiles.value.filter((_, fileIndex) => fileIndex !== index);
+}
+
+async function uploadPendingFiles(): Promise<ChatAttachment[]> {
+  if (!pendingFiles.value.length) return [];
+  if (!props.courseId) throw new Error('缺少课程上下文，无法上传附件');
+  uploading.value = true;
+  try {
+    const uploaded: ChatAttachment[] = [];
+    for (const file of pendingFiles.value) {
+      uploaded.push(await pipelineApi.uploadChatAttachment(props.courseId, file));
+    }
+    return uploaded;
+  } finally {
+    uploading.value = false;
   }
 }
 
@@ -173,7 +216,7 @@ async function handleGenerateImage() {
   const imagePrompt = '生成一张高清图片，风格专业，适合PPT插入';
   const finalText = `[图片生成] ${imagePrompt}`;
   try {
-    await dispatch(finalText, modality.value);
+    await dispatch(finalText, modality.value, []);
     input.value = '';
     adjustHeight();
   } catch {
@@ -183,7 +226,7 @@ async function handleGenerateImage() {
 
 async function handleSubmit() {
   const rawText = input.value.trim();
-  if (!rawText) return;
+  if (!rawText && !pendingFiles.value.length) return;
   if (props.showImageModel && isImageGenerationInstruction(rawText) && !props.imageModelConfigId) {
     emit('image-model-required');
     return;
@@ -193,10 +236,14 @@ async function handleSubmit() {
   // sentence untouched so text parsing cannot conflict with the same
   // structured selection.
   try {
-    await dispatch(rawText, modality.value);
+    const attachments = await uploadPendingFiles();
+    const finalText = rawText || '请分析附件内容，并给出与当前任务相关的建议。';
+    await dispatch(finalText, modality.value, attachments);
     input.value = '';
+    pendingFiles.value = [];
     adjustHeight();
-  } catch {
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '附件上传或发送失败');
     return;
   }
 }
@@ -255,6 +302,15 @@ function clearSlideTarget() {
       </div>
 
       <!-- Textarea Input Box (Middle) -->
+      <div v-if="pendingFiles.length" class="pending-attachments" aria-label="待上传附件">
+        <div v-for="(file, index) in pendingFiles" :key="`${file.name}-${index}`" class="pending-attachment">
+          <el-icon><Document /></el-icon>
+          <span>{{ file.name }}</span>
+          <button type="button" title="移除附件" @click="removePendingFile(index)">
+            <el-icon><Close /></el-icon>
+          </button>
+        </div>
+      </div>
       <div class="composer-input-wrapper">
         <textarea
           ref="inputRef"
@@ -268,12 +324,33 @@ function clearSlideTarget() {
       <!-- Bottom Actions Bar (Bottom Toolbar) -->
       <div class="composer-bottom-bar">
         <div class="bottom-left">
+          <label class="attachment-button" :class="{ disabled: uploading }" title="上传图片或文档">
+            <input
+              ref="fileInputRef"
+              type="file"
+              :accept="attachmentAccept"
+              multiple
+              :disabled="uploading"
+              @change="onFilesSelected"
+            />
+            <el-icon><Document /></el-icon>
+            <span>附件</span>
+          </label>
           <ModelSelector
             :model-value="modelConfigId || null"
             compact
             label="文本"
             :disabled="isRunning"
             @change="emit('change-model', $event)"
+          />
+          <ModelSelector
+            v-if="showVisionModel"
+            :model-value="visionModelConfigId || null"
+            capability="vision_review"
+            compact
+            label="视觉"
+            :disabled="isRunning || uploading"
+            @change="emit('change-vision-model', $event)"
           />
           <ModelSelector
             v-if="showImageModel"
@@ -295,7 +372,7 @@ function clearSlideTarget() {
         </div>
         <div class="bottom-right">
           <span class="tip-key">Shift+Enter 换行</span>
-          <button v-if="isRunning && input.trim()" type="button" class="queue-btn" @click="handleSubmit">
+          <button v-if="isRunning && hasInput" type="button" class="queue-btn" :disabled="uploading" @click="handleSubmit">
             加入队列
           </button>
           <button
@@ -323,7 +400,7 @@ function clearSlideTarget() {
             v-if="!isRunning"
             type="button"
             class="send-circle-btn"
-            :disabled="!input.trim()"
+            :disabled="!hasInput || uploading"
             title="发送修改指令"
             @click="handleSubmit"
           >
@@ -519,6 +596,70 @@ function clearSlideTarget() {
   resize: none;
   font-family: inherit;
   box-sizing: border-box;
+}
+
+.pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.pending-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 4px 7px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 11px;
+}
+
+.pending-attachment span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-attachment button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #6366f1;
+  cursor: pointer;
+}
+
+.attachment-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  border: 1px solid #e0e7ff;
+  border-radius: 8px;
+  color: #4f46e5;
+  background: #f8faff;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.attachment-button:hover {
+  border-color: #a5b4fc;
+  background: #eef2ff;
+}
+
+.attachment-button.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.attachment-button input {
+  display: none;
 }
 
 .composer-input-wrapper textarea::placeholder {

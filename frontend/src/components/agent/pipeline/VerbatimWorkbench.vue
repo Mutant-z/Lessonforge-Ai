@@ -16,6 +16,7 @@ import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
 import VerbatimPreviewWorkbench from '../verbatim/VerbatimPreviewWorkbench.vue';
 import type { LessonPlanMode } from '../../../api/pipeline';
+import type { ChatAttachment } from '../../../types/project';
 
 const props = defineProps<{
   courseId: string;
@@ -91,13 +92,13 @@ async function loadDetail() {
   }
 }
 
-async function send(contentText: string, modality: string = 'auto') {
+async function send(contentText: string, modality: string = 'auto', attachments: ChatAttachment[] = []) {
   const modeValue = (['auto', 'content', 'structure', 'timing', 'qa'].includes(modality) ? modality : 'auto') as LessonPlanMode;
   const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
   if (paused.value && runId) {
     await resume();
     pipelineStore.beginRun();
-    await projectStore.createVerbatimRun(props.courseId, contentText, selectedSectionIds.value, modeValue);
+    await projectStore.createVerbatimRun(props.courseId, contentText, selectedSectionIds.value, modeValue, attachments);
     await loadDetail();
     startPolling();
   } else if (isRunning.value) {
@@ -105,7 +106,7 @@ async function send(contentText: string, modality: string = 'auto') {
     return;
   } else {
     pipelineStore.beginRun();
-    await projectStore.createVerbatimRun(props.courseId, contentText, selectedSectionIds.value, modeValue);
+    await projectStore.createVerbatimRun(props.courseId, contentText, selectedSectionIds.value, modeValue, attachments);
     await loadDetail();
   }
   clearTargetSections();
@@ -146,6 +147,10 @@ async function handleHumanResponse(requestId: string, choice: string, data: Reco
 
 function setModel(modelId: string) {
   void projectStore.setTaskModel(props.courseId, props.taskType, modelId);
+}
+
+function setVisionModel(modelId: string) {
+  void projectStore.setTaskVisionModel(props.courseId, props.taskType, modelId);
 }
 
 function startResize(e: MouseEvent | TouchEvent) {
@@ -281,17 +286,21 @@ watch(
       />
 
       <AgentComposer
+        :course-id="props.courseId"
         :target-slide="activeSectionId as any"
         :target-slides="selectedSectionIds as any"
         :is-running="isRunning"
         :pausing="pausing || pipelineStore.pauseLoading"
         :model-config-id="task?.model_config_id"
+        :vision-model-config-id="task?.vision_model_config_id"
+        :show-vision-model="true"
         task-type="verbatim"
         unit-name="段"
         @send="send"
         @pause="pause"
         @clear-target-slide="clearTargetSections"
         @change-model="setModel"
+        @change-vision-model="setVisionModel"
       />
     </aside>
 

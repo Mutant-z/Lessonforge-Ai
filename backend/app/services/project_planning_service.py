@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.entities import CourseBlueprint, CourseProject, GenerationEvent, GenerationRun, Material
-from app.schemas.blueprint import CourseBlueprintSchema
+from app.schemas.blueprint import CourseBlueprintSchema, normalize_blueprint_references
 from app.services.agent_initialization_service import create_initialization_run, start_initialization_run
 from app.services.course_task_service import ensure_course_tasks
 from app.workflows.course_graph import build_blueprint_graph
@@ -61,7 +61,12 @@ async def execute_blueprint_run(run_id: str):
             )
             run.current_node = "pedagogy_blueprint_agent"
             await _emit(db, run_id, "node_progress", node=run.current_node, progress=80, message="正在形成课程蓝图")
-            schema = CourseBlueprintSchema.model_validate(result["blueprint"])
+            # Pydantic validates shape, but it intentionally does not reject
+            # cross-reference drift from a model response.  Canonicalize the
+            # approved graph before any of the six content Agents consume it.
+            schema = normalize_blueprint_references(
+                CourseBlueprintSchema.model_validate(result["blueprint"])
+            )
             version = 1
             blueprint = CourseBlueprint(
                 course_id=course.id,

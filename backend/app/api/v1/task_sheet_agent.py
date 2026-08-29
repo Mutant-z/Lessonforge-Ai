@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
-from app.api.v1.projects import _owned_task
+from app.api.v1.projects import _owned_task, _validated_chat_attachment_metadata
 from app.core.database import SessionLocal, get_db
 from app.models.entities import (
     AgentHumanRequest,
@@ -47,6 +47,7 @@ class TaskSheetMessageRequest(BaseModel):
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
     active_section_id: str | None = None
     mode: str = Field(default="auto", pattern="^(auto|content|structure|narration|visual|continuity|timing|qa)$")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class InstructionRequest(BaseModel):
@@ -58,6 +59,7 @@ class InstructionRequest(BaseModel):
     active_section_id: str | None = None
     active_scene_id: str | None = None
     mode: str = Field(default="auto", pattern="^(auto|content|structure|narration|visual|continuity|timing|qa)$")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class HumanResponseRequest(BaseModel):
@@ -94,15 +96,17 @@ async def create_task_sheet_run(
     content = payload.content.strip()
     if not content:
         raise HTTPException(422, "修改指令不能为空")
+    attachment_meta = await _validated_chat_attachment_metadata(db, user, course_id, payload.attachment_ids)
     message = AgentMessage(
         course_id=course_id, task_id=task.id, module_type=TASK_TYPE,
         role="user", content=content, status="pending",
     )
-    if any((payload.selected_section_ids, payload.active_section_id, payload.mode != "auto")):
+    if any((payload.selected_section_ids, payload.active_section_id, payload.mode != "auto")) or attachment_meta:
         message.metadata_json = {
             "selected_section_ids": list(payload.selected_section_ids),
             "active_section_id": payload.active_section_id,
             "mode": payload.mode,
+            **attachment_meta,
         }
     db.add(message)
     try:
@@ -143,6 +147,7 @@ async def enqueue_instruction(
     if pipeline.status not in {"queued", "running", "pausing", "paused"}:
         raise HTTPException(409, "当前 Run 已结束，请创建新的修改 Run")
     content = payload.content.strip()
+    attachment_meta = await _validated_chat_attachment_metadata(db, user, course_id, payload.attachment_ids)
     if payload.client_instruction_id:
         existing = await db.scalar(select(AgentRunInstruction).where(
             AgentRunInstruction.pipeline_run_id == pipeline.id,
@@ -166,6 +171,7 @@ async def enqueue_instruction(
             "active_section_id": payload.active_section_id,
             "active_scene_id": payload.active_scene_id,
             "mode": payload.mode,
+            **attachment_meta,
         },
         status="completed",
     )
@@ -183,6 +189,7 @@ async def enqueue_instruction(
             "active_section_id": payload.active_section_id,
             "active_scene_id": payload.active_scene_id,
             "mode": payload.mode,
+            **attachment_meta,
         },
     )
     db.add(row)
@@ -200,6 +207,7 @@ async def enqueue_instruction(
     message_payload = {
         "id": user_message.id, "role": "user", "content": user_message.content,
         "run_id": generation.id, "status": "completed",
+        "metadata": user_message.metadata_json or {},
     }
     await db.commit()
     from app.agent.events import PipelineEventEmitter
@@ -289,6 +297,7 @@ async def resolve_human_response(
     pipeline.checkpoint_json = {
         **(pipeline.checkpoint_json or {}),
         "pending_confirmation": {
+            **pending,
             "request_id": request_id,
             "request_type": pending.get("request_type") or "task_sheet_confirmation",
             "choice": payload.choice,

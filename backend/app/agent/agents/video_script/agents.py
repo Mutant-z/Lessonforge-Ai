@@ -33,8 +33,8 @@ EDIT_TOOLS = [
     "vs_rebalance_timeline",
 ]
 # 检查工具
-QA_TOOLS = ["vs_get_context", "vs_get_locks", "vs_inspect_outline", "vs_inspect_scene", "vs_validate_draft"]
-FINALIZER_TOOLS = ["vs_inspect_outline", "vs_inspect_scene", "vs_compute_diff", "vs_validate_draft", "vs_render_preview"]
+QA_TOOLS = ["vs_get_context", "vs_get_locks", "vs_inspect_outline", "vs_inspect_scene"]
+FINALIZER_TOOLS = ["vs_inspect_outline", "vs_inspect_scene", "vs_compute_diff", "vs_render_preview"]
 PROJECT_SETTINGS_TOOLS = ["vs_set_video_generation_resolution"]
 
 
@@ -304,7 +304,7 @@ class AnswerFinalizerAgent(Agent):
     name = "结果说明"
     role = "基于当前脚本、教师问题与校验结果给出准确回答，不修改文档"
     produced_artifacts = ["video_script_answer"]
-    allowed_tools = [*READ_TOOLS, "vs_validate_draft", "vs_compute_diff"]
+    allowed_tools = [*READ_TOOLS, "vs_compute_diff"]
 
     def build_system_prompt(self, tc: ToolContext, runtime: AgentRuntimeState | None = None) -> str:
         return _video_script_system_prompt(self, tc, runtime) + (

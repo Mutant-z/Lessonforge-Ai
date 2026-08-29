@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from app.core.database import SessionLocal
@@ -18,7 +19,7 @@ from app.schemas.blueprint import CourseBlueprintSchema
 from app.services.agent_prompt_service import (
     active_prompt_template, ensure_prompt_templates, prepare_profile_prompts,
 )
-from app.services.model_config_service import resolve_provider, resolved_model_name
+from app.services.model_config_service import normalize_model_preferences, resolve_provider, resolved_model_name
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def deterministic_bundle(
         "ppt": {
             "narrative_requirements": ["按照情境导入、概念建构、应用检查与总结组织页面", "页面顺序与教学环节一一对应，不跳环节"],
             "visual_hierarchy_requirements": ["每页只有一个核心信息层级", "标题表达结论而不是页面主题"],
-            "information_density_requirements": ["遵守 PPT 设计知识库的密度上限：标题不超过 30 字，正文每页不超过 120 字、最多 6 条、单条不超过 25 字", "正文只保留关键结论，细节放入 speaker_notes"],
+            "information_density_requirements": ["优先控制页面密度：标题不超过 30 字、最多 6 条、单条不超过 25 字；总字数是否合适以真实渲染和溢出检查为准", "正文只保留关键结论，细节放入 speaker_notes"],
             "animation_and_diagram_requirements": ["抽象关系（流程、对比、因果、层级、数据变化）必须指明对应图示方式", "优先使用能解释关系的图示或过程动画，而非装饰性动画"],
             "layout_requirements": ["每页 layout 必须从知识库版式库中选择，且属于该页面类型的建议版式"],
             "typography_requirements": ["标题与正文字号层级清晰，避免全页同字号", "编号与短句优先于长段落"],
@@ -200,8 +201,14 @@ async def generate_initialization_bundle(
     prompt = "项目输入：\n" + json.dumps(source, ensure_ascii=False)
     try:
         return await provider.structured(system, prompt, AgentInitializationBundle), None
-    except LLMProviderError as exc:
-        if not (exc.retryable or exc.code in RECOVERABLE_INIT_ERROR_CODES):
+    except (LLMProviderError, ValidationError) as exc:
+        # Some providers (notably the Anthropic-compatible local gateway)
+        # surface a truncated JSON body directly as Pydantic ValidationError
+        # instead of normalizing it to LLMProviderError.  It is still a model
+        # content failure and must use the same blueprint-derived recovery.
+        if isinstance(exc, LLMProviderError) and not (
+            exc.retryable or exc.code in RECOVERABLE_INIT_ERROR_CODES
+        ):
             raise
         warning = {
             "code": "model_extraction_temporarily_unavailable",
@@ -209,7 +216,12 @@ async def generate_initialization_bundle(
         }
         logger.warning(
             "Agent profile model extraction unavailable; using blueprint-based recovery",
-            extra={"course_id": course.id, "provider_error_code": exc.code},
+            extra={
+                "course_id": course.id,
+                "provider_error_code": (
+                    exc.code if isinstance(exc, LLMProviderError) else "upstream_schema_mismatch"
+                ),
+            },
         )
         return deterministic_bundle(bp, course, preferences, source), warning
 
@@ -356,9 +368,9 @@ async def execute_initialization_run(run_id: str):
             bp = CourseBlueprintSchema.model_validate(blueprint.content_json)
             source = await _initialization_input(
                 db, course, blueprint, requirement,
-                model_config.preferences_json if model_config else {},
+                normalize_model_preferences(model_config.preferences_json) if model_config else {},
             )
-            preferences = model_config.preferences_json if model_config else {}
+            preferences = normalize_model_preferences(model_config.preferences_json) if model_config else {}
             bundle, extraction_warning = await generate_initialization_bundle(
                 provider, bp, course, source, preferences,
             )

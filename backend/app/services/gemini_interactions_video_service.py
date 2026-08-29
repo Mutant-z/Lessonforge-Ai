@@ -23,6 +23,7 @@ from app.services.media_provider_service import MediaProviderError, VIDEO_MIME_T
 ProgressCallback = Callable[[int, str], Awaitable[None]]
 JobCallback = Callable[[str], Awaitable[None]]
 FileCallback = Callable[[str], Awaitable[None]]
+_configured_probe_reports: dict[str, dict] = {}
 
 
 @dataclass
@@ -112,12 +113,6 @@ class GeminiInteractionsVideoAdapter:
             raise MediaProviderError("所选配置不是 Gemini Interactions 视频接口", retryable=False)
         if not {"video_generation", "native_audio_video_generation"} <= capabilities:
             raise MediaProviderError("Gemini 配置缺少原生有声视频能力声明", retryable=False)
-        if self.config.model_name != "gemini-omni-flash-preview":
-            raise MediaProviderError(
-                "Gemini 原生视频渲染模型必须是 gemini-omni-flash-preview",
-                retryable=False,
-                code="video_model_not_generation_capable",
-            )
         if require_enabled and not get_settings().gemini_interactions_video_enabled:
             raise MediaProviderError(
                 "Gemini Interactions 视频功能尚未启用；请先完成本地网关能力探测",
@@ -148,11 +143,20 @@ class GeminiInteractionsVideoAdapter:
         url = _gateway_url(self.config, _path(adapter, "interactions_path", "/v1beta/interactions"))
         try:
             async with build_async_client(url, timeout=min(10, self.config.timeout_seconds), follow_redirects=False) as client:
-                response = await client.options(url, headers=_headers(self.config))
+                # A gateway-wide CORS handler can return 200 to OPTIONS even when
+                # the requested route does not exist.  An authenticated GET is a
+                # safe, non-billable route check: POST-only endpoints normally
+                # answer 405, while a missing proxy route answers 404.
+                response = await client.get(url, headers=_headers(self.config))
             if response.status_code in {404, 501}:
                 raise MediaProviderError(
                     "本地网关尚未暴露 /v1beta/interactions",
                     retryable=False,
+                    code="video_interactions_endpoint_unavailable",
+                )
+            if response.status_code >= 500:
+                raise MediaProviderError(
+                    f"Gemini Interactions 网关暂不可用（HTTP {response.status_code}）",
                     code="video_interactions_endpoint_unavailable",
                 )
         except MediaProviderError:
@@ -186,7 +190,7 @@ class GeminiInteractionsVideoAdapter:
         adapter = self.config.adapter_config_json or {}
         url = _gateway_url(self.config, _path(adapter, "interactions_path", "/v1beta/interactions"))
         payload = {
-            "model": "gemini-omni-flash-preview",
+            "model": self.config.model_name,
             "input": prompt,
             "response_format": {"type": "video", "aspect_ratio": "16:9", "delivery": "uri"},
             "background": False,
@@ -358,17 +362,25 @@ async def probe_configured_gemini_video_models(db) -> list[dict]:
     configs = list(await db.scalars(select(ModelConfig).where(
         ModelConfig.api_mode == "gemini_interactions_video",
     )))
+    _configured_probe_reports.clear()
     report: list[dict] = []
     for config in configs:
         try:
             result = await GeminiInteractionsVideoAdapter(config).probe_capabilities()
             status = "ready" if get_settings().gemini_interactions_video_enabled else "disabled"
-            report.append({"model_config_id": config.id, "status": status, **result})
+            item = {"model_config_id": config.id, "status": status, **result}
         except Exception as exc:  # noqa: BLE001
-            report.append({
+            item = {
                 "model_config_id": config.id,
                 "model": config.model_name,
                 "status": "blocked",
                 "error": str(exc)[:500],
-            })
+            }
+        report.append(item)
+        _configured_probe_reports[config.id] = item
     return report
+
+
+def configured_gemini_video_probe(config_id: str) -> dict | None:
+    """Return the startup probe snapshot used by task preflight checks."""
+    return _configured_probe_reports.get(config_id)

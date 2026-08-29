@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { api, errorMessage } from '../api/client';
 import { pipelineApi } from '../api/pipeline';
 import type { VideoScriptMode } from '../api/pipeline';
-import type { Artifact, ArtifactUpdateSource, CourseProjectWorkspace, CourseTask, HydrationStatus, PPTPolishModality, ProjectAgentMessage, ProjectTaskEvent, SlideRepairNotes } from '../types';
+import type { Artifact, ArtifactUpdateSource, ChatAttachment, CourseProjectWorkspace, CourseTask, HydrationStatus, PPTPolishModality, ProjectAgentMessage, ProjectTaskEvent, SlideRepairNotes } from '../types';
 import { useCourseStore } from './courses';
 import { isNativeVideoResolution } from '../utils/videoResolution';
 
@@ -66,7 +66,8 @@ const TASK_EVENTS = [
   'draft.update.started', 'draft.update.completed',
   'layout.compile.result', 'polish.result',
   'human.required', 'run.instruction.queued', 'run.instruction.merged',
-  'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
+  'intent.recognized', 'intent.resolved', 'edit.plan.created', 'slide.change.applied',
+  'edit.corrected', 'qa.warning', 'agent.clarification.required', 'artifact.diff',
   // 共享项目记忆事件
   'project_memory.updated', 'context.snapshot_created', 'artifact.published', 'memory.source_read',
   // 视频生成偏好设置
@@ -91,7 +92,8 @@ const PIPELINE_EVENT_TYPES = new Set([
   'draft.update.started', 'draft.update.completed',
   'repair.started', 'repair.completed', 'human.required', 'run.instruction.queued', 'run.instruction.merged',
   'layout.compile.result', 'polish.result',
-  'intent.recognized', 'intent.resolved', 'agent.clarification.required', 'artifact.diff',
+  'intent.recognized', 'intent.resolved', 'edit.plan.created', 'slide.change.applied',
+  'edit.corrected', 'qa.warning', 'agent.clarification.required', 'artifact.diff',
 ]);
 
 function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessage[] {
@@ -103,6 +105,10 @@ function deduplicateMessages(messages: ProjectAgentMessage[]): ProjectAgentMessa
     result.push(m);
   }
   return result;
+}
+
+function attachmentIds(attachments: ChatAttachment[]): string[] {
+  return attachments.map((attachment) => attachment.id);
 }
 
 function reconcileArtifact(
@@ -222,7 +228,7 @@ export const useProjectStore = defineStore('project', {
   getters: {
     tasks: state => state.project?.tasks || [],
     completion(state) {
-      const tasks = state.project?.tasks || [];
+      const tasks = (state.project?.tasks || []).filter(task => task.task_type !== 'video_generation');
       return tasks.length ? Math.round(tasks.reduce((sum, task) => sum + task.progress, 0) / tasks.length) : 0;
     },
   },
@@ -348,17 +354,21 @@ export const useProjectStore = defineStore('project', {
         this.project.tasks[index] = { ...this.project.tasks[index], ...result.task };
       }
     },
-    async sendMessage(courseId: string, taskType: string, content: string) {
+    async sendMessage(courseId: string, taskType: string, content: string, attachments: ChatAttachment[] = []) {
       const local: ProjectAgentMessage = {
         id: `local-${crypto.randomUUID()}`,
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
       try {
-        const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/messages`, { content });
+        const { data } = await api.post(`/courses/${courseId}/tasks/${taskType}/messages`, {
+          content,
+          ...(attachments.length ? { attachment_ids: attachmentIds(attachments) } : {}),
+        });
         Object.assign(local, { id: data.message_id, run_id: data.run_id });
         if (this.currentTask) {
           this.currentTask.status = 'queued';
@@ -379,6 +389,7 @@ export const useProjectStore = defineStore('project', {
       resumeIfPaused = false,
       modality: PPTPolishModality = 'auto',
       activeSlideId?: string,
+      attachments: ChatAttachment[] = [],
     ) {
       const local: ProjectAgentMessage = {
         id: `local-${crypto.randomUUID()}`,
@@ -386,11 +397,12 @@ export const useProjectStore = defineStore('project', {
         content,
         status: 'pending',
         run_id: runId,
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
       try {
-        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds, resumeIfPaused, modality, activeSlideId);
+        const data = await pipelineApi.enqueue(runId, content, selectedSlideIds, resumeIfPaused, modality, activeSlideId, {}, attachmentIds(attachments));
         Object.assign(local, data.message, { status: 'completed' as const });
         if (this.currentTask) {
           this.currentTask.messages = deduplicateMessages([...(this.currentTask.messages || [])]);
@@ -410,6 +422,7 @@ export const useProjectStore = defineStore('project', {
       selectedSlideIds: string[] = [],
       modality: PPTPolishModality = 'auto',
       activeSlideId?: string,
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousTaskStatus = this.currentTask?.status;
@@ -420,6 +433,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -431,7 +445,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds, modality, activeSlideId);
+        const data = await pipelineApi.createRun(courseId, content, selectedSlideIds, modality, activeSlideId, {}, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -469,6 +483,7 @@ export const useProjectStore = defineStore('project', {
       selectedSectionIds: string[] = [],
       mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
       activeSectionId?: string,
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -477,6 +492,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -484,7 +500,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createLessonPlanRun(courseId, content, selectedSectionIds, mode, activeSectionId);
+        const data = await pipelineApi.createLessonPlanRun(courseId, content, selectedSectionIds, mode, activeSectionId, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -508,6 +524,7 @@ export const useProjectStore = defineStore('project', {
       content: string,
       selectedSectionIds: string[] = [],
       mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -516,6 +533,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -523,7 +541,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createTaskSheetRun(courseId, content, selectedSectionIds, mode);
+        const data = await pipelineApi.createTaskSheetRun(courseId, content, selectedSectionIds, mode, undefined, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -547,6 +565,7 @@ export const useProjectStore = defineStore('project', {
       content: string,
       selectedSectionIds: string[] = [],
       mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -555,6 +574,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -562,7 +582,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createExerciseRun(courseId, content, selectedSectionIds, mode);
+        const data = await pipelineApi.createExerciseRun(courseId, content, selectedSectionIds, mode, undefined, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -586,6 +606,7 @@ export const useProjectStore = defineStore('project', {
       content: string,
       selectedSectionIds: string[] = [],
       mode: 'auto' | 'content' | 'structure' | 'timing' | 'qa' = 'auto',
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -594,6 +615,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -601,7 +623,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createVerbatimRun(courseId, content, selectedSectionIds, mode);
+        const data = await pipelineApi.createVerbatimRun(courseId, content, selectedSectionIds, mode, undefined, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -626,6 +648,7 @@ export const useProjectStore = defineStore('project', {
       selectedSectionIds: string[] = [],
       selectedSceneIds: string[] = [],
       mode: VideoScriptMode = 'auto',
+      attachments: ChatAttachment[] = [],
     ) {
       const previousPipelineStatus = this.pipelineStatus;
       const previousPipelineEvents = this.pipelineEvents;
@@ -634,6 +657,7 @@ export const useProjectStore = defineStore('project', {
         role: 'user',
         content,
         status: 'pending',
+        metadata: attachments.length ? { attachments } : undefined,
         created_at: new Date().toISOString(),
       };
       if (this.currentTask) this.currentTask.messages = [...(this.currentTask.messages || []), local];
@@ -641,7 +665,7 @@ export const useProjectStore = defineStore('project', {
       this.pipelineStatus = 'queued';
       if (this.currentTask) this.currentTask.status = 'queued';
       try {
-        const data = await pipelineApi.createVideoScriptRun(courseId, content, selectedSectionIds, selectedSceneIds, mode);
+        const data = await pipelineApi.createVideoScriptRun(courseId, content, selectedSectionIds, selectedSceneIds, mode, undefined, attachmentIds(attachments));
         Object.assign(local, { id: data.message_id, run_id: data.run_id, status: 'completed' as const });
         this.pipelineStatus = 'queued';
         if (this.currentTask) {
@@ -707,6 +731,11 @@ export const useProjectStore = defineStore('project', {
       if (this.currentTask) this.currentTask.model_config_id = data.model_config_id;
       return data;
     },
+    async setTaskVisionModel(courseId: string, taskType: string, modelConfigId: string) {
+      const { data } = await api.patch(`/courses/${courseId}/tasks/${taskType}/model`, { vision_model_config_id: modelConfigId });
+      if (this.currentTask) this.currentTask.vision_model_config_id = data.vision_model_config_id;
+      return data;
+    },
     async loadMemory(courseId: string) {
       const { data } = await api.get(`/courses/${courseId}/memory`);
       if (this.project && this.project.course.id === courseId) this.project.memory = data;
@@ -726,11 +755,13 @@ export const useProjectStore = defineStore('project', {
       this.lastEventId = Math.max(this.lastEventId, event.event_id || 0);
       if (PIPELINE_EVENT_TYPES.has(type)) {
         this.pipelineEvents.push({ type, data: event as Record<string, any>, event_id: event.event_id || 0 });
-        // 修复原因：qa.issue / repair.started 携带每页 QA 问题，按 slide_id 累计展示。
+        // 修复原因：qa.issue / repair.started 携带每页 QA 问题，按 slide_id 展示。
+        // repair.started 表示新一轮修复开始：先清上一轮页级徽标，只保留当前轮，
+        // 避免多轮累计把徽标数越滚越大。
         if (type === 'qa_issue_found' || type === 'qa.issue' || type === 'repair.started') {
           const issues = collectRepairIssues(event as unknown as Record<string, any>);
           if (issues.length) {
-            const next = { ...this.slideRepairNotes };
+            const next = type === 'repair.started' ? {} : { ...this.slideRepairNotes };
             for (const issue of issues) {
               const slideId = String(issue.slide_id || '');
               if (!slideId) continue;

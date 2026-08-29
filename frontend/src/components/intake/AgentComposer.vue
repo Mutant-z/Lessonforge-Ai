@@ -73,6 +73,7 @@ function setText(text: string) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     submit();

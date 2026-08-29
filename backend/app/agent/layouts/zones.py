@@ -6,11 +6,7 @@ MARGIN_Y = 1.7
 SAFE_CONTENT_BOTTOM = 6.8
 TITLE_RAIL_Y = 0.55
 TITLE_RAIL_H = 0.8
-# 模板安全导轨左侧偏移（替代 layout.py:_content_start_x 的特例分支）
-_TEMPLATE_CONTENT_X: dict[str, dict[str, float]] = {
-    "lessonforge_deck_smart_ai": {"cover": 2.95, "default": 2.45},
-    "lessonforge_deck_academic": {"default": 2.2},
-}
+# 模板安全导轨左侧偏移：统一由 TEMPLATE_DECOR 装饰几何推导（与 layout._content_start_x 一致）。
 DEFAULT_CONTENT_X = 0.65
 
 
@@ -45,10 +41,9 @@ class LayoutZones:
 
 
 def _template_content_x(template_id: str, page_type: str) -> float:
-    table = _TEMPLATE_CONTENT_X.get(template_id)
-    if not table:
-        return DEFAULT_CONTENT_X
-    return table.get(page_type) or table.get("default") or DEFAULT_CONTENT_X
+    from app.renderers.presentation_builder import template_content_start_x
+
+    return template_content_start_x(template_id, page_type)
 
 
 def zones_for(

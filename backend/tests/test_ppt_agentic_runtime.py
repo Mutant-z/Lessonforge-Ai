@@ -130,6 +130,28 @@ def test_current_page_scope_uses_active_slide_and_plain_request_stays_global():
     assert _resolve_message_slide_ids("可以放大一点", slides) == []
 
 
+def test_explicit_page_number_overrides_stale_ui_selection_and_deictic_page():
+    from app.agent.polish_command import resolve_polish_command
+    from app.services.ppt_pipeline_service import _resolve_message_slide_ids
+
+    slides = [{"id": f"slide_{index:02d}"} for index in range(1, 14)]
+    instruction = "润色一下第四页的内容，调整本页排版与页面分布"
+    metadata = {
+        "selected_slide_ids": ["slide_13"],
+        "active_slide_id": "slide_13",
+    }
+
+    assert _resolve_message_slide_ids(instruction, slides, metadata) == ["slide_04"]
+    command = resolve_polish_command(
+        instruction,
+        target_slide_ids=["slide_13"], active_slide_id="slide_13",
+        canonical_ids=[item["id"] for item in slides],
+    )
+    assert command.scope.source == "explicit_text"
+    assert command.scope.target_slide_ids == ["slide_04"]
+    assert "scope.selection_text_conflict:text_wins" in command.ambiguities
+
+
 def test_identical_deterministic_qa_issue_is_not_retried_three_times():
     from app.agent.runtime import qa_issue_fingerprint, should_retry_qa_issues
 
@@ -252,7 +274,8 @@ def test_template_switch_publish_gate_rejects_lost_visual_resource():
 
 
 @pytest.mark.asyncio
-async def test_content_edit_publish_gate_rejects_blocking_visual_qa():
+async def test_content_edit_structural_qa_is_blocking_diagnostic():
+    source = {"id": "slide_01", "page_type": "concept", "title": "标题", "body": ["正文"], "blocks": []}
     pipeline = SimpleNamespace(
         active_intent="LOCAL_REGENERATE",
         content_policy="edit",
@@ -265,16 +288,20 @@ async def test_content_edit_publish_gate_rejects_blocking_visual_qa():
             }],
         } if name == "run_qa" else {}),
         selected_slide_ids=["slide_01"],
+        baseline_slides=[source],
+        builder=PresentationBuilder().from_ppt_content({"theme": "lessonforge_deck_academic", "slides": [source]}),
         blocking_issues=[],
         publishable=False,
     )
     runtime = SimpleNamespace(pipeline=pipeline)
+    final = {}
 
-    with pytest.raises(PPTAgentError) as caught:
-        await PPTAgentRuntime._assert_publishable(runtime, {})
+    await PPTAgentRuntime._assert_publishable(runtime, final)
 
-    assert caught.value.code == "layout_incomplete"
     assert pipeline.publishable is False
+    assert pipeline.result_status == "blocked"
+    assert pipeline.blocking_issues[0]["rule_id"] == "layout.incomplete_absolute"
+    assert pipeline.diagnostics[0]["original_severity"] == "critical"
 
 
 @pytest.mark.asyncio
@@ -463,13 +490,15 @@ async def test_visual_slot_fallback_compile_failure_preserves_page_instead_of_ra
         "id": "slide_01", "page_type": "cover", "title": "浮力探秘",
         "purpose": "建立探究情境", "body": ["八年级物理", "核心问题"],
         "blocks": [], "render_mode": "absolute",
+        # 文字 x=3.2 ≥ 推导 content_x（smart_ai 封面左栏 2.6 → 3.15），
+        # 避免场景本身触发模板导轨越界、偏离本测试的视觉槽兜底主线。
         "elements": [
             {"kind": "textbox", "content_ref": "title", "text": "浮力探秘",
-             "x": 3.0, "y": 0.8, "w": 4.0, "h": 1.0, "style": {"size": 28}},
+             "x": 3.2, "y": 0.8, "w": 4.0, "h": 1.0, "style": {"size": 28}},
             {"kind": "textbox", "content_ref": "body", "text": "八年级物理\n核心问题",
-             "x": 3.0, "y": 2.0, "w": 4.0, "h": 1.4, "style": {"size": 15}},
+             "x": 3.2, "y": 2.0, "w": 4.0, "h": 1.4, "style": {"size": 15}},
             {"kind": "textbox", "content_ref": "purpose", "text": "建立探究情境",
-             "x": 3.0, "y": 4.0, "w": 4.0, "h": 0.7, "style": {"size": 14}},
+             "x": 3.2, "y": 4.0, "w": 4.0, "h": 0.7, "style": {"size": 14}},
             {"kind": "image", "asset_id": "asset-1", "asset_path": "/tmp/img.png",
              "x": 7.5, "y": 1.2, "w": 5.0, "h": 4.4, "role": "visual"},
         ],

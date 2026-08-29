@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.blueprint import CourseBlueprintSchema
+from app.schemas.blueprint import CourseBlueprintSchema, normalize_blueprint_references
 
 MAX_OUTLINE_SECTIONS = 30
 MAX_OUTLINE_DEPTH = 3
@@ -368,6 +368,8 @@ def upgrade_lesson_plan_v2(
     - V1 的 stages（LessonStage）平移进稳定内核；
     - 展示目录按 V1 固定字段生成默认章节树（经由 lesson_plan_outline_sections）。
     """
+    if bp is not None:
+        bp = normalize_blueprint_references(bp)
     if content.get("schema_version") == "2.0":
         return LessonPlanContentV2.model_validate(content)
     bp_objectives = bp.objectives if bp else []
@@ -402,6 +404,21 @@ def upgrade_lesson_plan_v2(
             "objective_ids": [],
             "knowledge_point_ids": [],
         })
+    stage_by_id = {item["id"]: item for item in stages if item.get("id")}
+    for index, objective in enumerate(objectives):
+        blueprint_objective = next(
+            (item for item in bp_objectives if item.id == objective["blueprint_objective_id"]),
+            None,
+        )
+        candidate_stage_ids = [
+            ref for ref in (blueprint_objective.activity_ids if blueprint_objective else [])
+            if ref in stage_by_id
+        ]
+        if not candidate_stage_ids and stages:
+            candidate_stage_ids = [stages[index % len(stages)]["id"]]
+        for stage_id in candidate_stage_ids:
+            if objective["id"] not in stage_by_id[stage_id]["objective_ids"]:
+                stage_by_id[stage_id]["objective_ids"].append(objective["id"])
     course_info = {
         "title": content.get("course_info", {}).get("title") or "",
         "subject": content.get("course_info", {}).get("subject") or "",
@@ -463,6 +480,7 @@ def upgrade_lesson_plan_v2(
 
 def make_lesson_plan_v2(bp: CourseBlueprintSchema) -> LessonPlanContentV2:
     """基于已批准蓝图的确定性教学示例（Mock / 兜底路径）。"""
+    bp = normalize_blueprint_references(bp)
     objectives = [
         {
             "id": item.id,

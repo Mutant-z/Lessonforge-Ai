@@ -100,6 +100,26 @@ describe('buildStreamNodes', () => {
     expect(nodes[nodes.length - 1]).toMatchObject({ kind: 'reply', content: '已根据你的要求创建PPT V2…', streaming: false });
   });
 
+  it('keeps image and document metadata on the teacher turn', () => {
+    const turns = buildAgentTurns([], {}, [{
+      id: 'u-attachment',
+      role: 'user',
+      content: '请结合附件修改练习',
+      run_id: 'run-attachment',
+      status: 'completed',
+      metadata: {
+        attachments: [
+          { id: 'm-image', filename: '课堂照片.png', mime_type: 'image/png', size_bytes: 128 },
+          { id: 'm-doc', filename: '要求.md', mime_type: 'text/markdown', size_bytes: 64 },
+        ],
+      },
+    }]);
+
+    expect(turns[0].users[0].attachments.map(item => item.filename)).toEqual([
+      '课堂照片.png', '要求.md',
+    ]);
+  });
+
   it('renders the final reply for a full pipeline as its own response section', () => {
     const nodes = buildStreamNodes(fullRunItems, {}, [
       { id: 'a1', role: 'assistant', content: 'PPT 已生成完成，共 15 页。', run_id: 'run-1', status: 'completed' },

@@ -170,7 +170,7 @@ async def test_run_centric_api_and_slide_revisions(client, auth_headers):
     before = artifact["content_json"]["slides"]
     after = v2["content_json"]["slides"]
     result_status = terminal["plan"]["result_status"]
-    assert result_status in {"applied", "partial", "no_change"}
+    assert result_status in {"applied", "applied_with_warnings", "no_change"}
     if result_status == "no_change":
         # A dense page may have no safe 10% enlargement.  This is a successful
         # no-op and must not create an empty version.

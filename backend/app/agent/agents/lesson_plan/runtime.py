@@ -17,11 +17,15 @@ from app.agent.agents.lesson_plan.agents import (
 from app.agent.agents.lesson_plan.builder import (
     LessonPlanBuilder, build_initial_builder, upgrade_builder,
 )
-from app.agent.agents.lesson_plan.diff import diff_lesson_plans, distinct_top_level_fact_sections
+from app.agent.agents.lesson_plan.diff import (
+    diff_lesson_plans,
+    distinct_top_level_fact_sections,
+    section_visible_text,
+)
 from app.agent.agents.lesson_plan.formatting import strip_hardcoded_ordinals
 from app.agent.agents.lesson_plan.intents import (
     INTENT_AGENT_ALIASES, LessonPlanIntentDecision, agent_chain_for_intent,
-    infer_lesson_plan_intent,
+    _explicitly_separates_facts, infer_lesson_plan_intent,
 )
 from app.agent.agents.lesson_plan.qa import blocking_issues as _blocking
 from app.agent.agents.lesson_plan.qa import (
@@ -32,8 +36,9 @@ from app.agent.agents.lesson_plan.section_refs import (
     build_section_index,
     canonicalize_section_ids,
 )
-from app.agent.agents.lesson_plan.tools._common import MutationPolicy
+from app.agent.agents.lesson_plan.tools._common import MutationPolicy, atomic_edit
 from app.agent.core.error import AgentError
+from app.agent.core.gates import gates_active
 from app.agent.core.loop import run_agent_loop
 from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext
@@ -66,6 +71,22 @@ FATAL_TOOL_ERROR_CODES = frozenset({
 # 且后续角色仍可依靠已注入的角色上下文生成必需产物，因此不能把已经通过
 # Schema、教学 QA 与意图门禁的候选稿误判为不可发布。错误仍保留在遥测中。
 _NON_BLOCKING_READ_FAILURE_CODES = frozenset({"source_view_forbidden"})
+
+#: 意图契约/权限类守卫错误码：relaxed 门禁模式下不再致命（工具层也已旁路，
+#: 这里兜底防止其他抛出点把整轮修改打成 rejected）。
+_INTENT_CONTRACT_FATAL_CODES = frozenset({
+    "section_scope_violation",
+    "structure_modification_forbidden",
+    "core_field_unauthorized",
+    "mutation_contract_error",
+    "tool_not_allowed",
+})
+
+_TECHNICAL_FATAL_TOOL_ERROR_CODES = FATAL_TOOL_ERROR_CODES - _INTENT_CONTRACT_FATAL_CODES
+
+
+def _runtime_fatal_codes() -> frozenset[str]:
+    return FATAL_TOOL_ERROR_CODES if gates_active() else _TECHNICAL_FATAL_TOOL_ERROR_CODES
 
 
 @dataclass
@@ -134,7 +155,10 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
     executed_chain: list[str] = field(default_factory=list)
     mutation_policy: MutationPolicy | None = None
     #: 致命工具错误立即终止（覆盖通用基类空集，仅教学设计流水线生效）。
-    fatal_tool_error_codes: frozenset[str] = FATAL_TOOL_ERROR_CODES
+    #: relaxed 门禁模式仅保留技术性/防破坏错误码，意图契约类错误降级为可重试。
+    fatal_tool_error_codes: frozenset[str] = field(default_factory=_runtime_fatal_codes)
+    #: 教学设计的契约/权限错误不可通过继续生成来修复，立即交由上层拒绝本轮。
+    allow_fatal_self_correction: bool = False
 
     # ------------------------------------------------------------------
     # 准备
@@ -600,26 +624,149 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
         decision = self.resolved_intent
         if self.builder is None or decision is None:
             return
-        if decision.intent != "SECTION_FORMAT_EDIT":
-            return
-        if not getattr(decision, "strip_hardcoded_numbering", False):
-            return
-        targets = list(decision.target_section_ids or decision.affected_section_ids or [])
-        content = self.builder.to_content()
-        fixed = strip_hardcoded_ordinals(content, targets)
-        if fixed != content:
-            self.builder.replace_content(fixed)
-            # 确定性写操作同样登记 MutationReceipt 并触发 patch.operation.applied。
-            from app.agent.agents.lesson_plan.tools._common import build_mutation_receipt
+        if decision.intent == "SECTION_FORMAT_EDIT" and getattr(decision, "strip_hardcoded_numbering", False):
+            targets = list(decision.target_section_ids or decision.affected_section_ids or [])
+            content = self.builder.to_content()
+            fixed = strip_hardcoded_ordinals(content, targets)
+            if fixed != content:
+                self.builder.replace_content(fixed)
+                # 确定性写操作同样登记 MutationReceipt 并触发 patch.operation.applied。
+                from app.agent.agents.lesson_plan.tools._common import build_mutation_receipt
 
-            build_mutation_receipt(
-                self.tool_context,
-                tool_name="format_normalizer",
-                change_paths=[f"$.outline.sections[{sid}]" for sid in targets],
-                before_content=content,
-                after_content=fixed,
-                section_ids=targets,
-            )
+                build_mutation_receipt(
+                    self.tool_context,
+                    tool_name="format_normalizer",
+                    change_paths=[f"$.outline.sections[{sid}]" for sid in targets],
+                    before_content=content,
+                    after_content=fixed,
+                    section_ids=targets,
+                )
+
+        # “教学重难点”由蓝图/教学内核提供事实内容，展示目录由 Agent 动态维护。
+        # Agent 可能已经新增了章节但只写入 summary，或因模型返回 completed 而没有
+        # 写入 blocks；此处将已存在的事实确定性投影为可见 blocks，避免最终门禁把
+        # 一个已经满足用户请求的候选稿判为未应用。
+        fact_keys = [
+            key for key in ("key_points", "difficulty_points")
+            if key in set(decision.target_fact_keys or [])
+            or key in set(decision.required_separate_facts or [])
+        ]
+        if not fact_keys or decision.intent not in {"SECTION_EDIT", "CONTENT_ENRICH", "RESTRUCTURE"}:
+            return
+        # “分别/拆分/独立”表示教师要两个独立展示单元，不能用一个合并章节的
+        # 确定性兜底去替代模型的拆分方案；若模型没有完成拆分，应由门禁拒绝。
+        if _explicitly_separates_facts(self.context.user_instruction or ""):
+            return
+
+        content = self.builder.to_content()
+        baseline_ids = {
+            str(node.get("id") or "")
+            for node in _walk_outline((self.baseline_content.get("outline") or {}).get("sections") or [])
+        }
+        fact_set = set(fact_keys)
+
+        def is_fact_section(node: dict[str, Any]) -> bool:
+            title = str(node.get("title") or "")
+            has_combined_title = "重难点" in title or ("重点" in title and "难点" in title)
+            return bool(fact_set.intersection(set(node.get("coverage_refs") or [])) or has_combined_title)
+
+        candidate_nodes = [
+            node for node in _walk_outline((content.get("outline") or {}).get("sections") or [])
+            if is_fact_section(node)
+        ]
+        target_ids = set(decision.target_section_ids or decision.resolved_scope or self.selected_section_ids)
+        candidate_nodes = [
+            node for node in candidate_nodes
+            if str(node.get("id") or "") in target_ids
+            or not target_ids
+            or str(node.get("id") or "") not in baseline_ids
+        ]
+
+        bp = self.blueprint.content_json if hasattr(self.blueprint, "content_json") else self.blueprint
+        bp = bp or {}
+        core = content.get("pedagogical_core") or {}
+        core_patch = {
+            key: list(core.get(key) or bp.get(key) or [])
+            for key in fact_keys
+            if not core.get(key) and bp.get(key)
+        }
+
+        # 只有结构契约允许新增章节时，才为“缺少展示章节”的请求补建章节。
+        new_section_id = ""
+        if not candidate_nodes and (decision.intent == "RESTRUCTURE" or decision.structural):
+            new_section_id = "SEC-KEY-DIFFICULTIES"
+            index = 2
+            while self.builder.find_section(new_section_id) is not None:
+                index += 1
+                new_section_id = f"SEC-KEY-DIFFICULTIES-{index}"
+
+        fill_ids = [
+            str(node.get("id") or "") for node in candidate_nodes
+            if str(node.get("id") or "") and not (node.get("blocks") or [])
+        ]
+        if not new_section_id and not fill_ids and not core_patch:
+            return
+
+        values = {
+            key: list(core.get(key) or core_patch.get(key) or bp.get(key) or [])
+            for key in fact_keys
+        }
+
+        def fact_blocks() -> list[dict[str, Any]]:
+            blocks: list[dict[str, Any]] = []
+            labels = (("key_points", "教学重点"), ("difficulty_points", "教学难点"))
+            for key, label in labels:
+                if key not in fact_set or not values.get(key):
+                    continue
+                blocks.append({"kind": "note", "text": label})
+                blocks.append({
+                    "kind": "bullets",
+                    "items": [str(item) for item in values[key]],
+                    "numbered": False,
+                })
+            return blocks
+
+        blocks = fact_blocks()
+        if not blocks:
+            return
+
+        def mutate(builder: LessonPlanBuilder) -> None:
+            if core_patch:
+                builder.update_core(core_patch)
+            if new_section_id:
+                builder.add_section(new_section_id, "教学重点与难点", index=2)
+                builder.write_section(
+                    new_section_id,
+                    summary="明确本课教学重点与教学难点。",
+                    coverage_refs=fact_keys,
+                    blocks=blocks,
+                )
+            for section_id in fill_ids:
+                builder.write_section(section_id, blocks=blocks)
+
+        if self.tool_context is None:
+            return
+        self.tool_context._current_tool_name = "deterministic_fact_visibility"
+        atomic_edit(
+            self.tool_context,
+            mutate,
+            change_paths=(
+                ([f"$.pedagogical_core.{key}" for key in core_patch])
+                + ([f"$.outline.sections[{new_section_id}]"] if new_section_id else [])
+                + [f"$.outline.sections[{section_id}]" for section_id in fill_ids]
+            ),
+            section_ids=([new_section_id] if new_section_id else []) + fill_ids,
+            is_add_section=bool(new_section_id),
+            core_keys=list(core_patch),
+        )
+        if new_section_id:
+            decision.target_section_ids = list(dict.fromkeys(
+                list(decision.target_section_ids or []) + [new_section_id]
+            ))
+            decision.resolved_scope = list(dict.fromkeys(
+                list(decision.resolved_scope or []) + [new_section_id]
+            ))
+            decision.affected_section_ids = list(decision.resolved_scope)
 
     async def _collect_qa_issues(self) -> None:
         """从 pedagogy_qa 产物读取统一验证报告（LLM 或 Mock 均已写入 lesson_qa）。
@@ -958,7 +1105,8 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
         # Pydantic model_dump 填充默认值导致的假阳性差异。
         # 返修未收敛仍存在阻断问题优先于 no_change；不能用“没有变化”掩盖
         # 一个已知不可发布的候选稿。
-        if _blocking(self.blocking_issues):
+        # relaxed 门禁模式：QA 阻断问题降级为 diagnostics，不再拒绝发布。
+        if gates_active() and _blocking(self.blocking_issues):
             self.result_status = "rejected"
             self.publishable = False
             await self._emit_result_status_event()
@@ -968,7 +1116,9 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
             self.changed = False
             await self._emit_result_status_event()
             return
-        if not self.intent_gate.get("passed", True):
+        # relaxed 门禁模式：意图完成度/范围完整性/内容退化等门禁结果只保留在
+        # intent_gate 里作为 diagnostics，不再拦截发布。
+        if gates_active() and not self.intent_gate.get("passed", True):
             if self.source_artifact is None:
                 raise AgentError(
                     str(self.intent_gate.get("code") or "lesson_plan_gate_failed"),
@@ -997,8 +1147,15 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
                     "message": "本轮未对候选稿产生任何变更，但用户要求的修改未落实；"
                                "请检查目标章节是否存在于当前文档、指令所述部分是否可定位。",
                 }
-                self.result_status = "rejected"
-                self.publishable = False
+                # relaxed 门禁模式：未产生变更时按 no_change 结束并给出提示，
+                # 不再打成 rejected（右侧工作区保持原内容展示）。
+                if gates_active():
+                    self.result_status = "rejected"
+                    self.publishable = False
+                    self.changed = False
+                    await self._emit_result_status_event()
+                    return
+                self.result_status = "no_change"
                 self.changed = False
                 await self._emit_result_status_event()
                 return
@@ -1026,7 +1183,17 @@ class LessonPlanAgentRuntime(AgentRuntimeState):
                 "core_content": "core_content_changed",
                 "timing": "timing_changed",
             }.get(kind)
-            if key and not diff.get(key):
+            satisfied = bool(key and diff.get(key))
+            if kind == "section_content" and not satisfied:
+                # diff_lesson_plans 对共享章节统计正文变化；新增章节没有 baseline
+                # 记录，但其 blocks/summary 仍然是本轮真实写入的正文，应满足
+                # “新增章节并完成内容”的契约。
+                added_ids = set(diff.get("added_sections") or [])
+                satisfied = any(
+                    str(node.get("id") or "") in added_ids and section_visible_text(node)
+                    for node in _walk_outline((content.get("outline") or {}).get("sections") or [])
+                )
+            if key and not satisfied:
                 failures.append(f"required_change_missing:{kind}")
         fact_owners: dict[str, str] = {}
         if decision.required_separate_facts:

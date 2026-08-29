@@ -47,12 +47,25 @@ else
   echo "正在启动后端…"
   if launchd_available; then
     remove_launchd_service "$BACKEND_LAUNCH_LABEL"
+    # ``launchctl submit`` does not reliably inherit proxy variables from the
+    # invoking shell.  In fake-IP/enhanced proxy modes external hostnames may
+    # resolve to 198.18.0.0/15 and are unreachable unless the backend uses the
+    # local proxy.  Pass the already configured environment through explicitly.
     launchctl submit \
       -l "$BACKEND_LAUNCH_LABEL" \
       -o "$BACKEND_LAUNCH_LOG" \
       -e "$BACKEND_LAUNCH_LOG" \
-      -- /bin/sh -c 'cd "$1" && export PYTHONPATH="$2"; exec "$3" -m uvicorn app.main:app --host "$4" --port "$5"' \
-      lessonforge-backend "$PROJECT_DIR/backend" "$BACKEND_SITE_PACKAGES" "$BACKEND_PYTHON" "$BACKEND_HOST" "$BACKEND_PORT"
+      -- /bin/sh -c '
+        cd "$1" || exit 1
+        export PYTHONPATH="$2"
+        export HTTP_PROXY="$6" HTTPS_PROXY="$7" ALL_PROXY="$8" NO_PROXY="$9"
+        export http_proxy="${10}" https_proxy="${11}" all_proxy="${12}" no_proxy="${13}"
+        exec "$3" -m uvicorn app.main:app --host "$4" --port "$5"
+      ' lessonforge-backend \
+      "$PROJECT_DIR/backend" "$BACKEND_SITE_PACKAGES" "$BACKEND_PYTHON" \
+      "$BACKEND_HOST" "$BACKEND_PORT" \
+      "${HTTP_PROXY:-}" "${HTTPS_PROXY:-}" "${ALL_PROXY:-}" "${NO_PROXY:-}" \
+      "${http_proxy:-}" "${https_proxy:-}" "${all_proxy:-}" "${no_proxy:-}"
     backend_pid="$(launchd_service_pid "$BACKEND_LAUNCH_LABEL" || true)"
     [ -n "$backend_pid" ] && printf '%s\n' "$backend_pid" > "$BACKEND_PID_FILE"
   else

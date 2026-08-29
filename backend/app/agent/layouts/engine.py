@@ -978,16 +978,11 @@ def _compile_image_geometry(
             })
 
     ranked = sorted(viable, key=lambda item: item["rank_score"], reverse=True)
-    selectable = [item for item in ranked if item["objectives_passed"] or not objectives]
+    # Objective results are diagnostic in V3.  Geometry/content invariants
+    # define viability; select the best viable image mutation even if the
+    # requested percentage cannot be reached exactly.
+    selectable = list(ranked)
     if not selectable:
-        if viable:
-            failed = [
-                result["metric"] for result in viable[0]["objective_results"]
-                if result.get("hard_requirement") and not result.get("passed")
-            ]
-            return preserved(
-                f"{slide_id} 的安全候选未达到图片目标（{'、'.join(failed)}），已保留原布局"
-            )
         return preserved(f"{slide_id} 的图片调整会越界或遮挡内容，已保留原布局")
 
     selected = selectable[0]
@@ -1403,17 +1398,12 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
     ]
 
     baseline_signature = _candidate_signature(source_elements) if source_elements else ""
-    selectable = [
-        candidate for candidate in viable
-        if candidate.get("publishable") or (not objectives and not candidate.get("quality_component_regressions"))
-    ]
+    # V3 treats quality/objective results as diagnostics.  Structural validity
+    # is the only selection boundary; the highest-ranked renderable candidate
+    # is applied even when a requested objective is only partially satisfied.
+    selectable = list(viable)
     if baseline_signature:
         selectable = [candidate for candidate in selectable if candidate["signature"] != baseline_signature]
-    previewable = [
-        candidate for candidate in viable
-        if candidate.get("preview_eligible")
-        and (not baseline_signature or candidate["signature"] != baseline_signature)
-    ]
     warnings: list[str] = []
     if invalid_allocations:
         warnings.append(
@@ -1421,65 +1411,6 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
             + "、".join(invalid_allocations[:8])
         )
 
-    # No objective winner is a successful per-page no-change.  Returning a
-    # preserved spec lets the existing staging/publish policy keep other pages
-    # while avoiding an empty version for this one.
-    force_confirmation = False
-    if not selectable and previewable:
-        selectable = previewable
-        force_confirmation = True
-    if not selectable and source_elements:
-        near = max(viable, key=lambda candidate: candidate["rank_score"])
-        failed_metrics = [
-            item["metric"] for item in near["objective_results"]
-            if item.get("hard_requirement") and not item.get("passed")
-        ]
-        warning = (
-            "候选均未达到明确目标（" + "、".join(failed_metrics) + "），已保留原布局"
-            if failed_metrics else "候选与原页没有可感知差异，已保留原布局"
-        )
-        warnings.append(warning)
-        rejection_code = (
-            "quality_gate_not_met" if "layout_quality" in failed_metrics
-            else "objective_unmet" if failed_metrics
-            else "identical_to_baseline"
-        )
-        rejection_reasons = [
-            *(f"未达到目标：{metric}" for metric in failed_metrics),
-            *(f"质量分项退化：{metric}" for metric in near.get("quality_component_regressions") or []),
-        ] or [warning]
-        return {
-            "slide_id": slide_id,
-            "layout_type": "preserve_original",
-            "designRationale": warning,
-            "elements": source_elements,
-            "render_mode": str(slide.get("render_mode") or "absolute"),
-            "compile_status": "preserved",
-            "requested_style": requested_params,
-            "effective_style": {},
-            "warnings": warnings,
-            "content_allocation": allocation,
-            "compile_attempts": attempts,
-            "selected_candidate_id": None,
-            "decision": "preserved",
-            "best_candidate_id": near["candidate_id"],
-            "best_candidate_metrics": near["metrics"],
-            "best_candidate_quality_delta": near["quality_delta"],
-            "rejection_code": rejection_code,
-            "rejection_reasons": rejection_reasons,
-            "requested_objectives": objectives,
-            "objective_results": near["objective_results"],
-            "baseline_metrics": baseline_metrics,
-            "final_metrics": baseline_metrics,
-            "quality_delta": 0.0,
-            "candidate_rankings": candidate_rankings,
-            "material_change": False,
-            "candidate_score_gap": (
-                round(float(ranked_viable[0]["rank_score"] - ranked_viable[1]["rank_score"]), 2)
-                if len(ranked_viable) > 1 else None
-            ),
-            "requires_candidate_confirmation": False,
-        }
     if not selectable:
         selectable = viable
 
@@ -1508,7 +1439,7 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         )
     ] if structural_type and not requested_viable else []
     selected = max(
-        requested_viable or structural_viable or selectable,
+        requested_viable or (structural_viable if not source_elements else []) or selectable,
         key=lambda candidate: candidate["rank_score"],
     )
     selected["attempt"]["selected"] = True
@@ -1521,12 +1452,8 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         (item for item in candidate_rankings if item["candidate_id"] == selected["candidate_id"]),
         None,
     )
-    # A close but unpublishable candidate must not trigger a user choice.
-    # Compare only candidates that passed all hard objectives (``selectable``
-    # already applies that gate and removes the unchanged baseline).
     confirmation_pool = list({
-        candidate["candidate_id"]: candidate
-        for candidate in [*selectable, *previewable]
+        candidate["candidate_id"]: candidate for candidate in selectable
     }.values())
     competing_candidates = sorted(
         (
@@ -1567,25 +1494,14 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         warnings.append(
             f"{requested_layout_type} {fallback_reason}，已选择 {layout_type} / {effective_style['font_tier']}"
         )
-    requires_candidate_confirmation = bool(
-        source_elements
-        and selected_ranking
-        and (
-            force_confirmation
-            or (competing and abs(float(candidate_score_gap or 0)) < 5.0)
-        )
-        and any(item["metric"] in {
-            "layout_quality", "vertical_utilization", "whitespace_balance",
-            "horizontal_utilization", "contrast",
-        } for item in objectives)
-    )
+    requires_candidate_confirmation = False
     out: dict[str, Any] = {
         "slide_id": slide_id,
         "layout_type": layout_type,
         "designRationale": str(directive.get("rationale") or f"预设版式 {requested_layout_type}")
         + (
             f"；全量比较后因{fallback_reason}选择 {layout_type}"
-            if fallback_reason else "；已通过候选质量排序与目标门禁"
+            if fallback_reason else "；已自动选择综合评分最高的可渲染候选"
         ),
         "elements": bound,
         "render_mode": "absolute",
@@ -1596,7 +1512,7 @@ def compile_layout(template_id: str, slide: dict[str, Any], directive: dict[str,
         "content_allocation": allocation,
         "compile_attempts": attempts,
         "selected_candidate_id": selected["candidate_id"],
-        "decision": "preview_required" if requires_candidate_confirmation else "applied",
+        "decision": "applied",
         "best_candidate_id": selected["candidate_id"],
         "best_candidate_metrics": selected["metrics"],
         "best_candidate_quality_delta": selected["quality_delta"],

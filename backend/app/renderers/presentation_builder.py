@@ -26,6 +26,37 @@ SLIDE_WIDTH = 13.333
 SLIDE_HEIGHT = 7.5
 EMU_PER_INCH = 914400
 FIT_FLOOR_PT = 8.0
+#: 无纵向导轨模板的安全内容区左边界（与 layout.MARGIN_X 保持一致）。
+DEFAULT_CONTENT_START_X = 0.65
+
+
+def template_content_start_x(template_id: str, page_type: str = "concept") -> float:
+    """由装饰几何推导模板安全内容区左边界（唯一定义点）。
+
+    布局引擎（内容列起点）、zones、QA 的 ``visual.overlaps_template`` 判定
+    都消费这一个值，保证"摆放"与"检查"永远一致；新增模板只需在
+    ``TEMPLATE_DECOR`` 声明装饰，无需再改任何布局代码。
+
+    规则：取页面角色（cover/end）+ shell 装饰中贴左缘的通栏矩形导轨
+    （高 ≥ 60% 页高、x ≤ 1.0）的最右边缘，加 0.55 呼吸间距；
+    无纵向导轨的模板（如 ai_future/business 仅有上下细条）回退默认边距。
+    """
+    decor = TEMPLATE_DECOR.get(template_id) or {}
+    role_key = str(page_type or "").lower()
+    role = "cover" if role_key == "cover" else ("end" if role_key in {"end", "thanks", "closing"} else "shell")
+    items = [*(decor.get("shell") or []), *(decor.get(role) or [])]
+    rail_right = 0.0
+    for item in items:
+        try:
+            kind = item[0]
+            x, _y, w, h = float(item[1]), float(item[2]), float(item[3]), float(item[4])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if kind == "rect" and h >= SLIDE_HEIGHT * 0.6 and x <= 1.0:
+            rail_right = max(rail_right, x + w)
+    if rail_right <= 0.0:
+        return DEFAULT_CONTENT_START_X
+    return min(rail_right + 0.55, 3.2)
 
 
 # 每套模板内容页/封面/尾页的装饰元素（源自 scripts/build_generic_decks.py 的 shell/cover/end）
@@ -140,6 +171,15 @@ class PresentationBuilder:
             "style": fields.pop("style", {}),
             **fields,
         }
+        from app.agent.edit_v3 import stable_hash
+        content_ref = str(element.get("content_ref") or "")
+        role = str(element.get("role") or kind)
+        element["semantic_id"] = f"{slide_id}:{content_ref or role}:{element_id}"
+        element["origin_content_ref"] = content_ref
+        element["revision_hash"] = stable_hash({
+            key: element.get(key)
+            for key in ("kind", "role", "content_ref", "text", "x", "y", "w", "h", "style", "asset_id")
+        })
         slide["elements"].append(element)
         return element_id
 
@@ -270,6 +310,8 @@ class PresentationBuilder:
             )
             self._source_elements_present[restored_id] = "elements" in slide
             self.slides.append(restored)
+        from app.agent.edit_v3 import ensure_stable_element_identity
+        ensure_stable_element_identity(self.slides)
         return self
 
     def to_ppt_content(self) -> dict[str, Any]:

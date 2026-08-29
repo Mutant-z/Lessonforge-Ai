@@ -16,6 +16,7 @@ import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
 import LessonPlanPreviewWorkbench from '../lessonPlan/LessonPlanPreviewWorkbench.vue';
 import type { LessonPlanMode } from '../../../api/pipeline';
+import type { ChatAttachment } from '../../../types/project';
 
 const props = defineProps<{
   courseId: string;
@@ -106,14 +107,14 @@ async function loadDetail() {
   }
 }
 
-async function send(content: string, modality: string = 'auto') {
+async function send(content: string, modality: string = 'auto', attachments: ChatAttachment[] = []) {
   const modeValue = (['auto', 'content', 'structure', 'timing', 'qa'].includes(modality) ? modality : 'auto') as LessonPlanMode;
   const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
   if (paused.value && runId) {
     // 暂停后发送：先恢复运行，再以同一指令创建 message 运行。
     await resume();
     pipelineStore.beginRun();
-    await projectStore.createLessonPlanRun(props.courseId, content, selectedSectionIds.value, modeValue, activeSectionId.value ?? undefined);
+    await projectStore.createLessonPlanRun(props.courseId, content, selectedSectionIds.value, modeValue, activeSectionId.value ?? undefined, attachments);
     await loadDetail();
     startPolling();
   } else if (isRunning.value) {
@@ -122,7 +123,7 @@ async function send(content: string, modality: string = 'auto') {
     return;
   } else {
     pipelineStore.beginRun();
-    await projectStore.createLessonPlanRun(props.courseId, content, selectedSectionIds.value, modeValue, activeSectionId.value ?? undefined);
+    await projectStore.createLessonPlanRun(props.courseId, content, selectedSectionIds.value, modeValue, activeSectionId.value ?? undefined, attachments);
     await loadDetail();
   }
   clearTargetSections();
@@ -163,6 +164,10 @@ async function handleHumanResponse(requestId: string, choice: string, data: Reco
 
 function setModel(modelId: string) {
   void projectStore.setTaskModel(props.courseId, props.taskType, modelId);
+}
+
+function setVisionModel(modelId: string) {
+  void projectStore.setTaskVisionModel(props.courseId, props.taskType, modelId);
 }
 
 // Splitter resizing logic
@@ -300,17 +305,21 @@ watch(
       />
 
       <AgentComposer
+        :course-id="props.courseId"
         :target-slide="activeSectionId as any"
         :target-slides="selectedSectionIds as any"
         :is-running="isRunning"
         :pausing="pausing || pipelineStore.pauseLoading"
         :model-config-id="task?.model_config_id"
+        :vision-model-config-id="task?.vision_model_config_id"
+        :show-vision-model="true"
         task-type="lesson_plan"
         unit-name="节"
         @send="send"
         @pause="pause"
         @clear-target-slide="clearTargetSections"
         @change-model="setModel"
+        @change-vision-model="setVisionModel"
       />
     </aside>
 

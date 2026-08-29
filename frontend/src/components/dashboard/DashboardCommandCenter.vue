@@ -58,6 +58,14 @@ function handleSubmit() {
   if (!promptInput.value.trim() || props.startingIntake) return;
   emit('submitIntake', promptInput.value.trim(), attachedFiles.value);
 }
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    handleSubmit();
+  }
+}
 </script>
 
 <template>
@@ -91,7 +99,7 @@ function handleSubmit() {
           class="composer-textarea"
           rows="3"
           placeholder="例如：为高一学生制作一节 15 分钟的《牛顿第二定律：加速度与合外力关系》微课，包含实验引导与考点精讲..."
-          @keydown.enter.prevent="handleSubmit"
+          @keydown="onKeydown"
         ></textarea>
 
         <!-- Attached Files Pill List (If Any) -->

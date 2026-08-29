@@ -11,8 +11,11 @@ const router = createRouter({
     {
       path: '/', component: AppLayout, children: [
         { path: '', component: () => import('../views/DashboardView.vue') },
+        { path: 'videos', component: () => import('../views/VideoCenterView.vue'), meta: protectedRoute },
+        { path: 'videos/:courseId', component: () => import('../views/VideoWorkspaceView.vue'), meta: protectedRoute },
         { path: 'courses/new', component: () => import('../views/CourseIntakeView.vue'), meta: protectedRoute },
         { path: 'courses/:id/project', component: () => import('../views/ProjectOverviewView.vue'), meta: protectedRoute },
+        { path: 'courses/:id/tasks/video_generation', redirect: to => `/videos/${to.params.id}`, meta: protectedRoute },
         { path: 'courses/:id/tasks/:taskType', component: () => import('../views/TaskWorkspaceView.vue'), meta: protectedRoute },
         { path: 'courses/:id/blueprint', redirect: to => `/courses/${to.params.id}/project`, meta: protectedRoute },
         { path: 'courses/:id/generation/:runId', redirect: to => `/courses/${to.params.id}/project`, meta: protectedRoute },

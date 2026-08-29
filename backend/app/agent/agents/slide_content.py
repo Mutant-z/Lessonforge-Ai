@@ -34,8 +34,8 @@ class SlideContentAgent(Agent):
         revision_rule = (
             "\n这是对已有 PPT 的修订：必须按「用户/教师指令」实际改写文字措辞"
             "（润色/精简/调整表达等），保持页面结构与教学信息，不得增删页面。\n"
-            "如需补写或填充内容，用更多短条目承载而非加长单条：每页≤6条、"
-            "每条≤25字、正文与内容块合计≤120字，严格遵守 ppt_design_knowledge 密度上限。\n"
+            "如需补写或填充内容，用更多短条目承载而非加长单条：优先每页≤6条、"
+            "每条≤25字；总字数仅作设计参考，是否容纳以真实渲染和溢出检查为准。\n"
             "内容块只能使用这些结构：lead/bullets/steps/compare/quote/visual/note，"
             "不要发明其他结构类型（如 cards）。\n"
             "steps 块必须写成 {kind:'steps',steps:[{title,detail}]}，步骤说明字段只能用 detail。\n"

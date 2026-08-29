@@ -39,6 +39,7 @@ from app.agent.agents.exercise.intents import (
 from app.agent.agents.exercise.qa import blocking_issues as _blocking
 from app.agent.agents.exercise.qa import fingerprint as _fingerprint
 from app.agent.core.error import AgentError
+from app.agent.core.gates import gates_active
 from app.agent.core.loop import run_agent_loop
 from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext
@@ -46,6 +47,7 @@ from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan, ToolCall
 from app.core.database import SessionLocal
 from app.models.entities import AgentHumanRequest, AgentRunInstruction, PipelineRun
 from app.schemas.artifact import ExerciseContent
+from app.services.chat_attachment_service import apply_runtime_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -306,11 +308,17 @@ class ExerciseAgentRuntime(AgentRuntimeState):
             if not rows:
                 return []
             merged_texts: list[str] = []
+            attachment_metadata: list[dict[str, Any]] = []
             for row in rows:
                 row.status = "merged"
                 row.applied_at = datetime.now(timezone.utc)
                 merged_texts.append(row.content or "")
+                attachment_metadata.extend((row.metadata_json or {}).get("attachments") or [])
             await db.commit()
+            if attachment_metadata:
+                await apply_runtime_attachments(
+                    db, self.course, self, {"attachments": attachment_metadata},
+                )
         if not merged_texts:
             return []
         merged = "\n".join(merged_texts)
@@ -487,7 +495,8 @@ class ExerciseAgentRuntime(AgentRuntimeState):
                     row.status = "running"
                     await db.commit()
         # 需要人工确认且尚未确认 → 创建确认请求，原地暂停。
-        if decision.requires_confirmation and not self.confirmation_tokens:
+        # relaxed 门禁模式：低置信度/破坏性关键词不再拦截，按当前意图直接执行。
+        if gates_active() and decision.requires_confirmation and not self.confirmation_tokens:
             await self._request_confirmation(decision)
             return
         if (
@@ -611,7 +620,10 @@ class ExerciseAgentRuntime(AgentRuntimeState):
                 await self.emitter.revision_completed(round_index + 1, applied_changes=repair_agents)
 
     async def _collect_qa_issues(self) -> None:
-        """运行 exercise_qa 角色收集阻断问题（LLM 质询 + 确定性门禁合并）。"""
+        """运行 exercise_qa 角色收集阻断问题（LLM 质询 + 确定性门禁合并）。
+
+        relaxed 门禁模式：QA 结果只作为 qa.issues 事件提示，不进入返修/阻断。
+        """
         from app.agent.agents.exercise.agents import EXERCISE_QA
 
         self.blocking_issues = []
@@ -619,6 +631,20 @@ class ExerciseAgentRuntime(AgentRuntimeState):
             return
         decision = await EXERCISE_QA.decide(self.tool_context)
         output = decision.output or {}
+        if not gates_active():
+            if self.emitter is not None and output.get("issues"):
+                await self.emitter.emit_domain(
+                    "qa.issues",
+                    agent={"id": "exercise_qa"},
+                    message=decision.summary,
+                    payload={
+                        "issues": output.get("issues"),
+                        "blocking": [],
+                        "fingerprint": output.get("fingerprint"),
+                        "source": output.get("source"),
+                    },
+                )
+            return
         self.blocking_issues = list(output.get("issues") or [])
         if self.emitter is not None and output.get("issues"):
             await self.emitter.emit_domain(
@@ -664,7 +690,8 @@ class ExerciseAgentRuntime(AgentRuntimeState):
         self.after_type_counts = self.builder.question_type_counts()
         self.actual_delta = sum(self.after_type_counts.values()) - sum(self.before_type_counts.values())
         contract_failures = self._enforce_intent_contract(content)
-        if contract_failures:
+        # relaxed 门禁模式：意图契约降级为 diagnostics，不再拒绝发布。
+        if contract_failures and gates_active():
             self.result_status = "rejected"
             self.changed = False
             self.publishable = False
@@ -884,7 +911,11 @@ async def _call_agent(runtime: ExerciseAgentRuntime, agent_key: str, agent, deci
             message=f"正在将 {question_id} 原样移动到目标分区。",
         )
     if (
-        is_mock_provider(runtime.provider)
+        (
+            getattr(runtime.generation_run, "trigger_type", "") == "initial"
+            and runtime.source_artifact is None
+        )
+        or is_mock_provider(runtime.provider)
         or agent_key in {"intent_planner", "repair_router", "exercise_qa"}
         or (agent_key == "finalizer" and runtime.intent_plan and runtime.intent_plan.operation == "ensure_question_type_count")
     ):

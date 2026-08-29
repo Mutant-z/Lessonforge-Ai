@@ -271,6 +271,15 @@ async def test_intent_section_by_keyword():
 
 
 @pytest.mark.asyncio
+async def test_intent_paragraph_formatting_by_keyword():
+    plan = await infer_verbatim_intent(
+        _MockIntentProvider(), "message", "润色一下这部分内容，进行分段，不要堆成一行"
+    )
+    assert plan.intent == "SECTION_EDIT"
+    assert plan.mutates_document
+
+
+@pytest.mark.asyncio
 async def test_intent_course_title_is_metadata_only():
     plan = await infer_verbatim_intent(_MockIntentProvider(), "message", "课程名称修改为阿基米德原理与浮力产生的原因")
     assert plan.intent == "COURSE_METADATA_UPDATE"
@@ -449,6 +458,26 @@ async def test_runtime_no_change_when_identical(client, auth_headers, _runtime_c
     runtime = await _make_runtime(_runtime_course, instruction="嗯")
     await runtime.run()
     assert runtime.result_status in {"no_change", "applied"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_paragraph_completion_without_line_break(
+    client, auth_headers, _runtime_course,
+):
+    runtime = await _make_runtime(
+        _runtime_course,
+        instruction="润色一下这部分内容，进行分段，现在的内容全部堆成一行了",
+    )
+    await runtime._prepare()
+    runtime.selected_section_ids = ["VB-01"]
+    from app.agent.schemas import ToolResult
+    await runtime.record_tool_mutation(
+        "verbatim_director", None, ToolResult(output={"affected_section_ids": ["VB-01"]})
+    )
+    assert runtime.affected_section_ids == ["VB-01"]
+    assert runtime._paragraph_format_completion_issue()
+    runtime.builder.sections[0]["required_text"] += "\n\n这是新增的可见段落。"
+    assert runtime._paragraph_format_completion_issue() is None
 
 
 @pytest.mark.asyncio

@@ -257,10 +257,9 @@ def semantic_body_refs(slide: dict[str, Any]) -> list[tuple[str, str]]:
     return items
 
 
-# 与 ppt_design_knowledge 的 density_limits 保持一致（标题30 / 每条25 / 每页6 / 合计120）。
+# 单条和条目数用于生成提示；页面总承载量由真实渲染判断。
 DENSITY_ITEM_CHARS = 25
 DENSITY_BODY_ITEMS = 6
-DENSITY_BODY_CHARS = 120
 # 常见装饰前缀（emoji/项目符号），会虚增密度字符数。
 _PREFIX_STRIP_CHARS = "•-*●○◆◇🔹🔸💡⚓🎈✨✅📌✏️💬⭐🔥🎯💪📚🧠👀⚠️❓❗❗️💡"
 

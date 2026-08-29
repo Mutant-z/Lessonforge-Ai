@@ -452,6 +452,65 @@ def test_message_run_invokes_multiple_llm_calls_and_tool_results_feed_back():
     LessonPlanContentV2.model_validate(runtime.draft_content)
 
 
+def test_combined_key_difficulty_section_is_applied_when_model_only_adds_summary():
+    """“教学重难点”可以合并展示，且新增章节只有 summary 时也要补齐可见正文。"""
+    intent = LessonPlanIntentDecision(
+        intent="RESTRUCTURE", structural=True,
+        required_change_kinds=["outline_structure"],
+        required_separate_facts=["key_points", "difficulty_points"],
+        must_be_distinct_top_level=True,
+    )
+    provider = _ScriptedProvider(intent, [
+        AgentDecision(tool_calls=[ToolCall(
+            tool_name="lesson_add_section",
+            input={
+                "section_id": "SEC-KEY-DIFFICULTIES",
+                "title": "教学重难点",
+                "summary": "明确本课教学重点与教学难点",
+                "coverage_refs": ["key_points", "difficulty_points"],
+            },
+        )]),
+        AgentDecision(completed=True, output={"outline": []}, summary="目录已补充"),
+        # 该轮模型没有继续写 blocks，运行时确定性补全展示内容。
+        AgentDecision(completed=True, output={"core": {}}, summary="内核保持一致"),
+        AgentDecision(completed=True, output={"content": {}}, summary="终稿"),
+    ])
+    source = make_lesson_plan_v2(make_bp()).model_dump()
+    runtime = _make_runtime(provider, instruction="缺少了教学重难点", mode="auto")
+    runtime.source_artifact = SimpleNamespace(content_json=source, version=3)
+    asyncio.run(runtime.run())
+
+    section = next(
+        item for item in runtime.draft_content["outline"]["sections"]
+        if item["id"] == "SEC-KEY-DIFFICULTIES"
+    )
+    assert runtime.resolved_intent.must_be_distinct_top_level is False
+    assert runtime.result_status == "applied"
+    assert runtime.intent_gate["passed"] is True
+    assert runtime.diff_summary["section_content_changed"] is True
+    assert section["blocks"]
+    assert "教学重点" in runtime.draft_markdown
+    assert "教学难点" in runtime.draft_markdown
+    LessonPlanContentV2.model_validate(runtime.draft_content)
+
+
+def test_mock_missing_key_difficulty_request_creates_visible_section():
+    """无模型工具调用时，确定性回退也不能把明确的补充请求判为 no_change。"""
+    from app.providers.llm.mock import MockProvider
+
+    source = make_lesson_plan_v2(make_bp()).model_dump()
+    runtime = _make_runtime(MockProvider(), instruction="缺少了教学重难点，进行补充", mode="auto")
+    runtime.source_artifact = SimpleNamespace(content_json=source, version=3)
+    asyncio.run(runtime.run())
+
+    assert runtime.result_status == "applied"
+    assert any(
+        item["title"] == "教学重点与难点"
+        and item["blocks"]
+        for item in runtime.draft_content["outline"]["sections"]
+    )
+
+
 def test_assessment_and_reflection_split_requires_distinct_top_level_sections():
     instruction = "教学评价与教学反思应该分成两个部分"
     intent = LessonPlanIntentDecision(

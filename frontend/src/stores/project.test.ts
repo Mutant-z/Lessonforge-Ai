@@ -540,7 +540,7 @@ describe('project task store', () => {
     });
   });
 
-  it('accumulates per-slide repair notes from qa_issue_found / qa.issue and repair.started events', () => {
+  it('resets per-slide repair notes when a new repair round starts, keeping only the current round', () => {
     const store = useProjectStore();
     store.project = structuredClone(project);
     store.currentTask = store.project.tasks[0];
@@ -560,8 +560,9 @@ describe('project task store', () => {
       },
     });
 
+    // 上一轮的 content.not_rendered 徽标不跨轮累计：新轮开始即重置，
+    // 页面徽标只反映当前轮待修复的问题（否则徽标数会随轮数越滚越大）。
     expect(store.slideRepairNotes['slide_03']).toEqual([
-      '严重：页面语义文字没有进入最终渲染层（content.not_rendered）',
       '主要：页面内容只覆盖画布少部分，大面积空白（layout.blank_region）',
     ]);
     expect(store.slideRepairNotes['slide_07']).toEqual([

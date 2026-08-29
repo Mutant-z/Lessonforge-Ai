@@ -7,7 +7,6 @@
  */
 import { computed, ref, watch } from 'vue';
 import type { VideoScriptContent, VideoScriptContentV4 } from '../../../types';
-import { videoResolutionLabel } from '../../../utils/videoResolution';
 
 const props = defineProps<{
   content: VideoScriptContent | VideoScriptContentV4 | null;
@@ -15,7 +14,6 @@ const props = defineProps<{
   draft?: boolean;
   affectedSectionIds?: string[];
   affectedSceneIds?: string[];
-  preferredResolution?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -110,7 +108,7 @@ watch(() => props.content, () => {
           <span class="masthead-status-chip" :class="draft ? 'draft' : 'official'">{{ draft ? '⚡ 候选稿' : '✓ 正式版本' }}</span>
         </div>
         <h1 class="masthead-title">{{ content?.course_info?.course_title || '微课视频脚本设计' }}</h1>
-        <p class="masthead-desc">Doubao-Seedance-2.5 原生有声分段脚本 · AI 导演级视听规划</p>
+        <p class="masthead-desc">微课画面、口播与节奏规划</p>
       </div>
 
       <div class="masthead-metrics">
@@ -145,20 +143,16 @@ watch(() => props.content, () => {
       </div>
     </header>
 
-    <!-- 生产契约与渲染参数 -->
+    <!-- 下游视频模型会自动匹配输出参数。 -->
     <section class="contract-banner">
-      <div class="contract-label"><span class="contract-icon">📋</span>生产契约</div>
+      <div class="contract-label">生成方式</div>
       <div class="contract-tags">
-        <span class="contract-tag">📐 16:9 画幅</span>
-        <span class="contract-tag">📺 {{ videoResolutionLabel(props.preferredResolution) }} 分辨率</span>
-        <span class="contract-tag">
-          ⏱️ {{ content?.production_settings?.min_clip_seconds && content?.production_settings?.max_clip_seconds ? `${content.production_settings.min_clip_seconds}–${content.production_settings.max_clip_seconds} 秒/段` : '8–15 秒/段' }}
-        </span>
-        <span class="contract-tag voice">🎙️ 模型原生语音</span>
-        <span class="contract-tag subtitle">💬 字幕由 ASR 生成</span>
+        <span class="contract-tag">画面与语音同步生成</span>
+        <span class="contract-tag">输出规格自动匹配</span>
+        <span class="contract-tag subtitle">字幕自动处理</span>
       </div>
       <div class="contract-source">
-        <span>对齐: 教学设计 V{{ sourceVersions?.lesson_plan || '8' }}</span>
+        <span v-if="sourceVersions?.lesson_plan">教学设计 V{{ sourceVersions.lesson_plan }}</span>
       </div>
     </section>
 

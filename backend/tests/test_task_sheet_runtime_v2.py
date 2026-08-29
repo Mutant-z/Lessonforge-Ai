@@ -86,7 +86,7 @@ from app.agent.registry import execute_tool, ToolContext
 from tests.test_task_sheet_agentic import BP
 
 
-def _tool_context(builder=None, *, intent_plan=None, locks=None, confirmation_tokens=None):
+def _tool_context(builder=None, *, intent_plan=None, locks=None, confirmation_tokens=None, active_intent=None):
     class _Ctx:
         blueprint = copy.deepcopy(BP)
         upstream = {}
@@ -97,6 +97,7 @@ def _tool_context(builder=None, *, intent_plan=None, locks=None, confirmation_to
             self.intent_plan = intent_plan
             self.locks = locks or []
             self.confirmation_tokens = confirmation_tokens or []
+            self.active_intent = active_intent
             self.knowledge_context = {}
             self.source_artifact = None
 
@@ -157,6 +158,7 @@ async def test_tool_delete_task_requires_confirmation_token(v3_builder):
     })
     assert not result.ok
     assert "人工确认" in (result.error or "")
+    assert result.error_code == "confirmation_required"
 
 
 @pytest.mark.asyncio
@@ -189,6 +191,23 @@ async def test_tool_update_task_ok(v3_builder):
     assert result.output["revision"] > 0
     task, _ = v3_builder.find_task("T-01")
     assert task["estimated_minutes"] == 5
+
+
+@pytest.mark.asyncio
+async def test_tool_content_edit_preserves_omitted_objective_links(v3_builder):
+    """润色任务时模型省略目标 ID，不得被解释为目标解绑。"""
+    tc = _tool_context(v3_builder, active_intent="TASK_EDIT")
+    task, _ = v3_builder.find_task("T-03")
+    original_objectives = list(task["objective_ids"])
+    result = await execute_tool("task_sheet_update_task", tc, {
+        "task_id": "T-03",
+        "patch": {"title": "应用方法并检查结论（润色版）", "objective_ids": [original_objectives[-1]]},
+    })
+    assert result.ok
+    task, _ = v3_builder.find_task("T-03")
+    assert "润色版" in task["title"]
+    assert task["objective_ids"] == original_objectives
+    assert result.output["preserved_fields"] == ["objective_ids"]
 
 
 @pytest.mark.asyncio
@@ -285,6 +304,19 @@ async def test_tool_update_objectives_remove_requires_confirmation(v3_builder):
 
 
 @pytest.mark.asyncio
+async def test_tool_content_edit_preserves_omitted_objective_catalog(v3_builder):
+    """普通内容修改传回不完整目标目录时，目录条目仍保持完整。"""
+    tc = _tool_context(v3_builder, active_intent="TASK_EDIT")
+    original_ids = [item["id"] for item in v3_builder.objective_catalog]
+    result = await execute_tool("task_sheet_update_objectives", tc, {
+        "objective_catalog": copy.deepcopy(v3_builder.objective_catalog[:-1]),
+    })
+    assert result.ok
+    assert [item["id"] for item in v3_builder.objective_catalog] == original_ids
+    assert result.output["preserved_fields"] == ["objective_catalog"]
+
+
+@pytest.mark.asyncio
 async def test_tool_update_objectives_duplicate_id_rejected(v3_builder):
     tc = _tool_context(v3_builder)
     catalog = copy.deepcopy(v3_builder.objective_catalog)
@@ -292,6 +324,23 @@ async def test_tool_update_objectives_duplicate_id_rejected(v3_builder):
     result = await execute_tool("task_sheet_update_objectives", tc, {"objective_catalog": catalog})
     assert not result.ok
     assert "重复" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_tool_preparation_update_creates_missing_checklist_section(v3_builder):
+    """旧 V3 候选稿缺少课前准备章节时，内容编辑可以安全补建它。"""
+    v3_builder._content["sections"] = [
+        section for section in v3_builder.sections if section.get("id") != "SEC-PREPARATION"
+    ]
+    tc = _tool_context(v3_builder, active_intent="TASK_EDIT")
+    result = await execute_tool("task_sheet_update_preparation_extension", tc, {
+        "preparation": ["准备记录纸，并写下一个想验证的问题。"],
+    })
+    assert result.ok
+    section = v3_builder.find_section("SEC-PREPARATION")
+    assert section is not None
+    checklist = next(block for block in section["blocks"] if block["kind"] == "checklist")
+    assert checklist["items"][0]["text"].startswith("准备记录纸")
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +491,26 @@ async def test_finalizer_tool_round_then_deterministic_complete(v3_builder):
     assert second.output["markdown"]
     assert second.summary == "终稿整合完成"  # 采纳 LLM 摘要
     assert provider.calls == 1  # 未再调 LLM
+
+
+@pytest.mark.asyncio
+async def test_confirmed_high_risk_tool_replays_original_call(v3_builder):
+    """教师确认后恢复原工具参数，避免再次让模型重建完整任务对象。"""
+    from app.agent.agents.task_sheet.agents import TASK_DESIGNER
+
+    tc = _tool_context(v3_builder)
+    runtime = TaskSheetAgentRuntime(provider=object(), tool_context=tc)
+    runtime.pending_tool_confirmation = {
+        "agent_key": "task_designer",
+        "tool_name": "task_sheet_update_task",
+        "input": {"task_id": "T-03", "patch": {"objective_ids": ["OBJ-02"]}},
+    }
+    runtime.resumed_confirmation = {"choice": "apply"}
+    runtime.confirmation_tokens = ["TOKEN"]
+    decision = await _call_agent(runtime, "task_designer", TASK_DESIGNER, 0)
+    assert decision.tool_calls[0].tool_name == "task_sheet_update_task"
+    assert decision.tool_calls[0].input["confirmation_token"] == "TOKEN"
+    assert runtime.pending_tool_confirmation == {}
 
 
 @pytest.mark.asyncio

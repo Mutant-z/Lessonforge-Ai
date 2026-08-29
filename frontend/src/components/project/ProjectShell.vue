@@ -1,15 +1,55 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { Check, Download, House, Link } from '@element-plus/icons-vue';
+import { computed, ref } from 'vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { Check, Delete, Download, House, Link } from '@element-plus/icons-vue';
 import { useRouter } from 'vue-router';
+import { errorMessage } from '../../api/client';
+import { useCourseStore } from '../../stores/courses';
 import { useProjectStore } from '../../stores/project';
 import ProjectTaskRail from './ProjectTaskRail.vue';
 
 const props = defineProps<{ activeType?: string; compact?: boolean }>();
 const router = useRouter();
+const courses = useCourseStore();
 const store = useProjectStore();
+const deleting = ref(false);
 
 const isCompactMode = computed(() => props.compact || props.activeType === 'ppt');
+const deliveryTasks = computed(() => store.tasks.filter(task => task.task_type !== 'video_generation'));
+
+async function handleDeleteProject() {
+  const course = store.project?.course;
+  if (!course || deleting.value) return;
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除项目“${course.title}”吗？删除后项目将从项目库中移除，生成内容也将无法继续访问。`,
+      '删除微课项目',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      },
+    );
+  } catch {
+    return;
+  }
+
+  deleting.value = true;
+  try {
+    await courses.delete(course.id);
+    store.disconnect();
+    store.project = null;
+    store.currentTask = null;
+    ElMessage.success('项目已删除');
+    await router.replace('/');
+  } catch (cause) {
+    ElMessage.error(errorMessage(cause));
+  } finally {
+    deleting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -30,13 +70,22 @@ const isCompactMode = computed(() => props.compact || props.activeType === 'ppt'
         <div class="meta-right">
           <span v-if="store.connectionError" class="sync-status warning"><el-icon><Link /></el-icon>{{ store.connectionError }}</span>
           <span v-else class="sync-status success"><el-icon><Check /></el-icon>实时同步</span>
+          <el-button
+            class="delete-project-action"
+            type="danger"
+            plain
+            size="small"
+            :icon="Delete"
+            :loading="deleting"
+            @click="handleDeleteProject"
+          >删除项目</el-button>
           <el-button type="primary" size="small" :icon="Download" @click="router.push(`/courses/${store.project.course.id}/export`)">导出课程</el-button>
         </div>
       </div>
 
       <!-- Tier 2: Task Navigation Rail Bar -->
       <div class="workspace-rail-row">
-        <ProjectTaskRail :course-id="store.project.course.id" :tasks="store.tasks" :active-type="activeType" />
+        <ProjectTaskRail :course-id="store.project.course.id" :tasks="deliveryTasks" :active-type="activeType" />
       </div>
     </header>
 
@@ -179,6 +228,16 @@ const isCompactMode = computed(() => props.compact || props.activeType === 'ppt'
   position: relative;
 }
 
+.delete-project-action {
+  border-radius: var(--radius-pill, 999px) !important;
+  font-weight: 700 !important;
+  transition: all 200ms ease !important;
+}
+
+.delete-project-action:hover {
+  transform: translateY(-1px);
+}
+
 .project-shell :deep(.el-button--primary) {
   background: linear-gradient(135deg, var(--primary-600, #4f46e5) 0%, var(--accent-violet, #7c3aed) 100%) !important;
   border: 0 !important;
@@ -200,5 +259,3 @@ const isCompactMode = computed(() => props.compact || props.activeType === 'ppt'
   .back-pill-btn span { display: none; }
 }
 </style>
-
-

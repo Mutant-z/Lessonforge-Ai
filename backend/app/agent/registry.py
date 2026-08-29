@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
+from app.agent.core.error import ToolConfirmationRequired
 from app.agent.schemas import ToolResult
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,13 @@ async def execute_tool(tool_name: str, tc: ToolContext, input_dict: dict[str, An
         except TimeoutError:
             error = f"工具 {tool_name} 超时（{tool.timeout_seconds:g}s）"
             error_code = "tool_timeout"
+        except ToolConfirmationRequired as exc:
+            logger.info("工具 %s 等待教师确认：%s", tool_name, exc)
+            error = str(exc)
+            error_code = exc.error_code
+            # 缺少确认令牌不是可通过重复调用解决的临时错误；由领域
+            # Runtime 将它转成 paused + human.required。
+            return ToolResult(ok=False, error=error, error_code=error_code, retryable=False)
         except Exception as exc:  # noqa: BLE001
             logger.exception("工具 %s 执行失败（%s/%s）", tool_name, attempt, attempts)
             error = f"工具 {tool_name} 执行失败：{str(exc)[:500]}"

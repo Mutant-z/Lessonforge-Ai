@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.agent.core.error import ToolConfirmationRequired
+from app.agent.core.gates import gates_active
 from app.agent.registry import ToolContext
 
 
@@ -93,8 +95,10 @@ def _scope_guard(tc: ToolContext, task_ids: list[str] | None = None, phases: lis
     """检查修改范围是否属于本轮意图（方案 §2.3）。
 
     intent_plan.target_task_ids / target_phases 非空时，工具只允许修改这些任务/环节；
-    空（全局意图）不限。
+    空（全局意图）不限。relaxed 门禁模式：不拒绝调用，仅由提示词引导优先修改目标。
     """
+    if not gates_active():
+        return
     runtime = getattr(tc, "runtime", None)
     plan = getattr(runtime, "intent_plan", None) if runtime else None
     if plan is None:
@@ -122,10 +126,16 @@ def _confirmation_tokens(tc: ToolContext) -> list[str]:
 
 
 def _require_confirmation(tc: ToolContext, token: str | None = None, *, operation: str = "删除或目标解绑") -> None:
-    """高风险操作（删除/目标解绑等）要求有效的人工确认令牌。"""
+    """高风险操作（删除/目标解绑等）要求有效的人工确认令牌。
+
+    relaxed 门禁模式：删除/解绑直接执行，不再要求确认令牌。
+    """
+    if not gates_active():
+        return
     tokens = _confirmation_tokens(tc)
     if not token or token not in tokens:
-        raise ValueError(
+        raise ToolConfirmationRequired(
             f"{operation}属于高风险操作，需要教师人工确认后才能执行；"
-            "请先提交人工确认并携带有效确认令牌"
+            "请先提交人工确认并携带有效确认令牌",
+            operation=operation,
         )

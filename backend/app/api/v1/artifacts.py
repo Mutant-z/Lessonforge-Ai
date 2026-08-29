@@ -29,7 +29,7 @@ from app.schemas.artifact import (
     SeedanceVideoScriptContent,
 )
 from app.services.model_config_service import owned_model_config, resolve_provider, resolved_model_name
-from app.services.course_task_service import register_artifact_version
+from app.services.course_task_service import is_publishable_video_artifact, register_artifact_version
 from app.services.agent_prompt_service import build_runtime_prompts
 from app.agents.generators import make_exercises, make_task_sheet, to_markdown
 from app.schemas.blueprint import CourseBlueprintSchema
@@ -421,6 +421,18 @@ async def restore_artifact_version(
     if not source:
         raise HTTPException(404, "资源版本不存在")
     await owned_course(source.course_id, user, db)
+    if source.artifact_type == "video_generation":
+        if not is_publishable_video_artifact(source):
+            raise HTTPException(409, "该历史版本不是可发布的原生有声视频，无法恢复")
+        final_asset_id = ((source.content_json or {}).get("outputs") or {}).get("final_asset_id")
+        final_asset = await db.scalar(select(ArtifactAsset).where(
+            ArtifactAsset.id == final_asset_id,
+            ArtifactAsset.course_id == source.course_id,
+            ArtifactAsset.owner_id == user.id,
+            ArtifactAsset.status == "approved",
+        ))
+        if not final_asset:
+            raise HTTPException(409, "该历史视频的最终媒体资源已不可用，无法恢复")
     version = (await db.scalar(select(func.max(Artifact.version)).where(
         Artifact.course_id == source.course_id,
         Artifact.artifact_type == source.artifact_type,

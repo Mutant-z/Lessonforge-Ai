@@ -15,6 +15,10 @@ export interface ModelConfigItem {
   adapter_config: Record<string, unknown>;
   model_category: ModelCategory;
   model_purpose: ModelPurpose;
+  is_archived?: boolean;
+  video_capability_status?: 'unverified' | 'verified' | 'failed';
+  video_capability_error?: string;
+  last_verified_at?: string | null;
   api_key_configured: boolean;
   api_key_masked: string;
   is_active: boolean;

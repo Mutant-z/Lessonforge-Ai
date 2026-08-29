@@ -233,13 +233,19 @@ export const usePipelineStore = defineStore('pipeline', {
         this.detail.run.status = 'queued';
       } else if (this.detail?.run && ['pipeline_completed', 'run.completed'].includes(type)) {
         this.detail.run.status = 'completed';
+        this.clearDraft();
       } else if (this.detail?.run && ['pipeline_failed', 'run.failed'].includes(type)) {
         this.detail.run.status = 'failed';
+        const eventError = data.error || data.payload?.error;
+        this.detail.run.error = typeof eventError === 'string'
+          ? { message: eventError }
+          : (eventError || { message: String(data.message || '视频脚本运行失败') });
         this.clearDraft();
       } else if (this.detail?.run && type === 'run.cancelled') {
         this.detail.run.status = 'cancelled';
         this.clearDraft();
       }
+      if (type === 'artifact.draft.cleared') this.clearDraft();
       if (type === 'pipeline_started' && runId) {
         for (const key of Object.keys(this.statusTexts)) {
           if (this.statusRunIds[key] !== runId) delete this.statusTexts[key];

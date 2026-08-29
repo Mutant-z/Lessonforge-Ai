@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.agent.core.gates import gates_active
 from app.agent.registry import ToolContext
 
 
@@ -104,7 +105,10 @@ def _scope_guard(tc: ToolContext, section_ids: list[str] | None = None) -> None:
     """检查修改范围是否属于本轮意图（支持 seg_01, scene_01 等别名解析）。
 
     intent_plan.target_section_ids 非空时，工具只允许修改这些章节；空（全局意图）不限。
+    relaxed 门禁模式：不拒绝调用，仅由提示词引导优先修改目标。
     """
+    if not gates_active():
+        return
     runtime = getattr(tc, "runtime", None)
     plan = getattr(runtime, "intent_plan", None) if runtime else None
     if plan is None:
@@ -139,7 +143,12 @@ def _confirmation_tokens(tc: ToolContext) -> list[str]:
 
 
 def _require_confirmation(tc: ToolContext, token: str | None = None, *, operation: str = "删除章节或解绑场景") -> None:
-    """高风险操作（删除章节/解绑场景等）要求有效的人工确认令牌。"""
+    """高风险操作（删除章节/解绑场景等）要求有效的人工确认令牌。
+
+    relaxed 门禁模式：删除/解绑直接执行，不再要求确认令牌。
+    """
+    if not gates_active():
+        return
     tokens = _confirmation_tokens(tc)
     if not token or token not in tokens:
         raise ValueError(

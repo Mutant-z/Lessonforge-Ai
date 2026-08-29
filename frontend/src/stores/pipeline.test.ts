@@ -117,6 +117,29 @@ describe('pipeline store draft restoration', () => {
     pipeline.applyStreamEvent('run.failed', { run_id: 'run-1' });
 
     expect(pipeline.draftArtifact).toBeNull();
+    expect(pipeline.status).toBe('failed');
+    expect(pipeline.run?.error?.message).toBe('视频脚本运行失败');
+  });
+
+  it('captures the backend failure reason and clears a video-script candidate', () => {
+    const pipeline = usePipelineStore();
+    const project = useProjectStore();
+    project.currentTask = { id: 'task-video', course_id: 'course-1', task_type: 'video_script' } as any;
+    const videoDetail = detail('running');
+    videoDetail.run!.generation_run_id = 'run-video';
+    videoDetail.run!.pipeline_type = 'video_script_agent_pipeline';
+    pipeline.detail = videoDetail;
+    pipeline.draftArtifact = { schema_version: '4.0', scenes: [{ id: 'SV-02', spoken_text: '候选口播' }] };
+    pipeline.draftRunId = 'run-video';
+
+    pipeline.applyStreamEvent('run.failed', {
+      run_id: 'run-video',
+      payload: { error: { code: 'save_failed', message: '保存失败', retryable: true } },
+    });
+
+    expect(pipeline.status).toBe('failed');
+    expect(pipeline.run?.error).toMatchObject({ code: 'save_failed', message: '保存失败' });
+    expect(pipeline.draftArtifact).toBeNull();
   });
 
   it('filters live timeline events belonging to a different task or run', () => {

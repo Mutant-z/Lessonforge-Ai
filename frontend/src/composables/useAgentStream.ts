@@ -1,10 +1,10 @@
 import type { PipelineTimelineItem } from '../stores/pipeline';
-import type { ProjectAgentMessage } from '../types';
+import type { ChatAttachment, ProjectAgentMessage } from '../types';
 
 /** Codex 式会话流：一个用户请求对应一个 Turn，执行轨迹和最终回复都归属于该 Turn。 */
 
 export type AgentStreamNode =
-  | { kind: 'user'; id: string; content: string; status?: ProjectAgentMessage['status'] } // > 教师指令
+  | { kind: 'user'; id: string; content: string; attachments: ChatAttachment[]; status?: ProjectAgentMessage['status'] } // > 教师指令
   | { kind: 'session'; id: string; runId: string }                                  // ◈ 教学 Agent 会话头
   | { kind: 'thought'; id: string; runId: string; agentKey: string; thoughtKey: string; content: string; active: boolean }  // 灰色可见执行摘要
   | { kind: 'tool'; id: string; runId: string; toolName: string; input: Record<string, any>; output: Record<string, any>; ok: boolean; running: boolean; error?: string | null; errorCode?: string | null; retryable?: boolean; durationMs?: number }
@@ -245,12 +245,16 @@ export function buildAgentTurns(
     if (target) recordSessionTime(target, msg.created_at);
     if (msg.role === 'user') {
       const text = (msg.content || '').trim();
-      if (!text) continue;
+      const attachments = Array.isArray(msg.metadata?.attachments)
+        ? msg.metadata.attachments.filter((item): item is ChatAttachment => Boolean(item && typeof item === 'object' && item.id))
+        : [];
+      if (!text && !attachments.length) continue;
       const userNode: AgentStreamNode = {
         kind: 'user', id: `user-${msg.id}`,
         // 后端 create_run 会加 [目标页面:...]，前端 Composer 单页/多页定位会加
         // [针对第 N 页]；两种范围前缀都不应出现在教师气泡正文里。
-        content: msg.content.replace(/^\[(?:目标页面|针对第 [^\]]+页)[^\]]*\]\s*/, ''),
+        content: text ? msg.content.replace(/^\[(?:目标页面|针对第 [^\]]+页)[^\]]*\]\s*/, '') : '请分析附件内容，并给出与当前任务相关的建议。',
+        attachments,
         // Delivery state belongs to the local optimistic envelope. Historical
         // server messages may retain `pending` as their processing status even
         // after the Run completed, which must not be rendered as “发送中”.

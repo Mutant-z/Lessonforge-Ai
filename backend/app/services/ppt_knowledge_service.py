@@ -133,12 +133,10 @@ def check_ppt_against_knowledge(content: dict | PPTContent) -> list[RuleViolatio
                     slide_id, "density.body_items",
                     f"文本块 {text_block_count} 个超过上限 {limits['body_items']} 个",
                 ))
-            total_chars = sum(len(unit) for unit in block_units)
-            if total_chars > limits["body_chars"]:
-                violations.append(RuleViolation(
-                    slide_id, "density.body_chars",
-                    f"内容块合计 {total_chars} 字超过上限 {limits['body_chars']} 字",
-                ))
+            # Total character count is a design heuristic, not a structural
+            # invariant. Different layouts/font metrics can safely hold more
+            # than 120 CJK characters; raster overflow/geometry QA is the
+            # authoritative fit check.
             for index, unit in enumerate(block_units, 1):
                 if len(unit) > limits["item_chars"]:
                     violations.append(RuleViolation(
@@ -157,12 +155,6 @@ def check_ppt_against_knowledge(content: dict | PPTContent) -> list[RuleViolatio
                 violations.append(RuleViolation(
                     slide_id, "density.body_items",
                     f"正文 {len(body)} 条超过上限 {limits['body_items']} 条",
-                ))
-            total_chars = sum(len(item) for item in body)
-            if total_chars > limits["body_chars"]:
-                violations.append(RuleViolation(
-                    slide_id, "density.body_chars",
-                    f"正文合计 {total_chars} 字超过上限 {limits['body_chars']} 字",
                 ))
             for index, item_text in enumerate(body, 1):
                 if len(item_text) > limits["item_chars"]:

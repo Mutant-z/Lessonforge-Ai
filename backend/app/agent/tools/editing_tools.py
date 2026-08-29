@@ -25,6 +25,7 @@ from app.agent.slide_rendering import (
     semantic_ref_details,
     semantic_text_refs,
 )
+from app.agent.edit_v3 import stable_hash
 
 
 def _builder(tc: ToolContext) -> PresentationBuilder:
@@ -295,6 +296,312 @@ async def _set_element_style(tc: ToolContext, payload: SetElementStyleInput) -> 
     return ToolResult(ok=True, output={"element_id": payload.element_id, "style": payload.style})
 
 
+def _refresh_revision(element: dict[str, Any]) -> None:
+    element["revision_hash"] = stable_hash({
+        key: element.get(key)
+        for key in ("kind", "role", "content_ref", "text", "x", "y", "w", "h", "style", "asset_id")
+    })
+
+
+def _before_hash_ok(tc: ToolContext, element: dict[str, Any], expected: str) -> bool:
+    if not expected or expected == str(element.get("revision_hash") or ""):
+        return True
+    element_id = str(element.get("id") or "")
+    # Multiple operations in the same persisted mutation plan may legally
+    # touch different fields of one element in sequence.
+    return any(
+        str(item.get("element_id") or "") == element_id
+        for item in (getattr(tc.runtime, "mutation_evidence", None) or [])
+    )
+
+
+def _set_content_ref(slide: dict[str, Any], ref: str, value: str) -> bool:
+    """Set one semantic content path without replacing the slide object."""
+    if ref == "title":
+        slide["title"] = value
+        return True
+    if ref in {"purpose", "visual_suggestion", "speaker_notes"}:
+        slide[ref] = value
+        return True
+    parts = ref.split(".")
+    if len(parts) == 2 and parts[0] == "body" and parts[1].isdigit():
+        index = int(parts[1])
+        body = list(slide.get("body") or [])
+        if 0 <= index < len(body):
+            body[index] = value
+            slide["body"] = body
+            return True
+    if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit():
+        index = int(parts[1])
+        blocks = list(slide.get("blocks") or [])
+        if not (0 <= index < len(blocks)):
+            return False
+        block = dict(blocks[index])
+        field = parts[2]
+        if len(parts) == 3:
+            block[field] = value
+        elif len(parts) == 4 and parts[3].isdigit():
+            values = list(block.get(field) or [])
+            item_index = int(parts[3])
+            if not (0 <= item_index < len(values)):
+                return False
+            values[item_index] = value
+            block[field] = values
+        else:
+            return False
+        blocks[index] = block
+        slide["blocks"] = blocks
+        return True
+    return False
+
+
+class TextPatchItem(BaseModel):
+    slide_id: str
+    content_ref: str
+    replacement: str
+    before_hash: str = ""
+
+
+class PatchTextByRefInput(BaseModel):
+    patches: list[TextPatchItem] = Field(default_factory=list)
+
+
+async def _patch_text_by_ref(tc: ToolContext, payload: PatchTextByRefInput) -> ToolResult:
+    builder = _builder(tc)
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    applied: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            warnings.append({"slide_id": patch.slide_id, "content_ref": patch.content_ref, "code": "scope_reverted"})
+            continue
+        slide = builder.get_slide(patch.slide_id)
+        before = resolve_content_ref(slide, patch.content_ref)
+        if before is None:
+            warnings.append({"slide_id": patch.slide_id, "content_ref": patch.content_ref, "code": "content_ref_not_found"})
+            continue
+        if patch.before_hash and patch.before_hash not in {stable_hash(before), stable_hash({"value": before})}:
+            warnings.append({"slide_id": patch.slide_id, "content_ref": patch.content_ref, "code": "before_hash_mismatch"})
+            continue
+        if before == patch.replacement:
+            continue
+        if not _set_content_ref(slide, patch.content_ref, patch.replacement):
+            warnings.append({"slide_id": patch.slide_id, "content_ref": patch.content_ref, "code": "content_ref_not_writable"})
+            continue
+        for element in slide.get("elements") or []:
+            if str(element.get("content_ref") or "") == patch.content_ref:
+                element["text"] = patch.replacement
+                _refresh_revision(element)
+        applied.append({
+            "slide_id": patch.slide_id, "content_ref": patch.content_ref,
+            "before": before, "after": patch.replacement,
+        })
+    if tc.runtime is not None and applied:
+        tc.runtime.mutation_applied = True
+        for item in applied:
+            if item["slide_id"] not in tc.runtime.affected_slide_ids:
+                tc.runtime.affected_slide_ids.append(item["slide_id"])
+            tc.runtime.mutation_evidence.append({
+                "kind": "text", "slide_id": item["slide_id"],
+                "content_ref": item["content_ref"], "tool_name": "patch_text_by_ref",
+            })
+    await _emit_precise_patches(tc, applied, "已按内容引用精确更新文字")
+    return ToolResult(ok=True, output={"applied": applied, "warnings": warnings})
+
+
+class ElementStylePatch(BaseModel):
+    slide_id: str
+    element_id: str
+    style: dict[str, Any] = Field(default_factory=dict)
+    before_hash: str = ""
+
+
+class PatchElementStyleInput(BaseModel):
+    patches: list[ElementStylePatch] = Field(default_factory=list)
+
+
+async def _patch_element_style(tc: ToolContext, payload: PatchElementStyleInput) -> ToolResult:
+    applied: list[dict[str, Any]] = []
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            continue
+        element = _builder(tc)._find_element(patch.slide_id, patch.element_id)
+        if not _before_hash_ok(tc, element, patch.before_hash):
+            continue
+        before = deepcopy(element.get("style") or {})
+        element["style"] = {**before, **patch.style}
+        _refresh_revision(element)
+        if before != element["style"]:
+            applied.append({"slide_id": patch.slide_id, "element_id": patch.element_id, "before": before, "after": element["style"]})
+    _record_precise_mutations(tc, "style", "patch_element_style", applied)
+    await _emit_precise_patches(tc, applied, "已更新目标元素样式")
+    return ToolResult(ok=True, output={"applied": applied})
+
+
+class GeometryPatch(BaseModel):
+    slide_id: str
+    element_id: str
+    x: float | None = None
+    y: float | None = None
+    width: float | None = None
+    height: float | None = None
+    before_hash: str = ""
+
+
+class GeometryBatchInput(BaseModel):
+    patches: list[GeometryPatch] = Field(default_factory=list)
+
+
+def _record_precise_mutations(tc: ToolContext, kind: str, tool_name: str, applied: list[dict[str, Any]]) -> None:
+    if tc.runtime is None or not applied:
+        return
+    tc.runtime.mutation_applied = True
+    for item in applied:
+        slide_id = str(item.get("slide_id") or "")
+        if slide_id and slide_id not in tc.runtime.affected_slide_ids:
+            tc.runtime.affected_slide_ids.append(slide_id)
+        tc.runtime.mutation_evidence.append({
+            "kind": kind, "slide_id": slide_id,
+            "element_id": str(item.get("element_id") or ""), "tool_name": tool_name,
+            "asset_id": str((item.get("after") or {}).get("asset_id") or ""),
+        })
+
+
+async def _emit_precise_patches(tc: ToolContext, applied: list[dict[str, Any]], summary: str) -> None:
+    if tc.emitter is None or not applied:
+        return
+    draft_id = getattr(tc.runtime, "draft_artifact_id", None) or f"draft-{tc.generation_run_id}"
+    if tc.runtime is not None:
+        tc.runtime.draft_artifact_id = draft_id
+    for slide_id in dict.fromkeys(str(item.get("slide_id") or "") for item in applied):
+        index = next((position for position, slide in enumerate(_builder(tc).slides) if str(slide.get("id") or "") == slide_id), None)
+        if index is None:
+            continue
+        slide = _builder(tc).slides[index]
+        await tc.emitter.artifact_patch(
+            draft_id, "presentation_draft",
+            [{"op": "replace", "path": f"/slides/{index}", "value": slide}],
+            summary=summary, slide_index=index,
+        )
+
+
+async def _move_elements(tc: ToolContext, payload: GeometryBatchInput) -> ToolResult:
+    applied: list[dict[str, Any]] = []
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            continue
+        element = _builder(tc)._find_element(patch.slide_id, patch.element_id)
+        if not _before_hash_ok(tc, element, patch.before_hash):
+            continue
+        before = {"x": element.get("x"), "y": element.get("y")}
+        if patch.x is not None:
+            element["x"] = patch.x
+        if patch.y is not None:
+            element["y"] = patch.y
+        _refresh_revision(element)
+        after = {"x": element.get("x"), "y": element.get("y")}
+        if before != after:
+            applied.append({"slide_id": patch.slide_id, "element_id": patch.element_id, "before": before, "after": after})
+    _record_precise_mutations(tc, "geometry", "move_elements", applied)
+    await _emit_precise_patches(tc, applied, "已移动目标元素")
+    return ToolResult(ok=True, output={"applied": applied})
+
+
+async def _resize_elements(tc: ToolContext, payload: GeometryBatchInput) -> ToolResult:
+    applied: list[dict[str, Any]] = []
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            continue
+        element = _builder(tc)._find_element(patch.slide_id, patch.element_id)
+        if not _before_hash_ok(tc, element, patch.before_hash):
+            continue
+        before = {"w": element.get("w"), "h": element.get("h")}
+        if patch.width is not None:
+            element["w"] = patch.width
+        if patch.height is not None:
+            element["h"] = patch.height
+        _refresh_revision(element)
+        after = {"w": element.get("w"), "h": element.get("h")}
+        if before != after:
+            applied.append({"slide_id": patch.slide_id, "element_id": patch.element_id, "before": before, "after": after})
+    _record_precise_mutations(tc, "geometry", "resize_elements", applied)
+    await _emit_precise_patches(tc, applied, "已缩放目标元素")
+    return ToolResult(ok=True, output={"applied": applied})
+
+
+class ReplaceImageAssetItem(BaseModel):
+    slide_id: str
+    element_id: str
+    file_path: str
+    asset_id: str = ""
+    before_hash: str = ""
+
+
+class ReplaceImageAssetInput(BaseModel):
+    patches: list[ReplaceImageAssetItem] = Field(default_factory=list)
+
+
+async def _replace_image_asset(tc: ToolContext, payload: ReplaceImageAssetInput) -> ToolResult:
+    applied: list[dict[str, Any]] = []
+    for patch in payload.patches:
+        element = _builder(tc)._find_element(patch.slide_id, patch.element_id)
+        path = Path(patch.file_path)
+        if not path.is_file() and tc.workspace_root is not None and not path.is_absolute():
+            workspace_path = Path(tc.workspace_root) / path
+            if workspace_path.is_file():
+                path = workspace_path
+        if element.get("kind") != "image" or not path.is_file():
+            continue
+        if not _before_hash_ok(tc, element, patch.before_hash):
+            continue
+        before = {"asset_path": element.get("asset_path"), "asset_id": element.get("asset_id")}
+        element["asset_path"] = str(path.resolve())
+        element["asset_id"] = patch.asset_id
+        _refresh_revision(element)
+        applied.append({"slide_id": patch.slide_id, "element_id": patch.element_id, "before": before, "after": {"asset_path": element["asset_path"], "asset_id": patch.asset_id}})
+    _record_precise_mutations(tc, "image", "replace_image_asset", applied)
+    await _emit_precise_patches(tc, applied, "已在原图片框中替换素材")
+    if not applied and payload.patches:
+        return ToolResult(ok=False, error="没有可应用的图片替换操作。", error_code="image_not_applied", retryable=True)
+    return ToolResult(ok=True, output={"applied": applied})
+
+
+class RemoveImageAssetItem(BaseModel):
+    slide_id: str
+    element_id: str
+    before_hash: str = ""
+
+
+class RemoveImageAssetInput(BaseModel):
+    patches: list[RemoveImageAssetItem] = Field(default_factory=list)
+
+
+async def _remove_image_asset(tc: ToolContext, payload: RemoveImageAssetInput) -> ToolResult:
+    applied: list[dict[str, Any]] = []
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    builder = _builder(tc)
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            continue
+        slide = builder.get_slide(patch.slide_id)
+        element = next((item for item in slide.get("elements") or [] if item.get("id") == patch.element_id), None)
+        if not element or element.get("kind") != "image" or not _before_hash_ok(tc, element, patch.before_hash):
+            continue
+        before = deepcopy(element)
+        slide["elements"] = [item for item in slide.get("elements") or [] if item.get("id") != patch.element_id]
+        applied.append({"slide_id": patch.slide_id, "element_id": patch.element_id, "before": before, "after": None})
+        if tc.runtime is not None:
+            if patch.slide_id not in tc.runtime.affected_slide_ids:
+                tc.runtime.affected_slide_ids.append(patch.slide_id)
+            tc.runtime.mutation_applied = True
+    _record_precise_mutations(tc, "image", "remove_image_asset", applied)
+    await _emit_precise_patches(tc, applied, "已删除目标图片")
+    return ToolResult(ok=True, output={"applied": applied})
+
+
 class SetBackgroundInput(BaseModel):
     slide_id: str
     fill: str | None = Field(default=None, description="调色板键或 #RRGGBB")
@@ -303,6 +610,44 @@ class SetBackgroundInput(BaseModel):
 async def _set_background(tc: ToolContext, payload: SetBackgroundInput) -> ToolResult:
     _builder(tc).set_background(payload.slide_id, payload.fill)
     return ToolResult(ok=True, output={"slide_id": payload.slide_id, "fill": payload.fill})
+
+
+class SlideMetadataPatch(BaseModel):
+    slide_id: str
+    notes_text: str | None = None
+    duration_seconds: float | None = Field(default=None, ge=0)
+    duration_delta_seconds: float | None = None
+
+
+class PatchSlideMetadataInput(BaseModel):
+    patches: list[SlideMetadataPatch] = Field(default_factory=list)
+
+
+async def _patch_slide_metadata(tc: ToolContext, payload: PatchSlideMetadataInput) -> ToolResult:
+    builder = _builder(tc)
+    allowed_ids = set(getattr(tc.runtime, "selected_slide_ids", []) or [])
+    applied: list[dict[str, Any]] = []
+    for patch in payload.patches:
+        if allowed_ids and patch.slide_id not in allowed_ids:
+            continue
+        slide = builder.get_slide(patch.slide_id)
+        before = {"speaker_notes": slide.get("speaker_notes"), "duration_seconds": slide.get("duration_seconds")}
+        if patch.notes_text is not None:
+            slide["speaker_notes"] = patch.notes_text
+        if patch.duration_seconds is not None:
+            slide["duration_seconds"] = int(round(patch.duration_seconds))
+        elif patch.duration_delta_seconds is not None:
+            slide["duration_seconds"] = max(0, int(round(float(slide.get("duration_seconds") or 0) + patch.duration_delta_seconds)))
+        after = {"speaker_notes": slide.get("speaker_notes"), "duration_seconds": slide.get("duration_seconds")}
+        if before != after:
+            applied.append({"slide_id": patch.slide_id, "before": before, "after": after})
+            if tc.runtime is not None:
+                tc.runtime.mutation_applied = True
+                if patch.slide_id not in tc.runtime.affected_slide_ids:
+                    tc.runtime.affected_slide_ids.append(patch.slide_id)
+                tc.runtime.mutation_evidence.append({"kind": "metadata", "slide_id": patch.slide_id, "tool_name": "patch_slide_metadata"})
+    await _emit_precise_patches(tc, applied, "已更新备注或页面时长")
+    return ToolResult(ok=True, output={"applied": applied})
 
 
 class AddNotesInput(BaseModel):
@@ -641,7 +986,10 @@ def _media_metadata_matches(source: dict[str, Any], candidate: dict[str, Any]) -
     return all(
         candidate.get(key) == value
         for key, value in source.items()
-        if key not in {"x", "y", "w", "h"}
+        if key not in {
+            "x", "y", "w", "h", "semantic_id", "origin_content_ref",
+            "revision_hash", "run_base_revision_hash",
+        }
     )
 
 
@@ -691,13 +1039,11 @@ async def _layout_slide_batch(tc: ToolContext, payload: LayoutSlideBatchInput) -
             if not objective_result_passed(item)
             and bool(item.get("hard_requirement", True))
         ]
-        if layout.get("material_change") is False or unmet_objectives:
-            failed_pages.append({
-                "slide_id": slide_id,
-                "reason": "no_material_improvement" if layout.get("material_change") is False else "objectives_unmet",
-                "objective_results": objective_results,
-            })
-            continue
+        if tc.runtime is not None and unmet_objectives:
+            tc.runtime.diagnostics.extend({
+                "slide_id": slide_id, "code": "objective_unmet", "severity": "warning",
+                "metric": item.get("metric"), "message": f"目标 {item.get('metric')} 未完全达到，仍应用最高分可渲染候选。",
+            } for item in unmet_objectives)
         slide = builder.get_slide(slide_id)
         image_geometry_only = str(layout.get("layout_type") or "") == "existing_image_geometry"
         if image_geometry_only:
@@ -851,9 +1197,6 @@ async def _layout_slide_batch(tc: ToolContext, payload: LayoutSlideBatchInput) -
         from app.agent.tools.qa_tools import run_geometry_qa
         staging_blocking_rules = {
             "geometry.out_of_bounds", "geometry.text_overflow", "geometry.overlap",
-            "geometry.font_too_small", "geometry.min_margin", "geometry.title_in_rail",
-            "geometry.font_role_minimum", "layout.vertical_underuse",
-            "layout.cluster_cramming", "layout.column_balance", "layout.blank_region",
         }
         quality_mode = (
             not image_geometry_only
@@ -928,7 +1271,7 @@ async def _layout_slide_batch(tc: ToolContext, payload: LayoutSlideBatchInput) -
                 )
     if tc.runtime is not None and failed_pages:
         if placed:
-            tc.runtime.result_status = "partial"
+            tc.runtime.result_status = "applied_with_warnings"
         else:
             tc.runtime.result_status = "no_change"
             tc.runtime.mutation_applied = True
@@ -952,10 +1295,18 @@ def register_editing_tools():
     register_tool(Tool("resize_element", "缩放元素", ResizeElementInput, _resize_element))
     register_tool(Tool("delete_element", "删除元素", DeleteElementInput, _delete_element))
     register_tool(Tool("set_element_style", "设置元素样式", SetElementStyleInput, _set_element_style))
+    register_tool(Tool("patch_text_by_ref", "按稳定内容引用精确替换文字", PatchTextByRefInput, _patch_text_by_ref))
+    register_tool(Tool("patch_element_style", "批量修改目标元素样式", PatchElementStyleInput, _patch_element_style))
+    register_tool(Tool("move_elements", "批量移动目标元素", GeometryBatchInput, _move_elements))
+    register_tool(Tool("resize_elements", "批量缩放目标元素", GeometryBatchInput, _resize_elements))
+    register_tool(Tool("replace_image_asset", "在原图片框内替换图片素材", ReplaceImageAssetInput, _replace_image_asset))
+    register_tool(Tool("remove_image_asset", "删除目标图片元素", RemoveImageAssetInput, _remove_image_asset))
     register_tool(Tool("set_background", "设置幻灯片背景", SetBackgroundInput, _set_background))
     register_tool(Tool("add_notes", "设置演讲备注", AddNotesInput, _add_notes))
+    register_tool(Tool("patch_slide_metadata", "精确更新备注和页面时长", PatchSlideMetadataInput, _patch_slide_metadata))
     register_tool(Tool("write_slide_batch", "批量写入幻灯片内容", WriteSlideBatchInput, _write_slide_batch))
     register_tool(Tool("layout_slide_batch", "批量设置元素几何（布局执行）", LayoutSlideBatchInput, _layout_slide_batch))
+    register_tool(Tool("apply_slide_relayout", "明确要求整页重排时应用页面布局", LayoutSlideBatchInput, _layout_slide_batch))
 
 
 register_editing_tools()

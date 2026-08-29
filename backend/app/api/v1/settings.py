@@ -11,12 +11,14 @@ from app.api.deps import current_user
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import decrypt_secret, encrypt_secret
-from app.models.entities import AgentChatSession, CourseIntakeSession, CourseProject, ModelConfig, User
+from app.core.http_client import build_async_client
+from app.models.entities import AgentChatSession, CourseIntakeSession, CourseProject, CourseTask, ModelConfig, User
 from app.providers.llm.anthropic import AnthropicProvider
 from app.providers.llm.mock import MockProvider
 from app.providers.llm.openai_compatible import OpenAICompatibleProvider
 from app.services.ppt_template_service import DEFAULT_PPT_TEMPLATE_ID, get_ppt_template, resolve_ppt_template
 from app.services.media_provider_service import media_transport_supports
+from app.services.model_config_service import normalize_model_preferences
 
 router = APIRouter(prefix="/settings", tags=["设置"])
 ModelCapability = Literal[
@@ -31,22 +33,22 @@ ModelPurpose = Literal[
     "media_composition",
 ]
 PURPOSE_SPECS: dict[str, tuple[str, list[str], set[str]]] = {
-    "text_chat": ("text", ["text_generation", "structured_output"], {"text_chat"}),
+    "text_chat": ("text", ["text_generation", "structured_output"], {"text_chat", "openai_chat_video"}),
     "vision_chat": (
         "vision", ["text_generation", "structured_output", "vision_review"],
-        {"text_chat", "google_vision", "anthropic_vision"},
+        {"text_chat", "openai_chat_video", "google_vision", "anthropic_vision"},
     ),
     "image_generation": (
         "vision", ["image_generation"],
         {"openai_images", "google_gemini_image", "custom_image_http", "mock_media"},
     ),
     "video_generation": (
-        "video", ["video_generation"],
-        {"custom_video_async_http", "volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+        "video", ["video_generation", "native_audio_video_generation"],
+        {"protocol_video"},
     ),
     "native_audio_video_generation": (
         "video", ["video_generation", "native_audio_video_generation"],
-        {"volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+        {"protocol_video"},
     ),
     "speech_generation": ("video", ["speech_generation"], {"custom_speech_http", "mock_media"}),
     "speech_recognition": ("video", ["speech_recognition"], {"volcengine_asr", "mock_media"}),
@@ -55,13 +57,14 @@ PURPOSE_SPECS: dict[str, tuple[str, list[str], set[str]]] = {
 DEFAULT_PURPOSES = {
     "text": {"text_chat"},
     "vision": {"vision_chat"},
-    "video": {"video_generation", "native_audio_video_generation"},
+    "video": {"video_generation"},
 }
 ALLOWED_API_MODES = {
     "text_chat", "openai_images", "google_gemini_image", "google_vision",
     "anthropic_vision", "custom_image_http", "custom_video_async_http",
     "custom_speech_http", "volcengine_ark_video", "volcengine_asr",
-    "gemini_interactions_video",
+    "gemini_interactions_video", "openai_chat_video",
+    "protocol_video",
     "local_ffmpeg", "mock_media",
 }
 ALLOWED_ADAPTER_FIELDS = {
@@ -77,6 +80,7 @@ ALLOWED_ADAPTER_FIELDS = {
     "model_family", "capability_probe_endpoint_path", "probe_model_path",
     "probe_native_audio_path", "probe_resolutions_path", "probe_min_duration_path",
     "probe_max_duration_path",
+    "resolutions", "min_duration_seconds",
     "interactions_path", "interaction_status_path", "file_status_path",
     "file_download_path", "delivery", "price_per_second_cny",
 }
@@ -99,6 +103,10 @@ class ModelConfigItem(BaseModel):
     api_key_configured: bool
     api_key_masked: str
     is_active: bool
+    is_archived: bool = False
+    video_capability_status: Literal["unverified", "verified", "failed"] = "unverified"
+    video_capability_error: str = ""
+    last_verified_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -188,6 +196,89 @@ def _mask_key(secret: str | None) -> str:
     return secret[:3] + "••••••••" + secret[-4:]
 
 
+async def _apply_video_default_to_existing_courses(
+    db: AsyncSession,
+    owner_id: str,
+    config: ModelConfig,
+) -> None:
+    """Make an explicitly selected video default effective for existing courses.
+
+    Video task sessions historically pinned the old model forever, so setting a
+    new default in Settings did not change what the generation page actually ran.
+    "Set as default video model" is an explicit user action and should therefore
+    update those course-level bindings as well.
+    """
+    if config.model_category != "video" or config.model_purpose != "video_generation":
+        return
+    course_ids = list(await db.scalars(select(CourseProject.id).where(CourseProject.owner_id == owner_id)))
+    if not course_ids:
+        return
+    sessions = list(await db.scalars(select(AgentChatSession).where(
+        AgentChatSession.course_id.in_(course_ids),
+        AgentChatSession.module_type == "video_generation",
+    )))
+    for session in sessions:
+        session.video_model_config_id = config.id
+    failed_tasks = list(await db.scalars(select(CourseTask).where(
+        CourseTask.course_id.in_(course_ids),
+        CourseTask.task_type == "video_generation",
+        CourseTask.status == "failed",
+    )))
+    for task in failed_tasks:
+        task.status = "ready_to_generate"
+        task.progress = 0
+        task.active_run_id = None
+        task.error_json = None
+
+
+async def _test_protocol_connection(
+    provider: str, base_url: str, model_name: str, api_key: str, timeout: int,
+) -> tuple[bool, str]:
+    base = base_url.strip().rstrip("/")
+    # A connection test must never submit a generation request.  Some compatible
+    # gateways route even a tiny chat prompt to the selected video model, which
+    # can take minutes and was previously misreported as a network failure.
+    if provider == "anthropic":
+        if base.endswith("/v1/messages"):
+            base = base.removesuffix("/messages")
+        elif not base.endswith("/v1"):
+            base += "/v1"
+        url = f"{base}/models"
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "accept": "application/json",
+        }
+    else:
+        if base.endswith("/chat/completions"):
+            base = base.removesuffix("/chat/completions")
+        elif not base.endswith("/v1"):
+            base += "/v1"
+        url = f"{base}/models"
+        headers = {"authorization": f"Bearer {api_key}", "accept": "application/json"}
+    try:
+        async with build_async_client(url, timeout=min(timeout, 8), follow_redirects=False) as client:
+            response = await client.get(url, headers=headers)
+    except Exception:
+        # Model-list endpoints are optional on many compatible gateways and some
+        # upstreams stall authenticated discovery.  Fall back to a lightweight
+        # unauthenticated reachability probe; any HTTP response proves that the
+        # configured address is reachable without claiming authentication passed.
+        try:
+            async with build_async_client(base, timeout=min(timeout, 5), follow_redirects=False) as client:
+                await client.get(base, headers={"accept": "application/json"})
+            return True, "网关地址可访问，鉴权、模型与视频能力将在首次生成时验证。"
+        except Exception:
+            return False, "无法连接模型服务，请检查 Base URL、网络或网关状态。"
+    if response.status_code in {401, 403}:
+        return False, "API Key 鉴权失败，请检查密钥。"
+    if response.status_code in {404, 405}:
+        return True, "网关地址可访问，模型目录不可用；模型与视频能力将在首次生成时验证。"
+    if response.status_code >= 400:
+        return False, f"模型服务返回 HTTP {response.status_code}，请检查配置。"
+    return True, "连接正常，视频能力将在首次生成时验证。"
+
+
 def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapter: dict[str, Any]) -> None:
     if api_mode not in ALLOWED_API_MODES:
         raise HTTPException(422, "不支持的模型接口模式")
@@ -202,7 +293,7 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
     if api_mode not in {
         "custom_image_http", "custom_video_async_http", "custom_speech_http",
         "volcengine_ark_video", "volcengine_asr",
-        "gemini_interactions_video",
+        "gemini_interactions_video", "openai_chat_video",
     }:
         return
     unknown = set(adapter) - ALLOWED_ADAPTER_FIELDS
@@ -215,6 +306,7 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
         "volcengine_ark_video": "/contents/generations/tasks",
         "volcengine_asr": "/audio/transcriptions",
         "gemini_interactions_video": "/v1beta/interactions",
+        "openai_chat_video": "/chat/completions",
     }
     endpoint_path = str(adapter.get("endpoint_path") or defaults[api_mode])
     if not endpoint_path.startswith("/") or "://" in endpoint_path or ".." in endpoint_path:
@@ -237,6 +329,7 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
     numeric_limits = {
         "max_concurrency": (1, 16),
         "max_duration_seconds": (1, 7200),
+        "min_duration_seconds": (1, 7200),
         "max_file_mb": (1, 4096),
         "poll_interval_seconds": (0.5, 60),
         "price_per_million_tokens_cny": (0.000001, 100000),
@@ -260,6 +353,7 @@ def _validate_model_transport(provider: str, api_mode: str, base_url: str, adapt
         "volcengine_ark_video": {"video/mp4", "video/webm", "video/quicktime"},
         "volcengine_asr": {"application/json"},
         "gemini_interactions_video": {"video/mp4", "video/webm", "video/quicktime"},
+        "openai_chat_video": {"video/mp4", "video/webm", "video/quicktime"},
     }
     if mime and mime not in allowed_mimes[api_mode]:
         raise HTTPException(422, "自定义媒体响应 MIME 类型不受支持")
@@ -311,6 +405,17 @@ def _normalized_model_role(
     model_purpose: str | None,
 ) -> tuple[str, str, list[str], str]:
     purpose = model_purpose or _infer_model_purpose(capabilities, api_mode)
+    if purpose == "native_audio_video_generation":
+        purpose = "video_generation"
+    if purpose == "video_generation":
+        if provider not in {"openai_compatible", "anthropic"}:
+            raise HTTPException(422, "视频模型仅支持 OpenAI 兼容协议或 Anthropic 协议")
+        return (
+            "video",
+            "video_generation",
+            ["video_generation", "native_audio_video_generation"],
+            "protocol_video",
+        )
     if purpose not in PURPOSE_SPECS:
         raise HTTPException(422, "不支持的模型用途")
     expected_category, canonical_capabilities, allowed_modes = PURPOSE_SPECS[purpose]
@@ -335,6 +440,8 @@ def _format_config(c: ModelConfig) -> ModelConfigItem:
     raw_key = decrypt_secret(c.encrypted_api_key) if has_key else ""
     capabilities = c.capabilities_json or (["text_generation", "structured_output", "vision_review"] if c.supports_multimodal else ["text_generation", "structured_output"])
     purpose = c.model_purpose or _infer_model_purpose(capabilities, c.api_mode or "text_chat")
+    if purpose == "native_audio_video_generation" and not c.is_archived:
+        purpose = "video_generation"
     category = c.model_category or PURPOSE_SPECS[purpose][0]
     return ModelConfigItem(
         id=c.id,
@@ -350,6 +457,10 @@ def _format_config(c: ModelConfig) -> ModelConfigItem:
         adapter_config=c.adapter_config_json or {},
         model_category=category,
         model_purpose=purpose,
+        is_archived=bool(c.is_archived),
+        video_capability_status=(c.video_capability_status or "unverified") if purpose == "video_generation" else "unverified",
+        video_capability_error=(c.video_capability_error or "") if purpose == "video_generation" else "",
+        last_verified_at=c.video_capability_verified_at.isoformat() if c.video_capability_verified_at else None,
         api_key_configured=has_key,
         api_key_masked=_mask_key(raw_key),
         is_active=c.is_active,
@@ -368,20 +479,25 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
 
     items = [_format_config(c) for c in raw_configs]
     active_by_category = {
-        category: next((c for c in raw_configs if c.is_active and (c.model_category or "text") == category), None)
+        category: next((c for c in raw_configs if c.is_active and not c.is_archived and (c.model_category or "text") == category), None)
         for category in ("text", "vision", "video")
     }
+    active_by_category["video"] = next((
+        c for c in raw_configs
+        if c.is_active and not c.is_archived and "video_generation" in (c.capabilities_json or [])
+    ), active_by_category["video"])
     active_c = active_by_category["text"] or next(
         (c for c in raw_configs if (c.model_category or "text") == "text"), None
     )
     active_id = active_c.id if active_c else None
 
     # 获取偏好设置
-    prefs = active_c.preferences_json if (active_c and active_c.preferences_json) else {}
+    prefs = normalize_model_preferences(active_c.preferences_json if active_c else None)
     if not prefs and raw_configs:
         for c in raw_configs:
-            if c.preferences_json:
-                prefs = c.preferences_json
+            candidate = normalize_model_preferences(c.preferences_json)
+            if candidate:
+                prefs = candidate
                 break
 
     default_lang = prefs.get("default_language", settings.default_language)
@@ -419,6 +535,8 @@ async def get_user_settings(user: User = Depends(current_user), db: AsyncSession
 
 @router.post("/models", response_model=ModelConfigItem)
 async def create_model_config(payload: ModelConfigCreate, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    if payload.model_purpose in {"speech_generation", "speech_recognition", "media_composition"}:
+        raise HTTPException(422, "语音、转写和媒体合成已由视频生成流程自动处理")
     category, purpose, capabilities, api_mode = _normalized_model_role(
         provider=payload.provider, api_mode=payload.api_mode, capabilities=payload.capabilities,
         model_category=payload.model_category, model_purpose=payload.model_purpose,
@@ -449,15 +567,21 @@ async def create_model_config(payload: ModelConfigCreate, user: User = Depends(c
         supports_multimodal=purpose == "vision_chat",
         capabilities_json=capabilities,
         api_mode=api_mode,
-        adapter_config_json=payload.adapter_config,
+        adapter_config_json={} if purpose == "video_generation" else payload.adapter_config,
         model_category=category,
         model_purpose=purpose,
+        is_archived=False,
+        video_capability_status="unverified",
+        video_capability_error="",
         is_active=should_activate,
     )
     if payload.api_key:
         config.encrypted_api_key = encrypt_secret(payload.api_key)
 
     db.add(config)
+    await db.flush()
+    if should_activate:
+        await _apply_video_default_to_existing_courses(db, user.id, config)
     await db.commit()
     await db.refresh(config)
     return _format_config(config)
@@ -473,6 +597,8 @@ async def update_model_config(
     config = await db.scalar(select(ModelConfig).where(ModelConfig.id == config_id, ModelConfig.owner_id == user.id))
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
+    if config.is_archived:
+        raise HTTPException(409, "历史媒体配置仅支持查看或删除")
 
     if payload.model_category is not None and payload.model_category != config.model_category:
         raise HTTPException(409, "模型类别不能直接修改，请使用复制为其他角色")
@@ -517,8 +643,14 @@ async def update_model_config(
     config.api_mode = resolved_api_mode
     config.model_category = resolved_category
     config.model_purpose = resolved_purpose
-    if payload.adapter_config is not None:
+    if payload.adapter_config is not None and resolved_purpose != "video_generation":
         config.adapter_config_json = payload.adapter_config
+    if resolved_purpose == "video_generation":
+        config.adapter_config_json = {}
+        if any(value is not None for value in (payload.provider, payload.base_url, payload.model_name, payload.api_key)):
+            config.video_capability_status = "unverified"
+            config.video_capability_error = ""
+            config.video_capability_verified_at = None
     if config.api_mode == "gemini_interactions_video":
         from app.services.gemini_interactions_video_service import normalize_gateway_origin
         config.base_url = normalize_gateway_origin(config.base_url)
@@ -535,6 +667,7 @@ async def update_model_config(
         for item in existing:
             item.is_active = False
         config.is_active = True
+        await _apply_video_default_to_existing_courses(db, user.id, config)
     elif payload.is_active is False:
         config.is_active = False
 
@@ -549,6 +682,8 @@ async def activate_model_config(config_id: str, user: User = Depends(current_use
     if not config:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="指定的模型配置不存在")
 
+    if config.is_archived:
+        raise HTTPException(422, "历史媒体配置不能设为默认模型")
     if not _can_be_default(config.model_category, config.model_purpose):
         raise HTTPException(422, "该辅助模型用途不能设为本列默认模型")
     all_configs = await db.scalars(select(ModelConfig).where(
@@ -557,6 +692,7 @@ async def activate_model_config(config_id: str, user: User = Depends(current_use
     ))
     for c in all_configs:
         c.is_active = (c.id == config_id)
+    await _apply_video_default_to_existing_courses(db, user.id, config)
 
     await db.commit()
     await db.refresh(config)
@@ -575,8 +711,8 @@ async def duplicate_model_config(
         raise HTTPException(status_code=404, detail="指定的模型配置不存在")
     duplicate_mode = {
         "text_chat": "text_chat", "vision_chat": "text_chat",
-        "image_generation": "openai_images", "video_generation": "custom_video_async_http",
-        "native_audio_video_generation": "gemini_interactions_video",
+        "image_generation": "openai_images", "video_generation": "protocol_video",
+        "native_audio_video_generation": "protocol_video",
         "speech_generation": "custom_speech_http", "speech_recognition": "volcengine_asr",
         "media_composition": "local_ffmpeg",
     }[payload.model_purpose]
@@ -603,9 +739,12 @@ async def duplicate_model_config(
         supports_multimodal=purpose == "vision_chat",
         capabilities_json=capabilities,
         api_mode=api_mode,
-        adapter_config_json=dict(source.adapter_config_json or {}),
+        adapter_config_json={} if purpose == "video_generation" else dict(source.adapter_config_json or {}),
         model_category=category,
         model_purpose=purpose,
+        is_archived=False,
+        video_capability_status="unverified",
+        video_capability_error="",
         is_active=False,
     )
     db.add(duplicate)
@@ -712,7 +851,29 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
                 "test_capability": payload.test_capability,
             }
 
-    if payload.test_capability in {"video_generation", "speech_generation", "speech_recognition"}:
+    if payload.test_capability == "video_generation":
+        if provider_type not in {"openai_compatible", "anthropic"}:
+            return {
+                "success": False,
+                "message": "视频模型仅支持 OpenAI 兼容协议或 Anthropic 协议。",
+                "provider": provider_type,
+                "model_name": model_name,
+                "test_capability": payload.test_capability,
+            }
+        _validate_model_transport(provider_type, "protocol_video", base_url, {})
+        success, message = await _test_protocol_connection(
+            provider_type, base_url, model_name, api_key, timeout,
+        )
+        return {
+            "success": success,
+            "message": message,
+            "provider": provider_type,
+            "model_name": model_name,
+            "test_capability": payload.test_capability,
+            "video_capability_status": stored_config.video_capability_status if stored_config else "unverified",
+        }
+
+    if payload.test_capability in {"speech_generation", "speech_recognition"}:
         resolved_mode = api_mode or (
             "custom_video_async_http" if payload.test_capability == "video_generation"
             else "volcengine_asr" if payload.test_capability == "speech_recognition"
@@ -772,6 +933,32 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
                     "model_name": model_name,
                     "test_capability": payload.test_capability,
                 }
+        if resolved_mode == "openai_chat_video":
+            from app.services.openai_chat_video_service import OpenAIChatVideoAdapter
+
+            probe = ModelConfig(
+                owner_id=user.id,
+                name="multimodal-video-capability-probe",
+                provider=provider_type,
+                base_url=base_url,
+                model_name=model_name,
+                encrypted_api_key=encrypt_secret(api_key) if api_key else "",
+                timeout_seconds=timeout,
+                capabilities_json=["video_generation", "native_audio_video_generation"],
+                api_mode=resolved_mode,
+                adapter_config_json=resolved_adapter,
+                is_active=False,
+            )
+            try:
+                await OpenAIChatVideoAdapter(probe).probe_capabilities()
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "success": False,
+                    "message": str(exc),
+                    "provider": provider_type,
+                    "model_name": model_name,
+                    "test_capability": payload.test_capability,
+                }
         return {
             "success": True,
             "message": (
@@ -779,6 +966,8 @@ async def test_llm_connection(payload: TestConnectionRequest, user: User = Depen
                 if resolved_mode == "volcengine_ark_video"
                 else "Gemini Interactions 与 Files 网关端点探测通过。"
                 if resolved_mode == "gemini_interactions_video"
+                else "通用多模态模型的视频生成通道已连接。"
+                if resolved_mode == "openai_chat_video"
                 else "媒体模型配置与传输映射校验通过。正式生成时将执行异步任务和结果文件校验。"
             ),
             "provider": provider_type,
@@ -914,7 +1103,7 @@ async def save_settings_legacy(payload: dict[str, Any], user: User = Depends(cur
         else:
             saved.encrypted_api_key = ""
 
-    prefs = saved.preferences_json or {}
+    prefs = normalize_model_preferences(saved.preferences_json)
     if "default_language" in payload:
         prefs["default_language"] = payload["default_language"]
     if "default_grade_level" in payload:

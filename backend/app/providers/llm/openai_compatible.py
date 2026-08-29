@@ -491,6 +491,204 @@ class OpenAICompatibleProvider(LLMProvider):
                 response,
             ) from exc
 
+    @staticmethod
+    def _multimodal_content(prompt: str, attachments: list[dict[str, str]]) -> list[dict[str, Any]]:
+        """Build Chat Completions content blocks for image/PDF attachments."""
+        blocks: list[dict[str, Any]] = []
+        for attachment in attachments:
+            mime = attachment.get("mime_type", "application/octet-stream")
+            data = attachment.get("data_b64", "")
+            if not data:
+                continue
+            if mime.startswith("image/"):
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                })
+            elif mime == "application/pdf":
+                # Supported by current OpenAI-compatible gateways and ignored
+                # safely by older gateways, which still receive extracted text.
+                blocks.append({
+                    "type": "file",
+                    "file": {
+                        "filename": attachment.get("filename") or "attachment.pdf",
+                        "file_data": f"data:{mime};base64,{data}",
+                    },
+                })
+        blocks.append({"type": "text", "text": prompt})
+        return blocks
+
+    async def structured_with_attachments(
+        self, system: str, prompt: str, attachments: list[dict[str, str]], schema: type[T],
+    ) -> T:
+        """Structured Chat Completions request carrying native visual files."""
+        settings = get_settings()
+        if not self.api_key:
+            raise LLMProviderError("upstream_http_error", "当前模型未配置 API Key，请先完成模型设置。")
+        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": self._multimodal_content(
+                    f"{prompt}\n\n请仅返回符合以下 JSON Schema 的 JSON 对象：\n{schema_json}",
+                    attachments,
+                )},
+            ],
+            "temperature": 0.2,
+            "max_tokens": settings.llm_max_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        data, response = await self._post_chat(payload)
+        content = self._strip_json_fence(self._sanitize_control_chars(self._content_from_response(data, response)))
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            repaired = self._try_repair_truncated_json(content)
+            if repaired is None:
+                raise self._response_error(
+                    "upstream_invalid_json", "模型返回的内容不是有效 JSON，请检查模型的结构化输出能力。", response,
+                )
+            decoded = repaired
+        try:
+            return schema.model_validate(decoded)
+        except ValidationError as exc:
+            raise self._response_error(
+                "upstream_schema_mismatch", "模型返回的需求结构不完整，请重试或切换支持结构化输出的模型。", response,
+            ) from exc
+
+    async def native_agent_decision_with_attachments(
+        self,
+        system: str,
+        prompt: str,
+        attachments: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+    ):
+        """OpenAI-compatible native tool calling with the same visual input."""
+        from app.agent.schemas import AgentDecision, ToolCall
+
+        if not self.api_key:
+            return None
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": self._multimodal_content(prompt, attachments)},
+            ],
+            "temperature": 0.2,
+            "max_tokens": get_settings().llm_max_tokens,
+        }
+        if tools:
+            payload["tools"] = [
+                {"type": "function", "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema") or {},
+                }}
+                for tool in tools if tool.get("name")
+            ]
+        try:
+            data, _ = await self._post_chat(payload)
+        except LLMProviderError:
+            return None
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            return None
+        raw_content = message.get("content") or ""
+        if isinstance(raw_content, list):
+            raw_content = "".join(str(block.get("text", "")) for block in raw_content if isinstance(block, dict))
+        parsed: list[ToolCall] = []
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") or {}
+            name = function.get("name") or ""
+            if not name:
+                continue
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            parsed.append(ToolCall(
+                id=str(call.get("id") or ""), tool_name=name,
+                input=arguments if isinstance(arguments, dict) else {},
+            ))
+        if parsed:
+            return AgentDecision(thinking=raw_content[:2000], tool_calls=parsed, message="已调用工具继续执行。")
+        try:
+            return AgentDecision.model_validate(json.loads(self._strip_json_fence(self._sanitize_control_chars(raw_content))))
+        except (json.JSONDecodeError, ValidationError):
+            return None
+
+    async def stream_decision_with_attachments(
+        self, system: str, prompt: str, attachments: list[dict[str, str]], schema: type[T],
+    ):
+        """Streaming structured decision with native image/PDF blocks."""
+        settings = get_settings()
+        if not self.api_key:
+            raise LLMProviderError("upstream_http_error", "当前模型未配置 API Key，请先完成模型设置。")
+        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": self._multimodal_content(
+                    f"{prompt}\n\n请仅返回符合以下 JSON Schema 的 JSON 对象：\n{schema_json}",
+                    attachments,
+                )},
+            ],
+            "temperature": 0.2,
+            "max_tokens": settings.llm_max_tokens,
+            "stream": True,
+            "response_format": {"type": "json_object"},
+        }
+        parser = ThinkingStreamParser()
+        buffer: list[str] = []
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        try:
+            async with build_async_client(url, timeout=self.timeout_seconds) as client:
+                async with client.stream("POST", url, headers=self._headers(), json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        delta = choices[0].get("delta") or {} if choices else {}
+                        content = delta.get("content")
+                        if isinstance(content, list):
+                            content = "".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+                        if not content:
+                            continue
+                        buffer.append(content)
+                        thought = parser.feed(content)
+                        if thought:
+                            yield ("thought_delta", thought)
+        except (httpx.HTTPError, LLMProviderError) as exc:
+            logger.warning("stream_decision_with_attachments 流式失败，回退 structured：%s", exc)
+            yield ("decision_ready", await self.structured_with_attachments(system, prompt, attachments, schema))
+            return
+        try:
+            clean = self._strip_json_fence(self._sanitize_control_chars("".join(buffer)))
+            try:
+                decoded = json.loads(clean)
+            except json.JSONDecodeError:
+                decoded = self._try_repair_truncated_json(clean)
+                if decoded is None:
+                    raise
+            decision = schema.model_validate(decoded)
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("stream_decision_with_attachments 内容异常，回退 structured：%s", str(exc)[:200])
+            decision = await self.structured_with_attachments(system, prompt, attachments, schema)
+        yield ("decision_ready", decision)
+
     async def stream_decision(self, system: str, prompt: str, schema: type[T]):
         """流式返回结构化决策：实时 yield thinking 增量，最终 yield decision_ready。
 

@@ -47,7 +47,7 @@ function taskStatusLabel(task: CourseTask) {
         :aria-current="activeType === task.task_type ? 'page' : undefined"
         @click="openTask(task.task_type)"
       >
-        <span class="step-num">{{ String(task.display_order).padStart(2, '0') }}</span>
+        <span class="step-num">{{ String(idx + 1).padStart(2, '0') }}</span>
         <span class="step-name">{{ task.display_name }}</span>
         <span v-if="['running', 'queued', 'pausing'].includes(task.status) && task.progress" class="step-mini-bar" aria-hidden="true">
           <i :style="{ width: `${task.progress}%` }" />

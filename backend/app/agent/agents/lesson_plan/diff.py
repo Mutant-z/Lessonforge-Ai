@@ -107,11 +107,17 @@ def diff_lesson_plans(
         section_id for section_id in shared
         if source_records[section_id]["coverage_refs"] != candidate_records[section_id]["coverage_refs"]
     )
-    section_content_changed = sorted(
-        section_id for section_id in shared
-        if source_records[section_id]["summary"] != candidate_records[section_id]["summary"]
-        or source_records[section_id]["blocks"] != candidate_records[section_id]["blocks"]
-    )
+    section_content_changed = sorted(set(
+        [
+            section_id for section_id in shared
+            if source_records[section_id]["summary"] != candidate_records[section_id]["summary"]
+            or source_records[section_id]["blocks"] != candidate_records[section_id]["blocks"]
+        ]
+        + [
+            section_id for section_id in added
+            if section_visible_text(candidate_records[section_id])
+        ]
+    ))
     emptied_sections = sorted(
         section_id for section_id in shared
         if section_visible_text(source_records[section_id])

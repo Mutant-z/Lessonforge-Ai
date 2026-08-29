@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { Document } from '@element-plus/icons-vue';
 import { buildAgentTurns } from '../../../composables/useAgentStream';
 import type { AgentStreamNode } from '../../../composables/useAgentStream';
 import type { PipelineTimelineItem } from '../../../stores/pipeline';
@@ -97,6 +98,7 @@ const TOOL_ERROR_LABELS: Record<string, string> = {
   artifact_locked: '教学设计已被整体锁定',
   candidate_invalid: '修改后的教学设计结构不合法',
   no_progress: '重复读取没有产生新信息，请继续下一步',
+  confirmation_required: '本次修改涉及高风险变更，等待教师确认后继续',
 };
 
 function friendlyToolError(node: Extract<AgentStreamNode, { kind: 'tool' }>): string {
@@ -436,7 +438,9 @@ function slideIndexFor(node: Extract<AgentStreamNode, { kind: 'event' }>): numbe
   const v = node.data.slide_index;
   if (typeof v === 'number') return v;
   const page = node.data.slide?.page;
-  if (typeof page === 'number') return page;
+  // slide.page 由后端按 1-based 发出（render_tools: page = index + 1），
+  // 而 slide_index 是 0-based；统一归一化为 0-based 页索引。
+  if (typeof page === 'number') return Math.max(0, page - 1);
   return null;
 }
 
@@ -460,6 +464,10 @@ function eventIcon(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
     case 'layout.compile.result': return '📐';
     case 'polish.result': return '✅';
     case 'intent.resolved': return '🎯';
+    case 'edit.plan.created': return '📋';
+    case 'slide.change.applied': return '✏️';
+    case 'edit.corrected': return '🩹';
+    case 'qa.warning': return '⚠️';
     case 'task.spec.created': return '📋';
     case 'context.snapshot.created': return '📌';
     case 'evidence.bundle.ready': return '🗂';
@@ -517,7 +525,7 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
       const applied = d.payload?.applied_slide_ids?.length || 0;
       const preserved = d.payload?.preserved_slide_ids?.length || 0;
       if (d.message) return d.message;
-      if (status === 'partial') return `已安全更新 ${applied} 页，${preserved} 页保留原布局`;
+      if (status === 'partial' || status === 'applied_with_warnings') return `已更新 ${applied} 页，并保留非阻断警告`;
       if (status === 'no_change') return '当前页面已达到安全排版上限，原版本保持不变';
       if (status === 'needs_confirmation') {
         return d.payload?.request_id
@@ -530,6 +538,14 @@ function eventLabel(node: Extract<AgentStreamNode, { kind: 'event' }>): string {
       const intent = d.payload?.intent || d.intent || '';
       return d.message || `意图已识别：${intent}`;
     }
+    case 'edit.plan.created':
+      return d.message || '已生成元素级修改计划';
+    case 'slide.change.applied':
+      return d.message || `${d.slide?.slide_id || d.payload?.slide_id || '页面'} 已应用精确修改`;
+    case 'edit.corrected':
+      return d.message || '已自动恢复计划外变化';
+    case 'qa.warning':
+      return d.message || d.payload?.message || '存在不阻断发布的质量提示';
     case 'context.snapshot.created':
       return d.message || `执行前上下文快照已创建（v${d.payload?.source_version || '?'}）`;
     case 'task.spec.created':
@@ -729,6 +745,12 @@ onBeforeUnmount(() => {
             </div>
             <div class="message-bubble user-bubble">
               <span>{{ node.content }}</span>
+              <div v-if="node.attachments.length" class="message-attachments">
+                <span v-for="attachment in node.attachments" :key="attachment.id" class="message-attachment">
+                  <el-icon><Document /></el-icon>
+                  <span>{{ attachment.filename }}</span>
+                </span>
+              </div>
               <span v-if="node.status === 'pending'" class="message-delivery">发送中…</span>
               <span v-else-if="node.status === 'failed'" class="message-delivery failed">发送失败，请重试</span>
             </div>
@@ -1098,6 +1120,31 @@ onBeforeUnmount(() => {
 .message-delivery.failed {
   color: #fecaca;
   font-weight: 700;
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  width: 100%;
+}
+
+.message-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.14);
+  font-size: 11px;
+}
+
+.message-attachment span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .assistant-content {

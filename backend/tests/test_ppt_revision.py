@@ -88,9 +88,8 @@ def test_validate_and_repair_clips_dense_block_bullets():
     assert not check_ppt_against_knowledge(repaired)
 
 
-def test_validate_and_repair_clips_long_unit_without_ellipsis_overflow():
-    """截断不得产生 26 字（25 字 + 省略号）：无尾随标点时也必须 ≤25 字，
-    否则修复轮永远无法收敛（第 1 个文本单元 26 字 > 25 字）。"""
+def test_validate_and_repair_keeps_long_unit_as_non_blocking_advisory():
+    """Character heuristics must not truncate teaching meaning or block publish."""
     from app.services.ppt_knowledge_service import check_ppt_against_knowledge
 
     content = {"theme": "lessonforge_deck_academic", "slides": [
@@ -102,10 +101,37 @@ def test_validate_and_repair_clips_long_unit_without_ellipsis_overflow():
                      "citation": "预习难点剖析"}]},
     ]}
     repaired, err = _validate_and_repair_ppt(content)
-    assert err == ""
+    assert repaired is not None
+    assert "超过单条上限" in err
     text = repaired["slides"][0]["blocks"][0]["text"]
-    assert len(text) <= 25
-    assert not check_ppt_against_knowledge(repaired)
+    assert text == "深度增加使水压显著增大，但完全浸没后浮力为什么保持不变？"
+    assert any(
+        item.rule_id == "density.item_chars"
+        for item in check_ppt_against_knowledge(repaired)
+    )
+
+
+def test_validate_and_repair_does_not_reject_total_body_chars_over_120():
+    content = {"theme": "lessonforge_deck_academic", "slides": [{
+        "id": "S01", "page_type": "concept", "title": "浮力随排液体积变化",
+        "purpose": "p", "body": ["压力差形成浮力"], "layout": "bullet",
+        "visual_suggestion": "左侧文字右侧受力示意图",
+        "speaker_notes": "结合受力示意图解释上下表面压力差，并引导学生比较不同状态。",
+        "duration_seconds": 60,
+        "blocks": [{"kind": "bullets", "items": [
+            {"text": "物体完全浸没前排开液体体积随入水深度持续增加"},
+            {"text": "物体完全浸没后排开液体体积与浮力大小保持不变"},
+            {"text": "液体密度增大时相同排液体积对应浮力同步增大"},
+            {"text": "物体上下表面所受液体压力差共同形成竖直浮力"},
+            {"text": "压力随深度增加不代表完全浸没后的浮力会继续增大"},
+            {"text": "称重法通过空气中与液体中示数差直接计算浮力大小"},
+        ]}],
+    }]}
+
+    repaired, err = _validate_and_repair_ppt(content)
+
+    assert repaired is not None
+    assert err == ""
 
 
 def test_restore_locked_paths_preserves_locked_values():

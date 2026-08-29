@@ -117,12 +117,20 @@ async def test_initializer_recovers_from_model_content_errors_with_deterministic
                 retryable=False,
             )
 
+    class RawPydanticTruncationProvider:
+        async def structured(self, system, prompt, schema):
+            # Regression: Anthropic-compatible provider used to leak this raw
+            # exception, bypassing the initialization recovery path.
+            return schema.model_validate_json('{"profiles": [{')
+
     course = CourseProject(
         id="course-2", owner_id="u", title="阿基米德原理", subject="物理", grade_level="八年级",
         audience="八年级学生", duration_minutes=10, scenario="课堂讲解", language="中文",
         settings_json={},
     )
-    for provider in (TruncatedOutputProvider(), SchemaMismatchProvider()):
+    for provider in (
+        TruncatedOutputProvider(), SchemaMismatchProvider(), RawPydanticTruncationProvider(),
+    ):
         bundle, warning = await generate_initialization_bundle(
             provider, make_blueprint(course), course, {"course": {"title": course.title}}, {},
         )

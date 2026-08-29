@@ -43,14 +43,15 @@ const qaLabel = computed(() => {
 const pageResults = computed<PPTPolishPageResult[]>(() => Array.isArray(eventData.value.page_results) ? eventData.value.page_results : []);
 const resultStatus = computed<PPTPolishResultStatus | ''>(() => {
   const value = String(eventData.value.result_status || '');
-  return ['applied', 'partial', 'no_change', 'needs_confirmation'].includes(value)
+  return ['applied', 'applied_with_warnings', 'partial', 'no_change', 'needs_confirmation', 'failed'].includes(value)
     ? value as PPTPolishResultStatus
     : '';
 });
 const polishTitle = computed(() => {
   const applied = Array.isArray(eventData.value.applied_slide_ids) ? eventData.value.applied_slide_ids.length : 0;
   const preserved = Array.isArray(eventData.value.preserved_slide_ids) ? eventData.value.preserved_slide_ids.length : 0;
-  if (resultStatus.value === 'partial') return `部分完成：更新 ${applied} 页，保留 ${preserved} 页`;
+  if (resultStatus.value === 'partial') return `历史部分完成：更新 ${applied} 页，保留 ${preserved} 页`;
+  if (resultStatus.value === 'applied_with_warnings') return `已更新 ${applied} 页，并附带非阻断提示`;
   if (resultStatus.value === 'no_change') return '没有可验证的安全改善，原版本保持不变';
   if (resultStatus.value === 'needs_confirmation') return '目标或候选方案需要确认';
   return applied ? `已安全润色 ${applied} 页` : '页面润色已完成';

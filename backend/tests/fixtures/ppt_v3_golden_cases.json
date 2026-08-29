@@ -1,0 +1,22 @@
+[
+  {"id":"title-font-up","instruction":"标题放大10%","target":"title","changed":["style.size"],"preserve":["body","images","notes"]},
+  {"id":"body-font-up","instruction":"正文再大一点","target":"body","changed":["style.size"],"preserve":["title","images","notes"]},
+  {"id":"body-font-down","instruction":"正文稍微小一点","target":"body","changed":["style.size"],"preserve":["title","images","notes"]},
+  {"id":"title-rewrite","instruction":"只润色标题","target":"title","changed":["text"],"preserve":["body","images","notes"]},
+  {"id":"bullet-rewrite","instruction":"只润色第二条要点","target":"body.1","changed":["text"],"preserve":["title","body.0","images"]},
+  {"id":"image-scale-up","instruction":"图片放大10%","target":"image","changed":["w","h"],"preserve":["text","asset"]},
+  {"id":"image-scale-down","instruction":"图片缩小一点","target":"image","changed":["w","h"],"preserve":["text","asset"]},
+  {"id":"image-move-right","instruction":"图片向右移动","target":"image","changed":["x"],"preserve":["text","asset","size"]},
+  {"id":"image-move-up","instruction":"图片往上挪一点","target":"image","changed":["y"],"preserve":["text","asset","size"]},
+  {"id":"image-replace","instruction":"替换这张图片","target":"image","changed":["asset_id"],"preserve":["x","y","w","h","z"]},
+  {"id":"spacing-up","instruction":"增大正文间距","target":"body","changed":["spacing"],"preserve":["text","images"]},
+  {"id":"spacing-down","instruction":"正文排紧凑一点","target":"body","changed":["spacing"],"preserve":["text","images"]},
+  {"id":"align-left","instruction":"这些卡片左对齐","target":"cards","changed":["x"],"preserve":["text","images"]},
+  {"id":"align-center","instruction":"标题居中","target":"title","changed":["style.align"],"preserve":["text","images"]},
+  {"id":"contrast-up","instruction":"重点更突出","target":"body","changed":["style.bold","style.color"],"preserve":["text","images"]},
+  {"id":"local-relayout","instruction":"只重新排版本页","target":"slide","changed":["geometry"],"preserve":["text","images","notes"]},
+  {"id":"template-switch","instruction":"本页换成另一种模板","target":"slide","changed":["geometry","theme_style"],"preserve":["text","images","notes"]},
+  {"id":"multi-text-image","instruction":"润色标题并放大图片","target":"title,image","changed":["text","w","h"],"preserve":["body","notes"]},
+  {"id":"scope-protection","instruction":"只改当前页标题，其他都不动","target":"title","changed":["text"],"preserve":["non_target_slides","body","images","notes"]},
+  {"id":"warning-publish","instruction":"整体优化本页","target":"slide","changed":["best_renderable_candidate"],"preserve":["ppt_structure"],"expected_status":"applied_with_warnings"}
+]

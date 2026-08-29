@@ -79,7 +79,14 @@ def render_geometry_preview(spec: dict[str, Any], zones: LayoutZones) -> str:
 
 
 def provider_supports_vision(provider: Any) -> bool:
-    return isinstance(provider, (AnthropicProvider, OpenAICompatibleProvider))
+    # Chat attachments use a transparent provider facade.  Keep the capability
+    # check based on the concrete provider as well as the facade's native method
+    # so PPT visual QA is not accidentally skipped for an attached image.
+    return isinstance(provider, (AnthropicProvider, OpenAICompatibleProvider)) or (
+        callable(getattr(provider, "structured_with_image", None))
+        and callable(getattr(provider, "structured_with_attachments", None))
+        and getattr(provider, "name", "") in {"anthropic", "openai_compatible"}
+    )
 
 
 class RenderGeometryPreviewInput(BaseModel):

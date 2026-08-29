@@ -17,6 +17,30 @@ def material_dict(item: Material) -> dict:
     return {key: getattr(item, key) for key in ("id", "course_id", "intake_session_id", "original_filename", "mime_type", "size_bytes", "usage_policy", "parse_status", "summary", "error_message", "created_at")}
 
 
+async def _save_course_material(course_id: str, file: UploadFile, usage_policy: str, db: AsyncSession) -> Material:
+    settings = get_settings()
+    path, size, checksum = await save_upload(file, settings.storage_root / "uploads", settings.max_upload_mb * 1024 * 1024)
+    material = Material(
+        course_id=course_id, original_filename=safe_filename(file.filename or "material"), storage_name=path.name,
+        mime_type=file.content_type or "application/octet-stream", size_bytes=size, usage_policy=usage_policy, checksum=checksum,
+    )
+    db.add(material)
+    await db.flush()
+    try:
+        text, chunks = extract_text(path)
+        material.parse_status = "completed"
+        material.summary = (
+            "图片附件（原图将发送给视觉模型）"
+            if material.mime_type.startswith("image/")
+            else text[:500] + ("…" if len(text) > 500 else "")
+        )
+        db.add_all([MaterialChunk(material_id=material.id, chunk_index=i, **chunk) for i, chunk in enumerate(chunks)])
+    except Exception as exc:
+        material.parse_status = "failed"
+        material.error_message = str(exc)
+    return material
+
+
 async def owned_material(item: Material, user: User, db: AsyncSession):
     if item.course_id:
         await owned_course(item.course_id, user, db)
@@ -32,22 +56,22 @@ async def upload_material(
     user: User = Depends(current_user), db: AsyncSession = Depends(get_db),
 ):
     await owned_course(course_id, user, db)
-    settings = get_settings()
-    path, size, checksum = await save_upload(file, settings.storage_root / "uploads", settings.max_upload_mb * 1024 * 1024)
-    material = Material(
-        course_id=course_id, original_filename=safe_filename(file.filename or "material"), storage_name=path.name,
-        mime_type=file.content_type or "application/octet-stream", size_bytes=size, usage_policy=usage_policy, checksum=checksum,
-    )
-    db.add(material)
-    await db.flush()
-    try:
-        text, chunks = extract_text(path)
-        material.parse_status = "completed"
-        material.summary = text[:500] + ("…" if len(text) > 500 else "")
-        db.add_all([MaterialChunk(material_id=material.id, chunk_index=i, **chunk) for i, chunk in enumerate(chunks)])
-    except Exception as exc:
-        material.parse_status = "failed"
-        material.error_message = str(exc)
+    material = await _save_course_material(course_id, file, usage_policy, db)
+    await db.commit()
+    await db.refresh(material)
+    return material_dict(material)
+
+
+@router.post("/courses/{course_id}/chat-attachments", status_code=201)
+async def upload_chat_attachment(
+    course_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload one file that can be attached to any of the six Agent chats."""
+    await owned_course(course_id, user, db)
+    material = await _save_course_material(course_id, file, "chat_attachment", db)
     await db.commit()
     await db.refresh(material)
     return material_dict(material)

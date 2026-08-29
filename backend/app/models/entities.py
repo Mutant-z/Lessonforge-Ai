@@ -609,6 +609,10 @@ class ModelConfig(Base, TimestampMixin):
     adapter_config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     model_category: Mapped[str] = mapped_column(String(20), default="text", index=True)
     model_purpose: Mapped[str] = mapped_column(String(40), default="text_chat", index=True)
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    video_capability_status: Mapped[str] = mapped_column(String(20), default="unverified", index=True)
+    video_capability_error: Mapped[str] = mapped_column(Text, default="")
+    video_capability_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     preferences_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 

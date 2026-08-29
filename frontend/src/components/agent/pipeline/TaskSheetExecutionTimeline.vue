@@ -8,6 +8,7 @@
  * 加入任务单特有事件（意图识别 / 计划 / 澄清 / 差异）渲染。
  */
 import { computed, nextTick, ref, watch } from 'vue';
+import { Document } from '@element-plus/icons-vue';
 import { buildAgentTurns } from '../../../composables/useAgentStream';
 import type { AgentStreamNode } from '../../../composables/useAgentStream';
 import type { PipelineTimelineItem } from '../../../stores/pipeline';
@@ -253,6 +254,12 @@ watch(() => props.items.length, () => scrollToBottom());
             </div>
             <div class="ts-message-bubble ts-user-bubble">
               <span>{{ node.content }}</span>
+              <div v-if="node.attachments.length" class="ts-message-attachments">
+                <span v-for="attachment in node.attachments" :key="attachment.id" class="ts-message-attachment">
+                  <el-icon><Document /></el-icon>
+                  <span>{{ attachment.filename }}</span>
+                </span>
+              </div>
               <span v-if="node.status === 'pending'" class="ts-message-delivery">发送中…</span>
               <span v-else-if="node.status === 'failed'" class="ts-message-delivery failed">发送失败，请重试</span>
             </div>
@@ -440,6 +447,20 @@ watch(() => props.items.length, () => scrollToBottom());
 .ts-user-bubble { background: #eef2ff; color: #1f2937; }
 .ts-message-delivery { font-size: 11px; color: #f59e0b; margin-left: 6px; }
 .ts-message-delivery.failed { color: #ef4444; }
+.ts-message-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.ts-message-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 6px;
+  border: 1px solid #c7d2fe;
+  border-radius: 7px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 11px;
+}
+.ts-message-attachment span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ts-assistant-content { flex: 1; min-width: 0; }
 .ts-term-execution {
   border: 1px solid #e5e7eb;

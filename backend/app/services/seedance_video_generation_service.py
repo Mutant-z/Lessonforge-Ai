@@ -50,8 +50,8 @@ from app.schemas.video import (
 )
 from app.services.media_provider_service import MediaProviderError
 from app.services.native_audio_video_provider import native_audio_video_provider
-from app.services.seedance_provider_service import transcribe_doubao_audio
-from app.services.video_generation_settings_service import effective_video_resolution
+from app.services.model_config_service import resolve_model_config
+from app.services.audio_transcription_service import resolve_audio_transcription_config, transcribe_audio
 
 
 def utcnow() -> datetime:
@@ -165,6 +165,33 @@ def _subtitle_segments(items: list[dict], duration: float, fallback_text: str) -
     return normalized or [{"start_seconds": 0.0, "end_seconds": duration, "text": fallback_text}]
 
 
+async def _review_audio(
+    transcription_config: ModelConfig | None,
+    audio_path: Path,
+    scene: SeedanceNativeScene,
+) -> tuple[str, list[dict], dict, str | None]:
+    """Best-effort audio review; video delivery never depends on transcription."""
+    duration = scene.end_seconds - scene.start_seconds
+    fallback = _subtitle_segments([], duration, scene.spoken_text)
+    if transcription_config is None:
+        return "", fallback, {"status": "skipped", "message": "已使用脚本字幕"}, (
+            "未配置可复用的音频理解模型，成片已使用确认脚本生成字幕。"
+        )
+    try:
+        transcript = await transcribe_audio(transcription_config, audio_path)
+    except Exception:  # noqa: BLE001 - 转写是非阻塞增强能力
+        return "", fallback, {"status": "skipped", "message": "音轨检查不可用，已使用脚本字幕"}, (
+            "音轨检查暂不可用，成片已使用确认脚本生成字幕。"
+        )
+    segments = _subtitle_segments(transcript.segments, duration, transcript.text)
+    qa = _fact_qa(scene, transcript.text)
+    if qa["status"] != "passed":
+        qa["status"] = "warning"
+        qa["message"] = "音轨内容与确认脚本存在差异，建议人工复核"
+        return transcript.text, segments, qa, "部分片段的音轨与确认脚本存在差异，建议人工复核。"
+    return transcript.text, segments, qa, None
+
+
 def _request_hash(scene, model: ModelConfig, resolution: str, instruction: str = "") -> str:
     payload = {
         "model_config_id": model.id, "provider": model.provider, "api_mode": model.api_mode,
@@ -213,22 +240,29 @@ async def _latest_artifact(db, course_id: str, kind: str) -> Artifact | None:
     ).order_by(Artifact.version.desc()))
 
 
-async def _configs(db, course: CourseProject) -> tuple[ModelConfig, ModelConfig]:
+async def _configs(db, course: CourseProject) -> tuple[ModelConfig, ModelConfig | None]:
     session = await db.scalar(select(AgentChatSession).where(
         AgentChatSession.course_id == course.id, AgentChatSession.module_type == "video_generation",
     ))
-    video = await db.get(ModelConfig, session.video_model_config_id) if session and session.video_model_config_id else None
-    if not video or video.api_mode not in {"volcengine_ark_video", "gemini_interactions_video"}:
-        raise ValueError("请先配置并选择原生有声视频模型")
+    video = await resolve_model_config(
+        db,
+        course.owner_id,
+        session.video_model_config_id if session else None,
+        "video",
+    )
+    if (
+        not video
+        or video.is_archived
+        or video.provider not in {"openai_compatible", "anthropic"}
+        or video.model_purpose != "video_generation"
+    ):
+        raise ValueError("请先配置并选择视频模型")
     capabilities = set(video.capabilities_json or [])
     if not {"video_generation", "native_audio_video_generation"} <= capabilities:
         raise ValueError("视频配置必须声明视频生成和原生有声视频能力")
     native_audio_video_provider(video)
-    configs = list(await db.scalars(select(ModelConfig).where(ModelConfig.owner_id == course.owner_id)))
-    asr = next((item for item in configs if item.api_mode == "volcengine_asr" and "speech_recognition" in (item.capabilities_json or [])), None)
-    if not asr:
-        raise ValueError("原生音轨教学事实严格模式需要配置语音识别 / ASR 模型")
-    return video, asr
+    transcription = await resolve_audio_transcription_config(db, course.owner_id)
+    return video, transcription
 
 
 async def _cached_asset(db, course_id: str, request_hash: str) -> ArtifactAsset | None:
@@ -239,7 +273,7 @@ async def _cached_asset(db, course_id: str, request_hash: str) -> ArtifactAsset 
         VideoSceneJob.output_asset_id.is_not(None),
     ).order_by(VideoSceneJob.created_at.desc()).limit(20)))
     for job in jobs:
-        if (job.qa_json or {}).get("status") != "passed":
+        if (job.qa_json or {}).get("status") not in {"passed", "warning", "skipped"}:
             continue
         asset = await db.get(ArtifactAsset, job.output_asset_id)
         if asset and asset.status in {"preview", "approved"}:
@@ -258,9 +292,19 @@ async def create_video_generation_quote(
     if not course or not script_artifact or schema_version not in {"3.0", VIDEO_SCRIPT_V4}:
         raise ValueError("请先生成或同步 Seedance V3/V4 视频脚本")
     script = seedance_video_script_for_generation(script_artifact.content_json)
+    from app.services.video_generation_capability_service import get_video_generation_capabilities
+
+    capabilities = await get_video_generation_capabilities(db, course)
+    if not capabilities.available:
+        raise MediaProviderError(
+            capabilities.unavailable_reason or "当前视频模型暂不可用，请在设置中检查或更换视频模型。",
+            retryable=False,
+            code=capabilities.error_code or "video_model_not_generation_capable",
+        )
     video, _ = await _configs(db, course)
     provider = native_audio_video_provider(video)
-    resolution = request.resolution or await _preferred_video_resolution(course, provider)
+    supported = provider.capabilities().get("resolutions") or [provider.capabilities().get("resolution")]
+    resolution = request.resolution or ("1280x720" if "1280x720" in supported else next((item for item in supported if item), "1280x720"))
     if resolution not in NATIVE_VIDEO_RESOLUTIONS:
         raise ValueError(f"不支持的视频分辨率：{resolution}")
     requested = provider.capabilities().get("resolutions") or [provider.capabilities().get("resolution")]
@@ -320,7 +364,7 @@ async def create_video_generation_quote(
         owner_id=owner_id, course_id=course.id, script_artifact_id=script_artifact.id,
         model_config_id=video.id, request_json=request.model_dump(), scenes_json=scene_quotes,
         estimated_tokens=total_tokens, estimated_cost_fen=total_cost,
-        maximum_cost_fen=total_cost * 2 if total_cost else 0, expires_at=expires,
+        maximum_cost_fen=total_cost, expires_at=expires,
     )
     db.add(quote)
     await db.flush()
@@ -333,13 +377,6 @@ async def create_video_generation_quote(
         estimated_tokens=total_tokens, estimated_cost_fen=total_cost,
         maximum_cost_fen=quote.maximum_cost_fen, scenes=scene_quotes,
     )
-
-
-async def _preferred_video_resolution(course: CourseProject, provider) -> str:
-    """返回课程保存的偏好分辨率；未设置或不支持时退回模型默认。"""
-    supported = provider.capabilities().get("resolutions") or [provider.capabilities().get("resolution")]
-    fallback = str(provider.capabilities().get("resolution") or "1280x720")
-    return effective_video_resolution(course, supported, fallback)
 
 
 async def _consume_quote(db, task: CourseTask, quote_id: str, approved_max_cost_fen: int) -> VideoGenerationQuote:
@@ -382,9 +419,20 @@ async def create_seedance_video_run(
             raise ValueError("视频尚未生成，无法重新合成")
         quote = None
     else:
-        if not request.quote_id or request.approved_max_cost_fen is None:
-            raise ValueError("提交原生有声视频任务前必须确认有效报价")
-        quote = await _consume_quote(db, task, request.quote_id, request.approved_max_cost_fen)
+        if request.quote_id and request.approved_max_cost_fen is not None:
+            quote = await _consume_quote(db, task, request.quote_id, request.approved_max_cost_fen)
+        else:
+            course = await db.get(CourseProject, task.course_id)
+            if not course:
+                raise ValueError("课程不存在")
+            plan = await create_video_generation_quote(
+                db, task, course.owner_id, VideoGenerationQuoteRequest(),
+            )
+            quote = await _consume_quote(db, task, plan.quote_id, plan.maximum_cost_fen)
+            request = request.model_copy(update={
+                "quote_id": plan.quote_id,
+                "approved_max_cost_fen": plan.maximum_cost_fen,
+            })
     run = GenerationRun(
         course_id=task.course_id, course_task_id=task.id, thread_id=str(uuid4()),
         run_type="task", trigger_type=request.action, status="queued", current_node="seedance_native_video",
@@ -417,10 +465,32 @@ async def create_seedance_scene_regeneration_run(
         raise ValueError("视频尚未生成，无法调整片段")
     if task.active_run_id or task.status in {"queued", "running"}:
         raise ValueError("当前视频任务已经在运行")
-    quote = await _consume_quote(db, task, request.quote_id, request.approved_max_cost_fen)
     source = await db.get(Artifact, task.current_artifact_id)
     content = SeedanceVideoGenerationContent.model_validate(source.content_json)
     target = next((item for item in content.scenes if item.id == scene_id or item.script_scene_id == scene_id), None)
+    if not target:
+        raise ValueError("目标片段不存在")
+    if request.quote_id and request.approved_max_cost_fen is not None:
+        quote = await _consume_quote(db, task, request.quote_id, request.approved_max_cost_fen)
+    else:
+        course = await db.get(CourseProject, task.course_id)
+        if not course:
+            raise ValueError("课程不存在")
+        plan_request = VideoGenerationQuoteRequest(
+            target_scene_id=target.script_scene_id,
+            instruction=request.instruction,
+            visual_prompt=request.visual_prompt,
+            spoken_text=request.spoken_text,
+            voice_direction=request.voice_direction,
+            duration_seconds=request.duration_seconds,
+            include_dependents=request.include_dependents,
+        )
+        plan = await create_video_generation_quote(db, task, course.owner_id, plan_request)
+        quote = await _consume_quote(db, task, plan.quote_id, plan.maximum_cost_fen)
+        request = request.model_copy(update={
+            "quote_id": plan.quote_id,
+            "approved_max_cost_fen": plan.maximum_cost_fen,
+        })
     quoted_ids = {item["scene_id"] for item in quote.scenes_json}
     if not target or target.script_scene_id not in quoted_ids:
         raise ValueError("报价与目标片段不一致")
@@ -482,6 +552,89 @@ async def _store_asset(db, *, course, run, path: Path, asset_type: str, scene_id
     db.add(asset)
     await db.flush()
     return asset
+
+
+async def _publish_partial_artifact(
+    db,
+    *,
+    run: GenerationRun,
+    task: CourseTask,
+    course: CourseProject,
+    script_artifact: Artifact,
+    settings: SeedanceNativeSettings,
+    scenes: list[SeedanceNativeScene],
+    actual_cost_fen: int,
+    generation_warnings: set[str],
+) -> Artifact | None:
+    """Publish completed clips even when the remaining batch is cancelled."""
+    ready: list[SeedanceNativeScene] = []
+    cursor = 0.0
+    for original in scenes:
+        if original.status != "ready" or not original.video_asset_id:
+            continue
+        asset = await db.get(ArtifactAsset, original.video_asset_id)
+        if not asset:
+            continue
+        path = (get_settings().storage_root / asset.relative_path).resolve()
+        if not path.is_file() or get_settings().storage_root.resolve() not in path.parents:
+            continue
+        duration = max(0.001, original.end_seconds - original.start_seconds)
+        scene = original.model_copy(deep=True)
+        scene.sequence = len(ready) + 1
+        scene.start_seconds = cursor
+        scene.end_seconds = cursor + duration
+        cursor = scene.end_seconds
+        ready.append(scene)
+    if not ready:
+        return None
+
+    partial_settings = settings.model_copy(deep=True)
+    partial_settings.interaction_ids = []
+    warning = f"本次批量生成已取消；已保留并发布 {len(ready)} 个完成片段。"
+    content = SeedanceVideoGenerationContent(
+        production_settings=partial_settings,
+        source_versions={"video_script": script_artifact.version},
+        scenes=ready,
+        outputs=VideoGenerationOutputs(duration_seconds=cursor),
+        cost_summary={
+            "actual_cost_fen": actual_cost_fen,
+            "currency": "CNY",
+            "partial_output": True,
+        },
+        audio_qa={
+            "status": "partial",
+            "passed_scenes": sum(1 for scene in ready if (scene.qa or {}).get("status") == "passed"),
+            "warning_scenes": sum(1 for scene in ready if (scene.qa or {}).get("status") == "warning"),
+            "skipped_scenes": sum(1 for scene in ready if (scene.qa or {}).get("status") == "skipped"),
+        },
+        generation_warnings=sorted({*generation_warnings, warning}),
+    )
+    version = (await db.scalar(select(func.max(Artifact.version)).where(
+        Artifact.course_id == course.id,
+        Artifact.artifact_type == "video_generation",
+    )) or 0) + 1
+    artifact = Artifact(
+        course_id=course.id,
+        artifact_type="video_generation",
+        version=version,
+        blueprint_version=course.current_blueprint_version,
+        content_json=content.model_dump(),
+        content_markdown=seedance_video_generation_markdown(content),
+        status="draft",
+        model_name=settings.model_name,
+        prompt_version="seedance-native-v3",
+        change_summary=f"部分完成：已生成 {len(ready)} 个片段",
+        source_versions_json=content.source_versions,
+    )
+    db.add(artifact)
+    await db.flush()
+    asset_ids = {scene.video_asset_id for scene in ready if scene.video_asset_id}
+    assets = list(await db.scalars(select(ArtifactAsset).where(ArtifactAsset.id.in_(asset_ids))))
+    for asset in assets:
+        asset.artifact_id = artifact.id
+        asset.status = "approved"
+    task.current_artifact_id = artifact.id
+    return artifact
 
 
 def _dimensions_for_resolution(resolution: str) -> tuple[int, int]:
@@ -560,6 +713,12 @@ async def execute_seedance_video_run(run_id: str) -> None:
     from app.services.course_task_service import artifact_payload, task_jobs
 
     output_dir: Path | None = None
+    scenes: list[SeedanceNativeScene] = []
+    settings: SeedanceNativeSettings | None = None
+    script_artifact: Artifact | None = None
+    course: CourseProject | None = None
+    actual_cost = 0
+    generation_warnings: set[str] = set()
     try:
         async with SessionLocal() as db:
             run = await db.get(GenerationRun, run_id)
@@ -578,7 +737,7 @@ async def execute_seedance_video_run(run_id: str) -> None:
             if not script_artifact or schema_version not in {"3.0", VIDEO_SCRIPT_V4} or not course:
                 raise ValueError("Seedance V3/V4 视频脚本不存在")
             script = seedance_video_script_for_generation(script_artifact.content_json)
-            video_config, asr_config = await _configs(db, course)
+            video_config, transcription_config = await _configs(db, course)
             control = await db.scalar(select(VideoSceneJob).where(
                 VideoSceneJob.generation_run_id == run_id,
             ).order_by(VideoSceneJob.created_at))
@@ -594,7 +753,7 @@ async def execute_seedance_video_run(run_id: str) -> None:
             settings = SeedanceNativeSettings(
                 model_config_id=video_config.id, model_name=video_config.model_name,
                 quote_id=quote_id or "recompose", approved_max_cost_fen=approved,
-                subtitle_enabled=bool((request_data.get("subtitle_enabled") if "subtitle_enabled" in request_data else True)),
+                subtitle_enabled=True,
                 provider=video_config.provider, api_mode=video_config.api_mode,
                 resolution=run_resolution,
             )
@@ -652,13 +811,23 @@ async def execute_seedance_video_run(run_id: str) -> None:
 
         output_dir = (get_settings().storage_root / "generated" / course.id / "native-audio-video" / run_id).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
-        concurrency = max(1, min(2, int((video_config.adapter_config_json or {}).get("max_concurrency") or 2)))
+        # A declared video model is allowed to enter the flow before its first real
+        # generation.  Keep that first verification serial so an incompatible
+        # endpoint cannot fan out the same failing (and potentially billable)
+        # request across several scenes.
+        concurrency = 1 if video_config.video_capability_status != "verified" else max(
+            1,
+            min(2, int((video_config.adapter_config_json or {}).get("max_concurrency") or 2)),
+        )
         video_provider = native_audio_video_provider(video_config)
         semaphore = asyncio.Semaphore(concurrency)
         actual_cost_lock = asyncio.Lock()
         progress_lock = asyncio.Lock()
         completed_scene_ids: set[str] = set()
+        generation_warnings: set[str] = set()
         stop_submitting = asyncio.Event()
+        primary_failure: list[Exception] = []
+        primary_failure_lock = asyncio.Lock()
         async with SessionLocal() as db:
             prior_cost = await db.scalar(select(func.coalesce(func.sum(VideoSceneJob.actual_cost_fen), 0)).where(
                 VideoSceneJob.generation_run_id == run_id,
@@ -708,9 +877,14 @@ async def execute_seedance_video_run(run_id: str) -> None:
                 return path
             async with semaphore:
                 if stop_submitting.is_set():
-                    raise RuntimeError(f"片段 {scene.id} 尚未提交：已有片段最终失败")
+                    # Surface the provider's original error.  Previously a later
+                    # scene's local "not submitted" message could replace it
+                    # simply because that scene appeared first in script order.
+                    if primary_failure:
+                        raise primary_failure[0]
+                    raise RuntimeError("视频生成已停止：前序片段生成失败")
                 last_qa = None
-                for attempt in (1, 2):
+                for attempt in (1,):
                     scene.status = "generating"
                     async with SessionLocal() as db:
                         job = await db.scalar(select(VideoSceneJob).where(
@@ -719,10 +893,8 @@ async def execute_seedance_video_run(run_id: str) -> None:
                             VideoSceneJob.attempt == attempt,
                         ))
                         if job and job.status == "qa_failed":
-                            last_qa = job.qa_json or {}
-                            scene.actual_cost_fen += int(job.actual_cost_fen or 0)
-                            scene.actual_tokens += int(job.actual_tokens or 0)
-                            continue
+                            job.status = "running"
+                            job.qa_json = {}
                         if not job:
                             job = VideoSceneJob(
                                 generation_run_id=run_id, course_id=course.id, source_artifact_id=script_artifact.id,
@@ -743,8 +915,6 @@ async def execute_seedance_video_run(run_id: str) -> None:
 
                     async with actual_cost_lock:
                         estimate = int(scene.estimated_cost_fen)
-                        if actual_cost + reserved_cost + estimate > settings.approved_max_cost_fen:
-                            raise RuntimeError("剩余预算不足，未提交新的 Seedance Provider 任务")
                         reserved_cost += estimate
 
                     async def record_job(job_id: str):
@@ -760,13 +930,7 @@ async def execute_seedance_video_run(run_id: str) -> None:
 
                     try:
                         if provider_job_id:
-                            if video_config.api_mode == "gemini_interactions_video":
-                                result = await video_provider.resume(
-                                    provider_job_id, provider_file_id=provider_file_id,
-                                    file_started=record_file,
-                                )
-                            else:
-                                result = await video_provider.resume(provider_job_id)
+                            result = await video_provider.resume(provider_job_id)
                         else:
                             generate_kwargs = {
                                 "prompt": _prompt(script, prompt_scene, qa_retry=last_qa, instruction=instruction),
@@ -775,13 +939,31 @@ async def execute_seedance_video_run(run_id: str) -> None:
                                 "idempotency_key": f"{course.id}:{request_hash}:{attempt}",
                                 "job_started": record_job,
                             }
-                            if video_config.api_mode == "gemini_interactions_video":
-                                generate_kwargs["file_started"] = record_file
                             result = await video_provider.generate(**generate_kwargs)
-                    except Exception:
+                    except Exception as exc:
                         async with actual_cost_lock:
                             reserved_cost -= estimate
+                        async with primary_failure_lock:
+                            if not primary_failure:
+                                primary_failure.append(exc)
                         stop_submitting.set()
+                        error_code = exc.code if isinstance(exc, MediaProviderError) else "video_generation_failed"
+                        error_payload = {
+                            "code": error_code,
+                            "message": str(exc)[:500],
+                            "retryable": getattr(exc, "retryable", True),
+                        }
+                        async with SessionLocal() as db:
+                            row = await db.scalar(select(VideoSceneJob).where(
+                                VideoSceneJob.generation_run_id == run_id,
+                                VideoSceneJob.scene_id == scene.id,
+                                VideoSceneJob.attempt == attempt,
+                            ))
+                            if row:
+                                row.status = "failed"
+                                row.error_json = error_payload
+                                row.finished_at = utcnow()
+                                await db.commit()
                         raise
                     raw = output_dir / f"{scene.id}-attempt-{attempt}-raw.mp4"; raw.write_bytes(result.raw)
                     normalized = output_dir / f"{scene.id}-attempt-{attempt}.mp4"
@@ -789,33 +971,41 @@ async def execute_seedance_video_run(run_id: str) -> None:
                         probe = await _normalize_clip(raw, normalized, settings.resolution)
                         audio = output_dir / f"{scene.id}-attempt-{attempt}.wav"
                         await _extract_audio(normalized, audio)
-                    except Exception:
+                        from app.services.openai_chat_video_service import record_video_capability_status
+                        await record_video_capability_status(video_config.id, "verified")
+                    except Exception as exc:
+                        from app.services.openai_chat_video_service import record_video_capability_status
+                        await record_video_capability_status(video_config.id, "failed", "视频文件无效或无法解码")
+                        async with primary_failure_lock:
+                            if not primary_failure:
+                                primary_failure.append(exc)
                         stop_submitting.set()
+                        async with SessionLocal() as db:
+                            row = await db.scalar(select(VideoSceneJob).where(
+                                VideoSceneJob.generation_run_id == run_id,
+                                VideoSceneJob.scene_id == scene.id,
+                                VideoSceneJob.attempt == attempt,
+                            ))
+                            if row:
+                                row.status = "failed"
+                                row.error_json = {
+                                    "code": "video_file_invalid",
+                                    "message": "视频文件无效或无法解码",
+                                    "retryable": False,
+                                }
+                                row.finished_at = utcnow()
+                                await db.commit()
                         raise
-                    try:
-                        transcript = await transcribe_doubao_audio(asr_config, audio)
-                    except Exception as exc:  # noqa: BLE001
-                        stop_submitting.set()
-                        raise MediaProviderError(
-                            f"原生音轨 ASR 失败：{str(exc)[:300]}",
-                            code="video_asr_qa_failed",
-                        ) from exc
-                    subtitle_segments = _subtitle_segments(
-                        transcript.segments,
-                        scene.end_seconds - scene.start_seconds,
-                        transcript.text,
+                    transcript_text, subtitle_segments, qa, audio_warning = await _review_audio(
+                        transcription_config, audio, scene,
                     )
-                    qa = _fact_qa(scene, transcript.text)
+                    if audio_warning:
+                        generation_warnings.add(audio_warning)
                     tokens = int(result.usage.get("total_tokens") or result.usage.get("output_tokens") or scene.estimated_tokens)
-                    if video_config.api_mode == "volcengine_ark_video":
-                        price = float((video_config.adapter_config_json or {})["price_per_million_tokens_cny"])
-                        cost_fen = math.ceil(tokens * price / 1_000_000 * 100)
-                    else:
-                        _, cost_fen = video_provider.estimate_cost(scene.end_seconds - scene.start_seconds)
+                    _, cost_fen = video_provider.estimate_cost(scene.end_seconds - scene.start_seconds)
                     async with actual_cost_lock:
                         reserved_cost -= estimate
                         actual_cost += cost_fen
-                        budget_overrun = actual_cost > settings.approved_max_cost_fen
                     scene.actual_cost_fen += cost_fen
                     scene.actual_tokens += tokens
                     async with SessionLocal() as db:
@@ -824,29 +1014,8 @@ async def execute_seedance_video_run(run_id: str) -> None:
                             row.actual_tokens = tokens; row.actual_cost_fen = cost_fen; row.usage_json = result.usage; row.qa_json = qa
                             row.provider_file_id = getattr(result, "provider_file_id", "")
                             row.actual_model_name = getattr(result, "actual_model_name", "") or video_config.model_name
-                            if budget_overrun:
-                                row.error_json = {
-                                    "code": "provider_usage_exceeded_quote",
-                                    "message": "Provider 回传实耗高于已确认报价；实耗已审计，后续任务将被预算闸门阻断",
-                                }
-                            row.status = "completed" if qa["status"] == "passed" else "qa_failed"; row.finished_at = utcnow()
+                            row.status = "completed"; row.finished_at = utcnow()
                             await db.commit()
-                    if qa["status"] != "passed":
-                        last_qa = qa
-                        if attempt == 1:
-                            async with progress_lock:
-                                completed = len(completed_scene_ids)
-                            await _publish(
-                                run_id, "video_scene_qa_retry",
-                                progress=5 + round(completed / len(scenes) * 70),
-                                scene_id=scene.id, qa=qa, provider=video_config.provider,
-                                api_mode=video_config.api_mode, model_name=video_config.model_name,
-                                completed_scene_count=completed,
-                            )
-                            continue
-                        scene.status = "qa_failed"; scene.qa = qa; scene.actual_transcript = transcript.text
-                        stop_submitting.set()
-                        raise RuntimeError(f"video_asr_qa_failed：片段 {scene.id} 的原生口播未通过教学事实检查")
                     thumb = output_dir / f"{scene.id}.png"; await _thumbnail(normalized, thumb)
                     async with SessionLocal() as db:
                         run_row = await db.get(GenerationRun, run_id); course_row = await db.get(CourseProject, course.id)
@@ -856,14 +1025,14 @@ async def execute_seedance_video_run(run_id: str) -> None:
                             "provider_job_id": result.provider_job_id,
                             "provider_file_id": getattr(result, "provider_file_id", ""),
                             "request_hash": request_hash, "native_audio": True, "qa": qa,
-                            "transcript": transcript.text, "subtitle_segments": subtitle_segments, "probe": probe,
+                            "transcript": transcript_text, "subtitle_segments": subtitle_segments, "probe": probe,
                         })
                         thumb_asset = await _store_asset(db, course=course_row, run=run_row, path=thumb, asset_type="thumbnail", scene_id=scene.id)
                         row = await db.scalar(select(VideoSceneJob).where(VideoSceneJob.generation_run_id == run_id, VideoSceneJob.scene_id == scene.id, VideoSceneJob.attempt == attempt))
                         if row: row.output_asset_id = asset.id
                         await db.commit()
                     scene.video_asset_id = asset.id; scene.thumbnail_asset_id = thumb_asset.id
-                    scene.provider_job_id = result.provider_job_id; scene.actual_transcript = transcript.text
+                    scene.provider_job_id = result.provider_job_id; scene.actual_transcript = transcript_text
                     scene.subtitle_segments = subtitle_segments
                     scene.qa = qa; scene.usage = result.usage; scene.status = "ready"
                     async with progress_lock:
@@ -881,6 +1050,8 @@ async def execute_seedance_video_run(run_id: str) -> None:
         results = await asyncio.gather(*(process_scene(scene) for scene in scenes), return_exceptions=True)
         failures = [(scenes[index].id, result) for index, result in enumerate(results) if isinstance(result, BaseException)]
         if failures:
+            if primary_failure:
+                raise primary_failure[0]
             first_scene_id, first_error = failures[0]
             if isinstance(first_error, Exception):
                 raise first_error
@@ -900,14 +1071,18 @@ async def execute_seedance_video_run(run_id: str) -> None:
             preview_asset = await _store_asset(db, course=course, run=run, path=preview, asset_type="video_preview", status="approved")
             thumb_asset = await _store_asset(db, course=course, run=run, path=thumb, asset_type="thumbnail", status="approved")
             subtitle_asset = await _store_asset(db, course=course, run=run, path=subtitle_path, asset_type="subtitle", status="approved")
-            settings.interaction_ids = list(dict.fromkeys(
-                scene.provider_job_id for scene in scenes
-                if scene.provider_job_id and video_config.api_mode == "gemini_interactions_video"
-            ))
+            settings.interaction_ids = []
+            qa_counts = {
+                status: sum(1 for scene in scenes if (scene.qa or {}).get("status") == status)
+                for status in ("passed", "warning", "skipped")
+            }
+            audio_qa_status = "warning" if qa_counts["warning"] else ("skipped" if qa_counts["skipped"] else "passed")
             content = SeedanceVideoGenerationContent(
                 production_settings=settings, source_versions={"video_script": script_artifact.version}, scenes=scenes,
                 outputs=VideoGenerationOutputs(preview_asset_id=preview_asset.id, final_asset_id=final_asset.id, subtitle_asset_id=subtitle_asset.id, thumbnail_asset_id=thumb_asset.id, duration_seconds=cursor),
                 cost_summary={"estimated_cost_fen": control.estimated_cost_fen if control else 0, "approved_max_cost_fen": settings.approved_max_cost_fen, "actual_cost_fen": actual_cost, "currency": "CNY"},
+                audio_qa={"status": audio_qa_status, "passed_scenes": qa_counts["passed"], "warning_scenes": qa_counts["warning"], "skipped_scenes": qa_counts["skipped"]},
+                generation_warnings=sorted(generation_warnings),
             )
             version = (await db.scalar(select(func.max(Artifact.version)).where(Artifact.course_id == course.id, Artifact.artifact_type == "video_generation")) or 0) + 1
             artifact = Artifact(
@@ -930,16 +1105,51 @@ async def execute_seedance_video_run(run_id: str) -> None:
     except asyncio.CancelledError:
         async with SessionLocal() as db:
             run = await db.get(GenerationRun, run_id); task = await db.get(CourseTask, run.course_task_id) if run else None
+            artifact = None
+            course_row = await db.get(CourseProject, run.course_id) if run else None
+            if run and task and course_row and script_artifact and settings and scenes:
+                artifact = await _publish_partial_artifact(
+                    db,
+                    run=run,
+                    task=task,
+                    course=course_row,
+                    script_artifact=script_artifact,
+                    settings=settings,
+                    scenes=scenes,
+                    actual_cost_fen=actual_cost,
+                    generation_warnings=generation_warnings,
+                )
             if run: run.status = "cancelled"; run.finished_at = utcnow()
             if task: task.status = "cancelled"; task.active_run_id = None
+            jobs = list(await db.scalars(select(VideoSceneJob).where(
+                VideoSceneJob.generation_run_id == run_id,
+                VideoSceneJob.status.in_(("queued", "running")),
+            )))
+            for job in jobs:
+                job.status = "cancelled"; job.finished_at = utcnow()
+            if artifact and run and task:
+                await _emit(
+                    db, run, task, "artifact_version_created",
+                    status="cancelled", progress=task.progress,
+                    artifact=artifact_payload(artifact), partial=True,
+                )
             await db.commit()
         raise
     except Exception as exc:  # noqa: BLE001
         async with SessionLocal() as db:
             run = await db.get(GenerationRun, run_id); task = await db.get(CourseTask, run.course_task_id) if run else None
-            error_code = exc.code if isinstance(exc, MediaProviderError) else ("video_asr_qa_failed" if "video_asr_qa_failed" in str(exc) else "video_provider_unsupported")
-            if run: run.status = "failed"; run.finished_at = utcnow(); run.error_json = {"code": error_code, "message": str(exc)[:500], "retryable": getattr(exc, "retryable", True)}
+            error_code = exc.code if isinstance(exc, MediaProviderError) else "video_provider_unsupported"
+            error_payload = {"code": error_code, "message": str(exc)[:500], "retryable": getattr(exc, "retryable", True)}
+            if run: run.status = "failed"; run.finished_at = utcnow(); run.error_json = error_payload
             if task: task.status = "failed"; task.active_run_id = None; task.error_json = run.error_json; await _emit(db, run, task, "video_generation_failed", status="failed", progress=task.progress, error=run.error_json)
+            jobs = list(await db.scalars(select(VideoSceneJob).where(
+                VideoSceneJob.generation_run_id == run_id,
+                VideoSceneJob.status.in_(("queued", "running")),
+            )))
+            for job in jobs:
+                job.status = "failed"
+                job.error_json = error_payload
+                job.finished_at = utcnow()
             await db.commit()
     finally:
         task_jobs.pop(run_id, None)
@@ -954,7 +1164,7 @@ async def cancel_seedance_provider_jobs(db, task: CourseTask) -> None:
         AgentChatSession.module_type == "video_generation",
     ))
     video = await db.get(ModelConfig, session.video_model_config_id) if session and session.video_model_config_id else None
-    if not video or video.api_mode not in {"volcengine_ark_video", "gemini_interactions_video"}:
+    if not video or video.is_archived or video.provider not in {"openai_compatible", "anthropic"}:
         return
     jobs = list(await db.scalars(select(VideoSceneJob).where(
         VideoSceneJob.generation_run_id == task.active_run_id,

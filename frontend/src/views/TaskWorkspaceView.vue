@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import { ElMessageBox } from 'element-plus';
-import { ArrowDown, CircleCheck, Clock, Cpu, Edit, Lock, MagicStick, Promotion, RefreshRight, Setting, VideoCamera, VideoPause, Warning } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { ArrowDown, ArrowRight, Check, CircleCheck, Clock, Cpu, Document, Edit, Film, Lock, MagicStick, Microphone, Promotion, RefreshRight, Setting, VideoCamera, VideoPause, Warning } from '@element-plus/icons-vue';
 import { api, errorMessage } from '../api/client';
 import { pptTemplatesApi } from '../api/pptTemplates';
 import { settingsApi } from '../api/settings';
 import { pipelineApi } from '../api/pipeline';
 import { useProjectStore } from '../stores/project';
+import { useModelConfigStore } from '../stores/modelConfigs';
 import { useAutoScroll } from '../composables/useAutoScroll';
-import type { Artifact, ExerciseContent, NativeVideoResolution, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationQuote, VideoGenerationScene, VideoScriptContent } from '../types';
-import { isNativeVideoResolution } from '../utils/videoResolution';
+import type { Artifact, ExerciseContent, PPTTemplate, TaskSheetContent, VideoGenerationContent, VideoGenerationScene, VideoScriptContent } from '../types';
 import ProjectShell from '../components/project/ProjectShell.vue';
 import ModelSelector from '../components/agent/ModelSelector.vue';
 import MarkdownRenderer from '../components/content-renderers/MarkdownRenderer.vue';
@@ -37,15 +37,20 @@ import VerbatimWorkbench from '../components/agent/pipeline/VerbatimWorkbench.vu
 import ExerciseWorkbench from '../components/agent/pipeline/ExerciseWorkbench.vue';
 import { DEFAULT_PPT_TEMPLATE } from '../utils/pptTemplate';
 import { isWholeVideoGenerationIntent } from '../utils/videoGenerationIntent';
+import { canRequestVideoQuote, videoGenerationUnavailableReason } from '../utils/videoGenerationAvailability';
 
 const route = useRoute();
 const store = useProjectStore();
+const modelConfigStore = useModelConfigStore();
 const courseId = computed(() => route.params.id as string);
 const taskType = computed(() => route.params.taskType as string);
 const isPpt = computed(() => taskType.value === 'ppt');
 const isLessonPlan = computed(() => taskType.value === 'lesson_plan');
 const isVideoScript = computed(() => taskType.value === 'video_script');
 const isVideoGeneration = computed(() => taskType.value === 'video_generation');
+const restorableArtifactTypes = new Set([
+  'lesson_plan', 'ppt', 'task_sheet', 'exercise', 'video_script', 'video_generation', 'verbatim',
+]);
 const input = ref('');
 const sending = ref(false);
 const pausing = ref(false);
@@ -67,24 +72,8 @@ const blueprintRef = ref<{
 const exerciseDraft = ref<ExerciseContent | null>(null);
 const videoScriptDraft = ref<VideoScriptContent | null>(null);
 const selectedVideoSceneId = ref('');
-const videoResolution = ref<NativeVideoResolution>('1280x720');
-const videoResolutionDirty = ref(false);
-const videoResolutionOptions = computed(() => {
-  const supported = new Set(
-    store.currentTask?.video_generation_capabilities?.supported_resolutions?.map(item => item.value)
-      || ['1280x720', '854x480'],
-  );
-  return [
-    { value: '1280x720' as NativeVideoResolution, label: '1280 × 720', hint: '720p · 高清', supported: supported.has('1280x720') },
-    { value: '854x480' as NativeVideoResolution, label: '854 × 480', hint: '480p · 标清', supported: supported.has('854x480') },
-  ];
-});
-const videoSubtitleEnabled = ref(true);
 const regeneratingScene = ref(false);
-const videoQuote = ref<VideoGenerationQuote | null>(null);
-const quoteDialogVisible = ref(false);
 const quoteLoading = ref(false);
-const pendingSceneRegeneration = ref<{ sceneId: string; payload: Record<string, unknown> } | null>(null);
 const pendingVideoAction = ref<'initial' | 'retry' | 'sync_dependencies'>('initial');
 const showProfile = ref(false);
 const showActivities = ref(false);
@@ -93,6 +82,8 @@ const templateCatalogVersion = ref('');
 const defaultTemplateId = ref(DEFAULT_PPT_TEMPLATE.id);
 const previewTemplateId = ref(DEFAULT_PPT_TEMPLATE.id);
 const showTemplateDrawer = ref(false);
+const showVideoModelSwitch = ref(false);
+const switchingVideoModel = ref(false);
 const applyingTemplate = ref(false);
 const chatViewport = ref<HTMLElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
@@ -113,6 +104,7 @@ function adjustInputHeight() {
 watch(input, adjustInputHeight);
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     send();
@@ -125,7 +117,79 @@ const isMobile = ref(false);
 let mobileMedia: MediaQueryList | null = null;
 
 const task = computed(() => store.currentTask);
+const videoModelOptions = computed(() => modelConfigStore.configs.filter(item => (
+  !item.is_archived
+  && item.model_category === 'video'
+  && item.model_purpose === 'video_generation'
+  && ['openai_compatible', 'anthropic'].includes(item.provider)
+  && item.capabilities.includes('video_generation')
+)));
+const currentVideoModel = computed(() => (
+  videoModelOptions.value.find(item => item.id === task.value?.video_model_config_id)
+  || videoModelOptions.value.find(item => item.is_active)
+  || null
+));
+
+function videoModelStatusLabel(status?: string) {
+  if (status === 'verified') return '已验证';
+  if (status === 'failed') return '上次生成失败';
+  return '首次生成时验证';
+}
+
+function videoModelProtocolLabel(provider: string) {
+  return provider === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
+}
+const videoQuoteAvailable = computed(() => canRequestVideoQuote(
+  Boolean(task.value?.video_model_config_id),
+  task.value?.video_generation_capabilities,
+));
+const videoQuoteUnavailableReason = computed(() => videoGenerationUnavailableReason(
+  Boolean(task.value?.video_model_config_id),
+  task.value?.video_generation_capabilities,
+));
+const taskFailureMessage = computed(() => {
+  const message = task.value?.error?.message || '任务生成失败，请稍后重试。';
+  if (isVideoGeneration.value && (
+    task.value?.error?.code === 'video_interactions_endpoint_unavailable'
+    || /Gemini Interactions|v1beta\/interactions|本地网关/.test(message)
+  )) {
+    return '当前视频模型服务不可用，请在下方选择其他视频模型，或前往设置检查服务连接。';
+  }
+  return message;
+});
 const artifact = computed(() => task.value?.current_artifact || null);
+const latestVideoScript = computed(() => (
+  store.tasks.find(item => item.task_type === 'video_script')?.current_artifact || null
+));
+const latestVideoScriptVersion = computed(() => latestVideoScript.value?.version || null);
+const latestVideoScriptIsValid = computed(() => (
+  ['3.0', '4.0'].includes(String(latestVideoScript.value?.content_json?.schema_version || ''))
+));
+const scriptContentJson = computed(() => latestVideoScript.value?.content_json as Record<string, any> | null);
+const scriptScenes = computed(() => {
+  const scenes = scriptContentJson.value?.scenes;
+  return Array.isArray(scenes) ? scenes : [];
+});
+const scriptScenesCount = computed(() => scriptScenes.value.length || 0);
+const scriptEstimatedDuration = computed(() => {
+  if (!scriptScenes.value.length) return '约 2–3 分钟';
+  const totalSeconds = scriptScenes.value.reduce((acc: number, s: any) => {
+    const dur = (Number(s.end_seconds) || 0) - (Number(s.start_seconds) || 0);
+    return acc + (dur > 0 ? dur : (Number(s.duration_seconds) || 15));
+  }, 0);
+  if (totalSeconds <= 0) return '约 2–3 分钟';
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = Math.round(totalSeconds % 60);
+  if (mins > 0 && secs > 0) return `${mins}分${secs}秒`;
+  if (mins > 0) return `${mins}分钟`;
+  return `${secs}秒`;
+});
+const videoWaitingMessage = computed(() => {
+  if (task.value?.error?.message) return task.value.error.message;
+  if (!latestVideoScript.value) return '请先生成视频脚本；脚本生成完成后即可选择视频模型并开始生成。';
+  if (!latestVideoScriptIsValid.value) return '最新视频脚本结构过旧或无效，请先同步或升级视频脚本。';
+  return `正在准备使用最新视频脚本 V${latestVideoScriptVersion.value} 生成视频。`;
+});
 const isPublishableVideoArtifact = computed(() => {
   if (!isVideoGeneration.value || !artifact.value) return false;
   const content = artifact.value.content_json as Record<string, any>;
@@ -212,13 +276,8 @@ async function load() {
   exerciseDraft.value = null;
   videoScriptDraft.value = null;
   selectedVideoSceneId.value = '';
-  videoResolutionDirty.value = false;
   try {
     await store.openTask(courseId.value, taskType.value);
-    const preferred = store.currentTask?.preferred_video_resolution;
-    if (isNativeVideoResolution(preferred)) {
-      videoResolution.value = preferred;
-    }
     if (taskType.value === 'task_sheet') {
       try {
         const { data } = await api.get(`/courses/${courseId.value}/blueprints`);
@@ -312,7 +371,7 @@ async function send() {
     if (!content || sending.value) return;
     if (isVideoGeneration.value) {
       if (!isWholeVideoGenerationIntent(content)) {
-        error.value = '成片修改必须先点击右侧目标片段的“编辑”，确认修改内容并获取报价；若要生成整片，请输入“帮我生成视频”。';
+        error.value = '成片修改请先点击右侧目标片段的“编辑”，确认修改内容后即可重新生成；若要生成整片，请输入“帮我生成视频”。';
         return;
       }
       sending.value = true;
@@ -373,95 +432,71 @@ async function setVisionModel(id: string) {
   } catch (cause) { error.value = errorMessage(cause); }
 }
 
-async function setVideoModel(id: string) {
+async function setVideoModel(id: string): Promise<boolean> {
   try {
     const { data } = await api.patch(`/courses/${courseId.value}/tasks/${taskType.value}/model`, { video_model_config_id: id });
     if (task.value) task.value.video_model_config_id = data.video_model_config_id;
-  } catch (cause) { error.value = errorMessage(cause); }
+    await store.openTask(courseId.value, taskType.value);
+    return true;
+  } catch (cause) {
+    error.value = errorMessage(cause);
+    return false;
+  }
+}
+
+async function chooseVideoModel(id: string) {
+  if (id === task.value?.video_model_config_id) {
+    showVideoModelSwitch.value = false;
+    return;
+  }
+  switchingVideoModel.value = true;
+  try {
+    if (await setVideoModel(id)) {
+      showVideoModelSwitch.value = false;
+      const selected = videoModelOptions.value.find(item => item.id === id);
+      ElMessage.success(`已切换为 ${selected?.name || selected?.model_name || '所选视频模型'}`);
+    }
+  } finally {
+    switchingVideoModel.value = false;
+  }
 }
 
 async function runVideo(action: 'initial' | 'retry' | 'recompose' | 'sync_dependencies' = 'initial') {
   if (action === 'recompose') {
-    await run(action, { subtitle_enabled: videoSubtitleEnabled.value });
+    await run(action);
+    return;
+  }
+  if (!videoQuoteAvailable.value) {
+    error.value = videoQuoteUnavailableReason.value;
     return;
   }
   pendingVideoAction.value = action;
-  await requestVideoQuote();
+  quoteLoading.value = true;
+  try {
+    await run(pendingVideoAction.value);
+  } finally {
+    quoteLoading.value = false;
+  }
 }
 
 async function regenerateVideoScene(sceneId: string, payload: Record<string, unknown>) {
   const content = artifact.value?.content_json as VideoGenerationContent | undefined;
   const scene = content?.scenes.find(item => item.id === sceneId);
   if (!scene) return;
-  quoteLoading.value = true;
-  error.value = '';
-  try {
-    const { data } = await api.post<VideoGenerationQuote>(`/courses/${courseId.value}/tasks/video_generation/quotes`, {
-      resolution: videoResolution.value,
-      subtitle_enabled: videoSubtitleEnabled.value,
-      continuity_policy: 'grouped',
-      target_scene_id: scene.script_scene_id,
-      ...payload,
-    });
-    pendingSceneRegeneration.value = { sceneId, payload };
-    videoQuote.value = data;
-    quoteDialogVisible.value = true;
-  } catch (cause) {
-    error.value = errorMessage(cause);
-  } finally {
-    quoteLoading.value = false;
-  }
-}
-
-async function requestVideoQuote() {
-  quoteLoading.value = true;
-  error.value = '';
-  pendingSceneRegeneration.value = null;
-  try {
-    const { data } = await api.post<VideoGenerationQuote>(`/courses/${courseId.value}/tasks/video_generation/quotes`, {
-      resolution: videoResolution.value,
-      subtitle_enabled: videoSubtitleEnabled.value,
-      continuity_policy: 'grouped',
-    });
-    videoQuote.value = data;
-    quoteDialogVisible.value = true;
-  } catch (cause) {
-    error.value = errorMessage(cause);
-  } finally {
-    quoteLoading.value = false;
-  }
-}
-
-async function confirmVideoQuote() {
-  if (!videoQuote.value) return;
   regeneratingScene.value = true;
   error.value = '';
   try {
-    if (pendingSceneRegeneration.value) {
-      const pending = pendingSceneRegeneration.value;
-      await api.post(`/courses/${courseId.value}/tasks/video_generation/scenes/${pending.sceneId}/regenerate`, {
-        ...pending.payload,
-        quote_id: videoQuote.value.quote_id,
-        approved_max_cost_fen: videoQuote.value.maximum_cost_fen,
-      });
-      editing.value = false;
-      await store.openTask(courseId.value, taskType.value);
-    } else {
-      await run(pendingVideoAction.value, {
-        quote_id: videoQuote.value.quote_id,
-        approved_max_cost_fen: videoQuote.value.maximum_cost_fen,
-        subtitle_enabled: videoSubtitleEnabled.value,
-      });
-    }
-    quoteDialogVisible.value = false;
+    await api.post(`/courses/${courseId.value}/tasks/video_generation/scenes/${sceneId}/regenerate`, {
+      ...payload,
+    });
+    editing.value = false;
+    await store.openTask(courseId.value, taskType.value);
   } catch (cause) {
     error.value = errorMessage(cause);
   } finally {
     regeneratingScene.value = false;
   }
 }
-
-const formatFen = (fen: number) => `¥${(fen / 100).toFixed(2)}`;
 
 async function lockVideoScene(scene: VideoGenerationScene) {
   if (!artifact.value) return;
@@ -493,21 +528,6 @@ async function loadVersions() {
   } catch (cause) { error.value = errorMessage(cause); }
 }
 
-function selectVersion(version: Artifact) {
-  if (isPpt.value) {
-    // PPT 版本历史：点击版本即回退（基于该版本生成新版本）。先确认避免误触，
-    // 不再只是临时预览后关闭即还原。确认后由 restoreVersion 持久化为当前版本。
-    void ElMessageBox.confirm(
-      `确定将当前课件回退为 V${version.version} 吗？将基于该版本生成新版本。`,
-      '回退版本',
-      { type: 'warning', confirmButtonText: '确认回退', cancelButtonText: '取消' },
-    ).then(() => restoreVersion(version)).catch(() => undefined);
-    return;
-  }
-  if (task.value) task.value.current_artifact = version;
-  showVersions.value = false;
-}
-
 function confirmRestoreVersion(version: Artifact) {
   void ElMessageBox.confirm(
     `确定基于 V${version.version} 创建一个新的当前版本吗？现有历史版本不会被删除。`,
@@ -527,7 +547,6 @@ async function restoreVersion(version: Artifact) {
 
 function closeVersions() {
   showVersions.value = false;
-  if (isPpt.value) store.viewArtifact(null);
 }
 
 function isTaskSheetV2(value: unknown): value is TaskSheetContent {
@@ -653,25 +672,6 @@ function applyQuickPrompt(prompt: string) {
 }
 
 watch(taskType, load);
-watch(
-  () => store.currentTask?.preferred_video_resolution,
-  preferred => {
-    if (!videoResolutionDirty.value && isNativeVideoResolution(preferred)) {
-      videoResolution.value = preferred;
-    }
-  },
-);
-watch(
-  () => store.currentTask?.video_generation_capabilities?.supported_resolutions,
-  supported => {
-    const values = supported?.map(item => item.value) || [];
-    if (values.length && !values.includes(videoResolution.value)) {
-      videoResolution.value = values[0];
-      videoResolutionDirty.value = false;
-    }
-  },
-  { deep: true },
-);
 watch(() => artifact.value?.id, () => {
   mobilePane.value = 'file';
   previewTemplateId.value = currentTemplateId.value;
@@ -688,6 +688,7 @@ onMounted(() => {
   updateMobileBreakpoint();
   mobileMedia.addEventListener('change', updateMobileBreakpoint);
   load();
+  modelConfigStore.load(true).catch(() => undefined);
   loadPptTemplates();
 });
 
@@ -794,8 +795,10 @@ onUnmounted(() => {
           <el-icon><Warning /></el-icon>
           <div>
             <strong>本次任务失败</strong>
-            <p>{{ task.error?.message }}</p>
-            <button type="button" @click="run('retry')">重试任务</button>
+            <p>{{ taskFailureMessage }}</p>
+            <button type="button" @click="isVideoGeneration ? runVideo('retry') : run('retry')">
+              {{ isVideoGeneration ? '重新选择模型并生成' : '重试任务' }}
+            </button>
           </div>
         </div>
         <div v-else-if="task.status === 'stale'" class="task-alert stale">
@@ -855,7 +858,7 @@ onUnmounted(() => {
               老师您好！当前协助维护 <strong>{{ task.display_name }} V{{ artifact.version }}</strong>。请告诉我要调整的内容，我会读取最新项目记忆精准推演生成新版本。
             </p>
             <p v-else>
-              {{ isVideoGeneration && task.status === 'ready_to_generate' ? '视频脚本已准备完成。选择原生有声视频模型并确认报价后即可生成。' : '任务文件按共享项目记忆生成中，生成完成后可在这里输入修改指令。' }}
+              {{ isVideoGeneration && task.status === 'ready_to_generate' ? `将使用最新视频脚本 V${latestVideoScriptVersion || '—'}。选择视频模型并确认后即可生成。` : '任务文件按共享项目记忆生成中，生成完成后可在这里输入修改指令。' }}
             </p>
           </div>
 
@@ -955,14 +958,6 @@ onUnmounted(() => {
                 label="文本"
                 :disabled="isRunning"
                 @change="setModel"
-              />
-              <ModelSelector
-                v-if="isVideoGeneration"
-                :model-value="task.video_model_config_id || null"
-                capability="native_audio_video_generation"
-                compact label="Seedance 2.5"
-                :disabled="isRunning"
-                @change="setVideoModel"
               />
               <ModelSelector
                 v-if="isPpt || taskType === 'exercise'"
@@ -1114,87 +1109,272 @@ onUnmounted(() => {
           />
           <MarkdownRenderer v-else :content="artifact.content_markdown" />
         </div>
-        <div v-else-if="isVideoGeneration && task.status === 'ready_to_generate'" class="video-generation-ready">
+        <div v-else-if="isVideoGeneration && ['ready_to_generate', 'failed'].includes(task.status)" class="video-generation-ready">
           <div class="video-ready-container">
             <div class="video-ready-card">
-              <div class="ready-hero-banner">
-                <span>STAGE 06 / NATIVE AUDIO VIDEO</span>
-                <h3>生成原生有声微课视频</h3>
-                <p>按所选 Provider 的单段时长约束同时生成画面与语音，确认报价后才会提交任务。</p>
-              </div>
+              <!-- Hero Masthead Banner -->
+              <header class="ready-hero-banner">
+                <div class="ready-hero-main">
+                  <div class="ready-step-badge">
+                    <span class="step-num">06</span>
+                    <span class="step-label">视频生成</span>
+                  </div>
+                  <div class="ready-title-group">
+                    <div class="ready-pill-tag">
+                      <el-icon><Film /></el-icon>
+                      <span>视频脚本已就绪 · 待生成</span>
+                    </div>
+                    <h3>生成微课视频</h3>
+                    <p>依托视频脚本 V{{ latestVideoScriptVersion || '—' }} 同步合成画面与语音。系统会自动匹配画格节奏、开启长图渲染与时间轴字幕。</p>
+                  </div>
+                </div>
+
+                <!-- Upstream Script Resource Chips -->
+                <div class="upstream-resources">
+                  <div class="resource-chip">
+                    <el-icon class="chip-icon"><Document /></el-icon>
+                    <div class="chip-text">
+                      <strong>脚本版本</strong>
+                      <small>视频脚本 V{{ latestVideoScriptVersion || '1' }}</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                  <div class="resource-chip">
+                    <el-icon class="chip-icon"><Film /></el-icon>
+                    <div class="chip-text">
+                      <strong>分镜总数</strong>
+                      <small>{{ scriptScenesCount ? `${scriptScenesCount} 个分镜片段` : '已完成结构分镜' }}</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                  <div class="resource-chip">
+                    <el-icon class="chip-icon"><Clock /></el-icon>
+                    <div class="chip-text">
+                      <strong>预估时长</strong>
+                      <small>{{ scriptEstimatedDuration }}</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                  <div class="resource-chip">
+                    <el-icon class="chip-icon"><Microphone /></el-icon>
+                    <div class="chip-text">
+                      <strong>合成方式</strong>
+                      <small>原生画音同步 / 25fps</small>
+                    </div>
+                    <el-icon class="check-icon"><CircleCheck /></el-icon>
+                  </div>
+                </div>
+              </header>
+
+              <!-- Step-by-Step Configuration & Feature Cards -->
               <div class="ready-config-body">
-                <div class="config-section-header">
-                  <span>固定生产契约</span>
+                <!-- Step 1: Upstream Material Ready -->
+                <div class="step-config-card done-card">
+                  <div class="step-card-header">
+                    <div class="step-num-badge success">
+                      <el-icon><Check /></el-icon>
+                    </div>
+                    <div class="step-card-titles">
+                      <div class="step-title-row">
+                        <h4>步骤 01：视频脚本素材已就绪</h4>
+                        <span class="status-badge-ready">
+                          <el-icon><Check /></el-icon>
+                          已就绪
+                        </span>
+                      </div>
+                      <p>分镜规划、教师口播词与画面视觉提示词已通过多模态质量校验</p>
+                    </div>
+                  </div>
+                  <div class="step-card-chips">
+                    <span class="feature-tag"><el-icon><CircleCheck /></el-icon> {{ scriptScenesCount ? `${scriptScenesCount} 个` : '完整' }}分镜片段</span>
+                    <span class="feature-tag"><el-icon><CircleCheck /></el-icon> 原生旁白语音</span>
+                    <span class="feature-tag"><el-icon><CircleCheck /></el-icon> 毫秒级字幕对齐</span>
+                    <span class="feature-tag"><el-icon><CircleCheck /></el-icon> 智能镜头连续性</span>
+                  </div>
                 </div>
-                <div class="native-contract-grid">
-                  <div><b>{{ videoResolution === '1280x720' ? '1280 × 720' : '854 × 480' }}</b><span>16:9 · 25fps</span></div>
-                  <div><b>原生语音</b><span>禁止独立 TTS</span></div>
-                  <div><b>分段生成</b><span>Gemini 3–10 秒 · Seedance 4–15 秒</span></div>
-                  <div><b>并发上限 2</b><span>失败片段最多重试一次</span></div>
+
+                <!-- Step 2: Model Configuration -->
+                <div class="step-config-card active-card">
+                  <div class="step-card-header">
+                    <div class="step-num-badge primary">02</div>
+                    <div class="step-card-titles">
+                      <h4>步骤 02：选择视频生成模型</h4>
+                      <p>一个模型端到端完成画面与语音同轨合成，自动匹配最优画质与输出规格</p>
+                    </div>
+                  </div>
+
+                  <div class="model-selection-box">
+                    <div class="model-select-row">
+                      <div class="current-video-model">
+                        <div class="current-model-icon-box">
+                          <el-icon><VideoCameraFilled /></el-icon>
+                        </div>
+                        <div class="current-model-copy">
+                          <div class="model-label-row">
+                            <span class="model-type-caption">当前视频生成模型</span>
+                            <span v-if="currentVideoModel?.video_capability_status === 'verified'" class="model-verified-badge">已就绪</span>
+                          </div>
+                          <strong class="model-name-heading">{{ currentVideoModel?.name || currentVideoModel?.model_name || '尚未选择' }}</strong>
+                          <div class="model-meta-tags">
+                            <span v-if="currentVideoModel" class="meta-tag provider">
+                              {{ videoModelProtocolLabel(currentVideoModel.provider) }}
+                            </span>
+                            <span v-if="currentVideoModel" class="meta-tag status">
+                              {{ videoModelStatusLabel(currentVideoModel.video_capability_status) }}
+                            </span>
+                          </div>
+                        </div>
+                        <el-button class="switch-video-model-btn" @click="showVideoModelSwitch = true">
+                          <el-icon><RefreshRight /></el-icon>
+                          <span>切换模型</span>
+                        </el-button>
+                      </div>
+                      <div class="model-spec-tags">
+                        <span class="spec-pill"><el-icon><Monitor /></el-icon> 720p / 1080p 画质</span>
+                        <span class="spec-pill"><el-icon><Film /></el-icon> 16:9 教学宽幅</span>
+                        <span class="spec-pill"><el-icon><Microphone /></el-icon> 原生音画同轨</span>
+                      </div>
+                    </div>
+                    <p class="model-hint-text">
+                      <el-icon><MagicStick /></el-icon>
+                      系统将依据已就绪的脚本分镜，自动调用多模态视频大模型渲染镜头并无缝拼接。
+                    </p>
+                  </div>
                 </div>
-                <div class="native-options-row">
-                  <ModelSelector :model-value="task.video_model_config_id || null" capability="native_audio_video_generation" label="原生有声视频模型" @change="setVideoModel" />
-                  <el-select
-                    v-model="videoResolution"
-                    size="default"
-                    class="video-resolution-select"
-                    aria-label="输出分辨率"
-                    @change="videoResolutionDirty = true"
+
+                <!-- Production Highlights Grid -->
+                <div class="production-highlights-section">
+                  <div class="highlights-title">
+                    <el-icon><MagicStick /></el-icon>
+                    <span>微课视频生成特性保障</span>
+                  </div>
+                  <div class="native-contract-grid">
+                    <div class="contract-card">
+                      <div class="contract-card-icon-wrap icon-camera">
+                        <el-icon><VideoCameraFilled /></el-icon>
+                      </div>
+                      <div class="contract-card-content">
+                        <b>原生画音同轨</b>
+                        <span>画面与旁白同时生成，口型与节奏精准吻合</span>
+                      </div>
+                    </div>
+                    <div class="contract-card">
+                      <div class="contract-card-icon-wrap icon-film">
+                        <el-icon><Film /></el-icon>
+                      </div>
+                      <div class="contract-card-content">
+                        <b>分镜智能串联</b>
+                        <span>自动维持人物、教具与教学场景的连续性</span>
+                      </div>
+                    </div>
+                    <div class="contract-card">
+                      <div class="contract-card-icon-wrap icon-chat">
+                        <el-icon><ChatDotRound /></el-icon>
+                      </div>
+                      <div class="contract-card-content">
+                        <b>毫秒级字幕</b>
+                        <span>自动生成并对齐字幕轨，清晰传达教学重点</span>
+                      </div>
+                    </div>
+                    <div class="contract-card">
+                      <div class="contract-card-icon-wrap icon-refresh">
+                        <el-icon><RefreshRight /></el-icon>
+                      </div>
+                      <div class="contract-card-content">
+                        <b>单片段无损返修</b>
+                        <span>成片后可自由指定单独分镜重试与修改</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Action Footer -->
+              <footer class="ready-action-footer">
+                <div class="footer-cta-row">
+                  <el-button
+                    type="primary"
+                    size="large"
+                    class="generate-hero-btn"
+                    :icon="VideoCamera"
+                    :loading="quoteLoading"
+                    :disabled="!videoQuoteAvailable"
+                    @click="runVideo('initial')"
                   >
-                    <el-option v-for="option in videoResolutionOptions" :key="option.value" :value="option.value" :disabled="!option.supported" :label="`${option.label} · ${option.hint}${option.supported ? '' : '（当前模型不支持）'}`" />
-                  </el-select>
-                  <el-switch v-model="videoSubtitleEnabled" active-text="封装 ASR 字幕轨" />
+                    <span class="btn-main-text">确认并开始生成</span>
+                  </el-button>
+                  <div class="footer-safe-tip">
+                    <div class="safe-tip-title">
+                      <el-icon><CircleCheck /></el-icon>
+                      <strong>生成说明</strong>
+                    </div>
+                    <p>确认后立即进入后台生成 · 已完成的有效片段会自动复用 · 可随时返回查看生成进度。</p>
+                  </div>
                 </div>
-              </div>
-              <div class="ready-action-footer">
-                <el-button
-                  type="primary" size="large" class="generate-hero-btn" :icon="VideoCamera"
-                  :loading="quoteLoading" :disabled="!task.video_model_config_id" @click="runVideo('initial')"
-                >
-                  获取费用报价并确认
-                </el-button>
-                <div v-if="!task.video_model_config_id" class="video-settings-alert">
+                <div v-if="videoQuoteUnavailableReason" class="video-settings-alert">
                   <el-icon><Warning /></el-icon>
-                  <span>必须配置 Gemini Interactions 或 Seedance 原生有声视频模型；系统不会降级到 PPT、图片或本地 TTS。</span>
-                  <RouterLink to="/settings" class="video-settings-link">配置模型</RouterLink>
+                  <span>{{ videoQuoteUnavailableReason }}</span>
+                  <RouterLink to="/settings" class="video-settings-link">前往检查设置 →</RouterLink>
                 </div>
-              </div>
+              </footer>
             </div>
           </div>
         </div>
         <div v-else class="file-empty">
           <span>{{ String(task.display_order).padStart(2, '0') }}</span>
           <h3>{{ task.status === 'failed' ? '任务生成失败' : '任务文件正在准备' }}</h3>
-          <p>{{ task.status === 'waiting_dependency' ? (isVideoGeneration ? '请先完成上游同步并确认视频脚本；确认后这里会显示视频模型与生成按钮。' : '上游任务完成后将自动启动当前 Agent。') : task.status === 'failed' ? task.error?.message : 'Agent 完成结构校验后，最新文件会自动显示在这里。' }}</p>
+          <p>{{ task.status === 'waiting_dependency' ? (isVideoGeneration ? videoWaitingMessage : '上游任务完成后将自动启动当前 Agent。') : task.status === 'failed' ? taskFailureMessage : 'Agent 完成结构校验后，最新文件会自动显示在这里。' }}</p>
           <RouterLink
             v-if="isVideoGeneration && task.status === 'waiting_dependency'"
             :to="`/courses/${courseId}/tasks/video_script`"
           >
-            <el-button type="primary">前往确认视频脚本</el-button>
+            <el-button type="primary">前往生成或同步视频脚本</el-button>
           </RouterLink>
           <el-button v-if="task.status === 'failed'" type="primary" @click="isVideoGeneration ? runVideo('retry') : run('retry')">重试任务</el-button>
         </div>
       </main>
     </div>
     </template>
-    <VersionSelector v-if="showVersions" :versions="versions" :current-version="store.viewedArtifact?.version || artifact?.version" :allow-restore="isVideoGeneration || isPpt || isLessonPlan" @select="selectVersion" @restore="confirmRestoreVersion" @close="closeVersions" />
-    <el-dialog v-model="quoteDialogVisible" width="680px" class="video-quote-dialog" title="确认原生有声视频报价" destroy-on-close>
-      <div v-if="videoQuote" class="quote-sheet">
-        <header><span>QUOTE / 15 MIN VALID</span><h3>{{ pendingSceneRegeneration ? '单片段修改报价' : '首版分段生成报价' }}</h3><p>{{ videoQuote.provider }} · {{ videoQuote.model_name }} · {{ videoQuote.resolution === '854x480' ? '480p' : '720p' }} · 原生音频</p></header>
-        <dl class="quote-metrics">
-          <div><dt>片段数</dt><dd>{{ videoQuote.scene_count }}</dd></div>
-          <div><dt>预计时长</dt><dd>{{ videoQuote.duration_seconds.toFixed(1) }}s</dd></div>
-          <div><dt>可复用</dt><dd>{{ videoQuote.reusable_scene_count }}</dd></div>
-          <div><dt>基础费用</dt><dd>{{ formatFen(videoQuote.estimated_cost_fen) }}</dd></div>
-          <div class="maximum"><dt>确认费用上限</dt><dd>{{ formatFen(videoQuote.maximum_cost_fen) }}</dd></div>
-        </dl>
-        <div class="quote-scenes">
-          <div v-for="item in videoQuote.scenes" :key="item.scene_id"><b>{{ item.scene_id }}</b><span>{{ item.duration_seconds.toFixed(1) }}s</span><span>{{ item.reusable ? '缓存复用' : `${item.estimated_tokens.toLocaleString()} tokens` }}</span><strong>{{ formatFen(item.estimated_cost_fen) }}</strong></div>
-        </div>
-        <p v-if="videoQuote.api_mode === 'gemini_interactions_video' && videoQuote.maximum_cost_fen === 0" class="quote-note">本地网关未配置计费，预计费用 0 元；仍需确认本次分镜范围、时长、复用数量和模型。</p>
-        <p class="quote-note">费用上限按“所有不合格片段最多各重试一次”计算。只有确认后才提交 Provider；实际未重试或命中复用时按实耗记录。</p>
+    <VersionSelector v-if="showVersions" :versions="versions" :current-version="artifact?.version" :allow-restore="restorableArtifactTypes.has(taskType)" @restore="confirmRestoreVersion" @close="closeVersions" />
+    <el-dialog
+      v-model="showVideoModelSwitch"
+      class="video-model-switch-dialog"
+      width="min(620px, calc(100vw - 32px))"
+      title="切换视频模型"
+      append-to-body
+    >
+      <p class="video-model-dialog-intro">选择后立即应用到当前课程，下一次生成将使用该模型。</p>
+      <div v-if="videoModelOptions.length" class="video-model-option-list">
+        <button
+          v-for="item in videoModelOptions"
+          :key="item.id"
+          type="button"
+          class="video-model-option"
+          :class="{ selected: item.id === task?.video_model_config_id }"
+          :disabled="switchingVideoModel"
+          @click="chooseVideoModel(item.id)"
+        >
+          <span class="video-model-option-index">{{ String(videoModelOptions.indexOf(item) + 1).padStart(2, '0') }}</span>
+          <span class="video-model-option-copy">
+            <strong>{{ item.name || item.model_name }}</strong>
+            <small>{{ videoModelProtocolLabel(item.provider) }} · {{ item.model_name }}</small>
+          </span>
+          <span class="video-model-option-status" :class="item.video_capability_status">
+            {{ videoModelStatusLabel(item.video_capability_status) }}
+          </span>
+          <el-icon v-if="item.id === task?.video_model_config_id" class="video-model-selected-icon"><CircleCheck /></el-icon>
+        </button>
       </div>
-      <template #footer><el-button @click="quoteDialogVisible=false">取消</el-button><el-button type="primary" :loading="regeneratingScene" @click="confirmVideoQuote">确认费用上限并生成</el-button></template>
+      <div v-else class="video-model-empty">
+        <strong>尚未配置视频模型</strong>
+        <span>请先添加 OpenAI 兼容或 Anthropic 视频模型。</span>
+      </div>
+      <template #footer>
+        <div class="video-model-dialog-footer">
+          <RouterLink to="/settings" @click="showVideoModelSwitch = false">管理视频模型</RouterLink>
+          <el-button @click="showVideoModelSwitch = false">关闭</el-button>
+        </div>
+      </template>
     </el-dialog>
     <el-drawer
       v-model="showTemplateDrawer"
@@ -1284,32 +1464,32 @@ onUnmounted(() => {
   min-height: 100%;
   width: 100%;
   box-sizing: border-box;
-  padding: 32px 28px;
+  padding: 32px 24px;
   background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 40%, #eef2ff 100%);
   display: flex;
   justify-content: center;
-  align-items: center;
+  align-items: flex-start;
   overflow-y: auto;
 }
 
 .video-ready-container {
   width: 100%;
-  max-width: 880px;
+  max-width: 900px;
   margin: 0 auto;
 }
 
 .video-ready-card {
   background: #ffffff;
-  border-radius: 20px;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.07), 0 1px 3px rgba(0, 0, 0, 0.02);
+  border-radius: 22px;
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: 0 20px 45px -12px rgba(15, 23, 42, 0.08), 0 2px 8px rgba(0, 0, 0, 0.02);
   overflow: hidden;
   transition: all 250ms ease;
 }
 
 .ready-hero-banner {
   padding: 32px 36px 28px;
-  background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 60%, #312e81 100%);
+  background: linear-gradient(135deg, #0b0f19 0%, #171c32 50%, #1e1b4b 100%);
   color: #ffffff;
   position: relative;
   overflow: hidden;
@@ -1318,23 +1498,23 @@ onUnmounted(() => {
 .ready-hero-banner::after {
   content: "";
   position: absolute;
-  top: -50%;
+  top: -40%;
   right: -10%;
-  width: 300px;
-  height: 300px;
-  background: radial-gradient(circle, rgba(99, 102, 241, 0.25) 0%, rgba(0, 0, 0, 0) 70%);
+  width: 320px;
+  height: 320px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.28) 0%, rgba(0, 0, 0, 0) 70%);
   pointer-events: none;
 }
 
 .ready-hero-main {
   display: flex;
   align-items: flex-start;
-  gap: 24px;
+  gap: 22px;
 }
 
 .ready-step-badge {
-  width: 64px;
-  height: 64px;
+  width: 62px;
+  height: 62px;
   flex-shrink: 0;
   border-radius: 16px;
   background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
@@ -1347,7 +1527,7 @@ onUnmounted(() => {
 }
 
 .ready-step-badge .step-num {
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 900;
   line-height: 1;
   letter-spacing: -0.04em;
@@ -1356,8 +1536,8 @@ onUnmounted(() => {
 .ready-step-badge .step-label {
   font-size: 9px;
   font-weight: 800;
-  letter-spacing: 0.1em;
-  opacity: 0.85;
+  letter-spacing: 0.08em;
+  opacity: 0.9;
   margin-top: 2px;
 }
 
@@ -1378,12 +1558,12 @@ onUnmounted(() => {
   color: #c7d2fe;
   font-size: 11.5px;
   font-weight: 700;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .ready-title-group h3 {
-  margin: 0 0 8px 0;
-  font-size: 26px;
+  margin: 0 0 6px 0;
+  font-size: 24px;
   font-weight: 800;
   color: #ffffff;
   letter-spacing: -0.02em;
@@ -1393,16 +1573,16 @@ onUnmounted(() => {
 .ready-title-group p {
   margin: 0;
   color: #94a3b8;
-  font-size: 13.5px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .upstream-resources {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
-  margin-top: 24px;
-  padding-top: 20px;
+  margin-top: 22px;
+  padding-top: 18px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -1410,143 +1590,626 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 10px 12px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(6px);
 }
 
 .chip-icon {
-  font-size: 18px;
+  font-size: 17px;
+  color: #818cf8;
 }
 
 .chip-text {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .chip-text strong {
   color: #f8fafc;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .chip-text small {
   color: #94a3b8;
-  font-size: 11px;
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .resource-chip .check-icon {
   color: #34d399;
-  font-size: 16px;
+  font-size: 15px;
+  flex-shrink: 0;
 }
 
-/* Config Section */
+/* Config Section Body */
 .ready-config-body {
-  padding: 28px 36px;
+  padding: 28px 32px;
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 20px;
+  background: #ffffff;
 }
 
-.config-section-header {
+.step-config-card {
+  padding: 18px 22px;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  background: #fafcff;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: all 200ms ease;
+}
+
+.step-config-card.done-card {
+  background: linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%);
+  border-color: #bbf7d0;
+}
+
+.step-config-card.active-card {
+  background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
+  border-color: #c7d2fe;
+  box-shadow: 0 4px 18px rgba(99, 102, 241, 0.05);
+}
+
+.step-card-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 14px;
+}
+
+.step-num-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+
+.step-num-badge.success {
+  background: #10b981;
+  color: #ffffff;
+  font-size: 14px;
+}
+
+.step-num-badge.primary {
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #ffffff;
+}
+
+.step-card-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.step-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.step-card-titles h4 {
+  margin: 0;
   font-size: 14px;
   font-weight: 800;
-  color: #1e293b;
+  color: #0f172a;
 }
 
-.config-section-header .el-icon {
-  color: #4f46e5;
-  font-size: 16px;
+.step-card-titles p {
+  margin: 2px 0 0 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.4;
 }
 
-.config-section-header.compact {
-  font-size: 13px;
-  margin-bottom: 12px;
+.status-badge-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #059669;
+  border: 1px solid #a7f3d0;
+  font-size: 11px;
+  font-weight: 700;
 }
 
-.video-options-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
+.status-badge-ready .el-icon {
+  font-size: 11px;
 }
 
-.option-card {
-  padding: 14px 16px;
-  border-radius: 12px;
-  background: #f8fafc;
+.step-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: 42px;
+}
+
+.feature-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  font-size: 11.5px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.feature-tag .el-icon {
+  color: #10b981;
+  font-size: 12px;
+}
+
+.model-selection-box {
+  margin-left: 42px;
+  padding: 16px 20px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
   border: 1px solid #e2e8f0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  transition: all 150ms ease;
+  gap: 12px;
 }
 
-.option-card:hover {
+.model-select-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.current-video-model {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: min(100%, 420px);
+  padding: 12px 16px;
   background: #ffffff;
-  border-color: #c7d2fe;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.06);
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
 }
 
-.option-label {
+.current-model-icon-box {
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  box-shadow: 0 4px 10px rgba(79, 70, 229, 0.25);
+}
+
+.current-model-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.model-label-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+}
+
+.model-type-caption {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-verified-badge {
+  font-size: 10px;
   font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #059669;
+  border: 1px solid #a7f3d0;
+}
+
+.model-name-heading {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-meta-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.meta-tag {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.meta-tag.provider {
+  background: #f1f5f9;
   color: #475569;
+  border: 1px solid #e2e8f0;
 }
 
-.opt-icon {
-  font-size: 14px;
+.meta-tag.status {
+  background: #eef2ff;
+  color: #4338ca;
+  border: 1px solid #c7d2fe;
 }
 
-.switch-card {
+.switch-video-model-btn {
+  height: 36px !important;
+  padding: 0 14px !important;
+  border: 1px solid #cbd5e1 !important;
+  border-radius: 8px !important;
+  background: #ffffff !important;
+  color: #334155 !important;
+  font-weight: 700 !important;
+  font-size: 12.5px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  transition: all 180ms ease !important;
+}
+
+.switch-video-model-btn:hover {
+  background: #f8fafc !important;
+  border-color: #4f46e5 !important;
+  color: #4f46e5 !important;
+  box-shadow: 0 2px 6px rgba(79, 70, 229, 0.12);
+}
+
+.model-spec-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spec-pill {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.spec-pill .el-icon {
+  font-size: 12px;
+}
+
+.model-hint-text {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.model-hint-text .el-icon {
+  color: #6366f1;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+:deep(.video-model-switch-dialog) {
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 20px 40px -8px rgba(0, 0, 0, 0.18);
+}
+
+:deep(.video-model-switch-dialog .el-dialog__header) {
+  margin: 0;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+:deep(.video-model-switch-dialog .el-dialog__title) {
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+:deep(.video-model-switch-dialog .el-dialog__body) {
+  padding: 18px 24px 22px;
+}
+
+:deep(.video-model-switch-dialog .el-dialog__footer) {
+  padding: 14px 24px;
+  border-top: 1px solid #f1f5f9;
+  background: #fafbfc;
+}
+
+.contract-card-icon-wrap {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.contract-card-icon-wrap.icon-camera {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.contract-card-icon-wrap.icon-film {
+  background: #fdf2f8;
+  color: #db2777;
+}
+
+.contract-card-icon-wrap.icon-chat {
+  background: #f0fdf4;
+  color: #16a34a;
+}
+
+.contract-card-icon-wrap.icon-refresh {
+  background: #eff6ff;
+  color: #2563eb;
+}
+
+.video-model-dialog-intro {
+  margin: 0 0 16px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.video-model-option-list {
+  border-top: 1px solid #111827;
+}
+
+.video-model-option {
+  width: 100%;
+  min-height: 72px;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid #d7dbe2;
+  background: #ffffff;
+  color: #111827;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto 22px;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.video-model-option:hover,
+.video-model-option:focus-visible,
+.video-model-option.selected {
+  background: #f7f7f8;
+  outline: none;
+}
+
+.video-model-option.selected {
+  box-shadow: 4px 0 0 #002fa7 inset;
+}
+
+.video-model-option-index {
+  color: #002fa7;
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.video-model-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.video-model-option-copy strong,
+.video-model-option-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-model-option-copy strong { font-size: 14px; }
+.video-model-option-copy small { color: #687080; font-size: 11px; }
+
+.video-model-option-status {
+  padding: 3px 7px;
+  border: 1px solid #9ca3af;
+  color: #4b5563;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.video-model-option-status.verified {
+  border-color: #166534;
+  color: #166534;
+}
+
+.video-model-option-status.failed {
+  border-color: #b91c1c;
+  color: #b91c1c;
+}
+
+.video-model-selected-icon { color: #002fa7; font-size: 18px; }
+
+.video-model-empty {
+  min-height: 120px;
+  border: 1px solid #d7dbe2;
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  text-align: center;
+}
+
+.video-model-empty span { color: #687080; font-size: 12px; }
+
+.video-model-dialog-footer {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
 }
 
-.switch-wrapper {
-  padding-top: 4px;
+.video-model-dialog-footer a {
+  color: #002fa7;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: underline;
 }
 
-.model-config-panel {
-  padding: 16px;
+@media (max-width: 680px) {
+  .current-video-model {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .current-model-folio { min-height: 30px; }
+
+  .video-model-option {
+    grid-template-columns: 36px minmax(0, 1fr) 20px;
+  }
+
+  .video-model-option-status { grid-column: 2 / 4; justify-self: start; }
+}
+
+.production-highlights-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.highlights-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #334155;
+}
+
+.highlights-title .el-icon {
+  color: #4f46e5;
+  font-size: 14px;
+}
+
+.native-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.contract-card {
+  padding: 14px 14px;
   border-radius: 14px;
   background: #f8fafc;
-  border: 1px dashed #cbd5e1;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  transition: all 180ms ease;
 }
 
-.video-model-row {
+.contract-card:hover {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+  transform: translateY(-1px);
+}
+
+.contract-card-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
+.contract-card-content {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.contract-card-content b {
+  font-size: 12.5px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+.contract-card-content span {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.35;
 }
 
 /* Action Footer */
 .ready-action-footer {
-  padding: 24px 36px 32px;
-  background: #ffffff;
+  padding: 24px 32px 28px;
+  background: #fafbfc;
   border-top: 1px solid #f1f5f9;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  align-items: flex-start;
+  gap: 14px;
+}
+
+.footer-cta-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+  flex-wrap: wrap;
 }
 
 .generate-hero-btn {
-  height: 52px !important;
+  height: 48px !important;
   padding: 0 28px !important;
-  border-radius: 14px !important;
+  border-radius: 12px !important;
   background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
   border: none !important;
   box-shadow: 0 10px 24px -4px rgba(79, 70, 229, 0.4), 0 4px 6px -2px rgba(79, 70, 229, 0.15) !important;
   display: inline-flex !important;
   align-items: center !important;
-  gap: 12px !important;
+  gap: 10px !important;
+  cursor: pointer !important;
   transition: all 200ms ease !important;
 }
 
@@ -1561,18 +2224,35 @@ onUnmounted(() => {
 }
 
 .btn-main-text {
-  font-size: 15.5px;
+  font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.01em;
+  color: #ffffff;
 }
 
-.btn-badge {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.2);
-  color: #ffffff;
+.footer-safe-tip {
+  flex: 1;
+  min-width: 240px;
+}
+
+.safe-tip-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #15803d;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.safe-tip-title strong {
+  font-weight: 800;
+}
+
+.footer-safe-tip p {
+  margin: 0;
+  font-size: 11.5px;
+  color: #64748b;
+  line-height: 1.45;
 }
 
 .video-settings-alert {
@@ -1580,7 +2260,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: 12px;
   background: #fefce8;
   border: 1px solid #fef08a;
   color: #854d0e;
@@ -1607,19 +2287,365 @@ onUnmounted(() => {
   text-decoration: underline;
 }
 
-.video-editor-shell { background: #f7f7f8; }
-
-@media (max-width: 768px) {
-  .video-generation-ready { padding: 16px; }
-  .ready-hero-banner { padding: 20px; }
-  .upstream-resources { grid-template-columns: 1fr; }
-  .video-options-grid { grid-template-columns: 1fr; }
-  .ready-config-body { padding: 20px; }
-  .ready-action-footer { padding: 20px; }
-  .generate-hero-btn { width: 100%; justify-content: center; }
-  .video-settings-alert { flex-direction: column; align-items: flex-start; }
-  .video-settings-link { margin-left: 0; }
+/* Modern Quote Dialog Styling */
+:deep(.video-quote-dialog) {
+  border-radius: 24px !important;
+  overflow: hidden !important;
+  box-shadow: 0 25px 60px -15px rgba(15, 23, 42, 0.25) !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
 }
+
+:deep(.video-quote-dialog .el-dialog__header) {
+  padding: 24px 28px 16px !important;
+  margin: 0 !important;
+  border-bottom: 1px solid #f1f5f9 !important;
+  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%) !important;
+}
+
+:deep(.video-quote-dialog .el-dialog__body) {
+  padding: 24px 28px !important;
+  background: #ffffff !important;
+}
+
+:deep(.video-quote-dialog .el-dialog__footer) {
+  padding: 16px 28px 24px !important;
+  border-top: 1px solid #f1f5f9 !important;
+  background: #fafbfc !important;
+}
+
+.quote-dialog-head-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.quote-head-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.3);
+  flex-shrink: 0;
+}
+
+.quote-head-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.quote-type-badge {
+  font-size: 11px;
+  font-weight: 800;
+  color: #4338ca;
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.quote-validity-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fef08a;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.quote-validity-pill .el-icon {
+  font-size: 11px;
+}
+
+.quote-head-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: #0f172a;
+  line-height: 1.3;
+}
+
+/* Quote Sheet Body */
+.quote-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  color: #0f172a;
+}
+
+/* Hero Price Card */
+.quote-hero-card {
+  padding: 22px 26px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #0b0f19 0%, #1e1b4b 60%, #312e81 100%);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 10px 28px -6px rgba(30, 27, 75, 0.4);
+}
+
+.quote-hero-card::after {
+  content: "";
+  position: absolute;
+  top: -50%;
+  right: -10%;
+  width: 240px;
+  height: 240px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.3) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.quote-hero-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+  z-index: 1;
+}
+
+.hero-card-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #a5b4fc;
+}
+
+.hero-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.hero-currency {
+  font-size: 20px;
+  font-weight: 800;
+  color: #c7d2fe;
+}
+
+.hero-amount {
+  font-size: 36px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-card-desc {
+  margin: 2px 0 0;
+  font-size: 11.5px;
+  color: #94a3b8;
+}
+
+.quote-hero-right {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.hero-meta-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11.5px;
+}
+
+.hero-meta-label {
+  color: #94a3b8;
+}
+
+.hero-meta-val {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+/* Context Strip */
+.quote-context-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 12px;
+  color: #475569;
+}
+
+.context-chip .el-icon {
+  color: #6366f1;
+  font-size: 13px;
+}
+
+.context-chip b {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+/* 4 Specs Grid */
+.quote-specs-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+
+.spec-tile {
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: all 150ms ease;
+}
+
+.spec-tile:hover {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
+}
+
+.spec-tile-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.spec-tile-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.spec-label {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.spec-val {
+  font-size: 14px;
+  font-weight: 800;
+  color: #0f172a;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spec-val small {
+  font-size: 11px;
+  font-weight: normal;
+  color: #64748b;
+}
+
+.spec-val.has-reused {
+  color: #059669;
+}
+
+/* Reassurance Box */
+.quote-reassurance-box {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reassurance-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #15803d;
+  font-size: 12.5px;
+}
+
+.reassurance-header strong {
+  font-weight: 800;
+}
+
+.reassurance-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #166534;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.reassurance-list span {
+  font-weight: 700;
+}
+
+/* Footer Buttons */
+.quote-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.quote-cancel-btn {
+  border-radius: 10px !important;
+  font-weight: 700 !important;
+  padding: 9px 18px !important;
+}
+
+.quote-confirm-btn {
+  height: 40px !important;
+  padding: 0 22px !important;
+  border-radius: 10px !important;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%) !important;
+  border: none !important;
+  font-size: 13.5px !important;
+  font-weight: 800 !important;
+  box-shadow: 0 6px 18px rgba(79, 70, 229, 0.35) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.quote-confirm-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(79, 70, 229, 0.45) !important;
+  background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%) !important;
+}
+
+.video-editor-shell { background: #f7f7f8; }
 
 /* Pane Resizer / Divider */
 .pane-resizer {
@@ -2662,29 +3688,4 @@ onUnmounted(() => {
   .template-drawer-footer { align-items: stretch; flex-direction: column; }
   .template-drawer-footer > div:last-child { justify-content: flex-end; }
 }
-
-/* Seedance V3 keeps the generation gate deliberately plain and auditable. */
-.video-generation-ready { padding: 28px; background: #f5f5f3; font-family: Helvetica Neue, Helvetica, Arial, sans-serif; }
-.video-ready-container { max-width: 820px; }
-.video-ready-card { border: 1px solid #aeb3bc; border-radius: 0; box-shadow: none; }
-.ready-hero-banner { padding: 30px; background: #111318; }
-.ready-hero-banner::after { display: none; }
-.ready-hero-banner > span { color: #7fa2ff; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
-.ready-hero-banner h3 { margin: 9px 0 7px; color: #fff; font-size: 30px; letter-spacing: -.04em; }
-.ready-hero-banner p { max-width: 630px; margin: 0; color: #b7bbc3; font-size: 13px; line-height: 1.65; }
-.ready-config-body { padding: 24px 30px; gap: 16px; }
-.config-section-header { color: #002fa7; font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
-.native-contract-grid { display: grid; grid-template-columns: repeat(4,1fr); border: 1px solid #c7cad0; }
-.native-contract-grid div { display: grid; gap: 5px; padding: 16px; border-right: 1px solid #d9dbe0; }
-.native-contract-grid div:last-child { border-right: 0; }
-.native-contract-grid b { font-size: 13px; }.native-contract-grid span { color: #676d76; font-size: 10px; line-height: 1.4; }
-.native-options-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-top: 14px; border-top: 1px solid #d9dbe0; }
-.ready-action-footer { padding: 18px 30px 26px; border-top: 1px solid #d9dbe0; gap: 12px; }
-.generate-hero-btn { height: 46px!important; padding: 0 22px!important; border-radius: 0!important; background: #002fa7!important; box-shadow: none!important; }
-.video-settings-alert { border-radius: 0; }
-.quote-sheet { color: #111318; font-family: Helvetica Neue, Helvetica, Arial, sans-serif; }
-.quote-sheet>header { padding-bottom: 14px; border-bottom: 1px solid #c7cad0; }.quote-sheet>header span { color: #002fa7; font-size: 10px; font-weight: 800; letter-spacing: .1em; }.quote-sheet>header h3 { margin: 6px 0 3px; font-size: 23px; }.quote-sheet>header p { margin: 0; color: #676d76; font-size: 12px; }
-.quote-metrics { display: grid; grid-template-columns: repeat(4,1fr); margin: 14px 0; border: 1px solid #c7cad0; }.quote-metrics div { padding: 13px; border-right: 1px solid #d9dbe0; }.quote-metrics .maximum { grid-column: span 4; border-top: 1px solid #d9dbe0; border-right: 0; background: #e8eeff; }.quote-metrics dt { color: #676d76; font-size: 10px; }.quote-metrics dd { margin: 4px 0 0; font-size: 17px; font-weight: 800; }
-.quote-scenes { max-height: 230px; overflow: auto; border: 1px solid #c7cad0; }.quote-scenes>div { display: grid; grid-template-columns: 80px 70px 1fr 80px; gap: 8px; padding: 9px 11px; border-bottom: 1px solid #e1e2e5; font-size: 11px; }.quote-scenes>div:last-child { border-bottom: 0; }.quote-scenes strong { text-align: right; }.quote-note { color: #676d76; font-size: 11px; line-height: 1.6; }
-@media(max-width:760px){.native-contract-grid{grid-template-columns:1fr 1fr}.native-contract-grid div:nth-child(2){border-right:0}.native-options-row{align-items:flex-start;flex-direction:column}.quote-metrics{grid-template-columns:1fr 1fr}.quote-metrics .maximum{grid-column:span 2}}
 </style>

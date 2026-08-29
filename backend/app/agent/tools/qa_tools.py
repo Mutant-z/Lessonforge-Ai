@@ -1,5 +1,6 @@
 """QA 工具：内容安全、几何、真实栅格与可选视觉模型的分层门禁。"""
 import base64
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Literal
@@ -384,10 +385,15 @@ async def _run_rendered_qa(tc: ToolContext, slide_ids: set[str]) -> dict[str, An
             baseline_images[bi], current_images[ci], qa_root / "pairs" / f"{slide_id}.png",
         )
         try:
+            user_instruction = str(getattr(getattr(tc.runtime, "context", None), "user_instruction", "") or "")
+            resolved_request = getattr(tc.runtime, "resolved_request", None) or {}
             verdict = await provider.structured_with_image(
                 "你是严谨的 PPT 视觉审稿人。左图是修改前，右图是修改后。只输出结构化 JSON。",
                 (
-                    "比较可读性、空间利用、留白平衡、层级、对齐、阅读顺序和模板一致性。"
+                    f"用户原始指令：{user_instruction}\n"
+                    f"结构化理解：{json.dumps(resolved_request, ensure_ascii=False)[:2400]}\n"
+                    "先判断修改是否可见、方向是否符合用户指令、是否误改无关区域；"
+                    "再比较可读性、空间利用、留白平衡、层级、对齐、阅读顺序和模板一致性。"
                     "只有右图存在清晰且非微小的整体改善时 judgement 才为 better；"
                     "仅标题增加 1pt 或几何不变必须判为 same。"
                 ),
@@ -752,8 +758,16 @@ async def _run_qa(tc: ToolContext, _: RunQaInput) -> ToolResult:
                 if review.get("judgement") == "worse" and float(review.get("confidence") or 0) >= 0.65:
                     rejected.setdefault(slide_id, "视觉审稿认为结果变差，已保留原布局")
 
-    _preserve_rejected_layout_pages(tc, rejected, issues)
-    rendered["rejected_slide_ids"] = sorted(rejected)
+    # V3: quality/vision findings drive the bounded repair loop but never
+    # restore the page or veto publication. Structural page rollback is owned
+    # by postflight and applies only when PPTContent itself is invalid.
+    for slide_id, reason in rejected.items():
+        issues.append({
+            "severity": "major", "slide_id": slide_id,
+            "rule_id": "qa.acceptance_unmet", "message": reason.replace("已保留原布局", "将尝试自动纠偏"),
+            "target_agent": "layout",
+        })
+    rendered["rejected_slide_ids"] = []
 
     severity_counts: dict[str, int] = {}
     for issue in issues:

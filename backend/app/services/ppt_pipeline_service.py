@@ -30,6 +30,8 @@ from app.models.entities import AgentMessage, Artifact, ArtifactLock, Generation
 from app.providers.llm.mock import MockProvider
 from app.renderers.presentation_builder import PresentationBuilder, design_system_for
 from app.schemas.artifact import AgentArtifactRevisionPayload, PPTContent
+from app.services.model_config_service import normalize_model_preferences
+from app.services.chat_attachment_service import attachment_prompt, prepare_chat_attachments
 from app.services.ppt_template_service import resolve_ppt_template
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,17 @@ def _resolve_message_slide_ids(
 ) -> list[str]:
     """把教师自然语言中的页面范围转换为稳定 slide ID。"""
     metadata = dict(metadata or {})
+    # A page number written in the instruction is the most recent and most
+    # specific scope signal.  It must override stale UI selection/active-page
+    # metadata, especially for phrases such as “第四页……调整本页”。
+    page_number = 1 if any(token in content for token in ("首页", "封面", "首张")) else None
+    if page_number is None:
+        match = re.search(r"第\s*([0-9零〇一二两三四五六七八九十]+)\s*(?:页(?:面)?|张)", content)
+        if match:
+            page_number = _page_number(match.group(1))
+    if page_number and 1 <= page_number <= len(source_slides):
+        return [str(source_slides[page_number - 1].get("id") or f"S{page_number:02d}")]
+
     structured_targets = list(
         metadata.get("target_slide_ids") or metadata.get("selected_slide_ids") or []
     )
@@ -85,13 +98,6 @@ def _resolve_message_slide_ids(
         if active_slide_id in {str(item.get("id") or "") for item in source_slides}:
             return [active_slide_id]
 
-    page_number = 1 if any(token in content for token in ("首页", "封面", "首张")) else None
-    if page_number is None:
-        match = re.search(r"第\s*([0-9零〇一二两三四五六七八九十]+)\s*(?:页(?:面)?|张)", content)
-        if match:
-            page_number = _page_number(match.group(1))
-    if page_number and 1 <= page_number <= len(source_slides):
-        return [str(source_slides[page_number - 1].get("id") or f"S{page_number:02d}")]
     return []
 
 
@@ -160,10 +166,11 @@ async def _get_or_create_pipeline_run(db, generation_run: GenerationRun, max_rou
 
 async def _build_runtime(db, course, task, generation_run, blueprint, source, profile, provider, config,
                          knowledge_context, source_versions, locks, user_message) -> PipelineRuntime:
-    pipeline_run = await _get_or_create_pipeline_run(db, generation_run, max_rounds=3)
+    attachments, runtime_provider = await prepare_chat_attachments(db, course, user_message, provider)
+    pipeline_run = await _get_or_create_pipeline_run(db, generation_run, max_rounds=2)
     workspace = _workspace_root(course.id, generation_run.id)
     preferred_template = resolve_ppt_template(
-        (config.preferences_json or {}).get("default_ppt_template") if config else None,
+        normalize_model_preferences(config.preferences_json).get("default_ppt_template") if config else None,
     )["id"]
     if generation_run.trigger_type == "message" and source is not None:
         preferred_template = resolve_ppt_template((source.content_json or {}).get("theme") or preferred_template)["id"]
@@ -186,7 +193,7 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
     emitter = await PipelineEventEmitter.for_run(generation_run, pipeline_run)
     runtime = PipelineRuntime(
         course=course, task=task, blueprint=blueprint, generation_run=generation_run,
-        pipeline_run=pipeline_run, profile=profile, provider=provider, config=config,
+        pipeline_run=pipeline_run, profile=profile, provider=runtime_provider, config=config,
         knowledge_context=knowledge_context, source_versions=source_versions,
         locks=locks, source_artifact=source, user_message=user_message,
         preferred_template=preferred_template, trigger_type=generation_run.trigger_type,
@@ -194,6 +201,8 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         workspace_root=workspace, pause_event=PAUSE_EVENTS.setdefault(generation_run.id, asyncio.Event()),
         request_metadata=dict(getattr(user_message, "metadata_json", None) or {}),
     )
+    if attachments:
+        context.add_note(attachment_prompt(attachments))
     await emitter.pipeline_started(generation_run.trigger_type or "")
     # Codex 式消息语义：执行状态只进入 trace，assistant 正文只承载最终答复。
     # 暂停/恢复仍按 run_id 复用同一条 streaming 消息。
@@ -205,7 +214,7 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
     tool_context = ToolContext(
         ctx=context, builder=builder, workspace_root=workspace, course=course, task=task,
         generation_run_id=generation_run.id, pipeline_run_id=pipeline_run.id,
-        provider=provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
+        provider=runtime_provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
     )
     runtime.tool_context = tool_context
     return runtime
@@ -224,6 +233,14 @@ async def _finish_pipeline(
                 **(row.plan_json or {}),
                 "result_status": getattr(runtime, "result_status", "applied"),
                 "page_results": list(getattr(runtime, "layout_compile_results", None) or []),
+                "resolved_request": (
+                    runtime.resolved_request.model_dump()
+                    if hasattr(getattr(runtime, "resolved_request", None), "model_dump")
+                    else getattr(runtime, "resolved_request", None)
+                ),
+                "change_set": getattr(runtime, "change_set", None),
+                "diagnostics": list(getattr(runtime, "diagnostics", None) or []),
+                "fallback_used": bool(getattr(runtime, "intent_fallback_used", False)),
             }
             if status in {"completed", "failed", "cancelled"}:
                 from app.models.entities import now
@@ -352,49 +369,19 @@ async def _run_pipeline_message_agentic(runtime: PipelineRuntime, message: Agent
             "preserved" if result.get("status") == "preserved" else "applied",
         )
     preserved = [item["slide_id"] for item in results if item.get("status") == "preserved"]
-    applied = (
-        [] if runtime.result_status == "needs_confirmation"
-        else [item["slide_id"] for item in results if item.get("status") != "preserved"]
-    )
-    if runtime.result_status in {"no_change", "needs_confirmation"}:
+    applied = list((runtime.change_set or {}).get("changed_slide_ids") or [
+        item["slide_id"] for item in results if item.get("status") != "preserved"
+    ])
+    if runtime.result_status == "no_change":
         content = dict(getattr(runtime.source_artifact, "content_json", {}) or content)
-        if runtime.result_status == "needs_confirmation":
-            pending_page = next((
-                item for item in results if item.get("requires_candidate_confirmation")
-            ), None)
-            assistant_reply = (
-                f"{pending_page.get('display_label')}已有安全改善候选等待确认，"
-                "请选择预览方案或保留原版；确认前不会创建新版本。"
-                if pending_page and runtime.candidate_request_id
-                else "修改范围或目标存在歧义，请确认解析摘要后再执行；本轮未创建新版本。"
-            )
-        else:
-            best_attempt = max(
-                results,
-                key=lambda item: float(item.get("best_candidate_quality_delta") or 0),
-                default=None,
-            )
-            if best_attempt and (
-                best_attempt.get("best_candidate_id")
-                or best_attempt.get("rejection_code")
-            ):
-                delta = float(best_attempt.get("best_candidate_quality_delta") or 0)
-                reason = next(iter(best_attempt.get("rejection_reasons") or []), "未通过最终发布门禁")
-                assistant_reply = (
-                    f"{best_attempt.get('display_label') or '当前页面'}最佳候选质量"
-                    f"提升 {delta:+.2f}，但{reason}；本轮未创建空转版本，原 PPT 保持不变。"
-                )
-            else:
-                assistant_reply = (
-                    "当前页面没有获得可验证的安全改善，本轮未创建空转版本；"
-                    "原 PPT 保持不变。"
-                )
+        assistant_reply = "系统理解了本次指令，但目标页面没有产生实际差异，因此未创建空版本。"
     else:
         await _write_final_pptx(runtime, content, version=version)
-        if runtime.result_status == "partial":
+        if runtime.result_status in {"partial", "applied_with_warnings"}:
+            runtime.result_status = "applied_with_warnings"
             assistant_reply = (
-                f"已根据要求创建 PPT V{version}，安全更新 {len(applied)} 页；"
-                f"{len(preserved)} 页因内容密度较高保留原布局。"
+                f"已根据要求创建 PPT V{version}，更新 {len(applied)} 页；"
+                f"另有 {len(runtime.diagnostics)} 项非阻断警告，可在结果详情中查看。"
             )
         else:
             assistant_reply = f"已根据你的要求创建 PPT V{version}；原版本和页面级修改记录可在版本历史中恢复。"
@@ -411,10 +398,13 @@ async def _run_pipeline_message_agentic(runtime: PipelineRuntime, message: Agent
             "applied_slide_ids": applied,
             "preserved_slide_ids": preserved,
             "warnings": [warning for item in results for warning in (item.get("warnings") or [])],
-            **({
-                "request_id": runtime.candidate_request_id,
-                "options": list(runtime.candidate_options),
-            } if runtime.candidate_request_id else {}),
+            "resolved_request": (
+                runtime.resolved_request.model_dump()
+                if hasattr(runtime.resolved_request, "model_dump") else runtime.resolved_request
+            ),
+            "change_set": runtime.change_set,
+            "diagnostics": list(runtime.diagnostics),
+            "fallback_used": bool(runtime.intent_fallback_used),
         },
     )
     await runtime.emitter.agent_message_append(assistant_reply)
@@ -564,7 +554,7 @@ async def run_ppt_pipeline(db, course, task, run: GenerationRun, blueprint) -> P
             content=content, revision=revision_payload, user_message=user_message,
             model_name=model_name, profile=profile, provider=provider, locks=locks,
             source_versions=source_versions, change_summary=f"Agent 对话修改：{user_message.content[:80]}",
-            runtime=runtime, skip_publish=runtime.result_status in {"no_change", "needs_confirmation"},
+            runtime=runtime, skip_publish=runtime.result_status == "no_change",
         )
     if run.trigger_type == "sync_context":
         if not source:

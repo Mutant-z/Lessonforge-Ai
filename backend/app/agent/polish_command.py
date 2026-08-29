@@ -18,6 +18,7 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agent.core.gates import gates_active as _gates_active
 from app.agent.slide_rendering import canonical_slide_id
 
 
@@ -69,6 +70,7 @@ class PolishOperation(_StrictModel):
     object_targets: list[ObjectTarget] = Field(default_factory=list)
     strength: Strength = "moderate"
     hard_requirement: bool = True
+    parameters: dict[str, Any] = Field(default_factory=dict)
     execution_order: int = Field(default=10, ge=0, le=100)
 
     @field_validator("object_targets")
@@ -129,7 +131,8 @@ class ResolvedPolishCommandV2(_StrictModel):
         for objective in self.objectives:
             objectives[objective.metric] = objective
         self.objectives = list(objectives.values())
-        if self.ambiguities or self.confidence < 0.80:
+        # relaxed 门禁模式：歧义/低置信度不再强制人工确认，随事件下发仅作提示。
+        if _gates_active() and (self.ambiguities or self.confidence < 0.80):
             self.needs_confirmation = True
         return self
 
@@ -401,6 +404,31 @@ def _positive_instruction_text(text: str) -> str:
     return re.sub(r"(?:但是|但|不过)", "，", positive).strip(" ，,；;。")
 
 
+def _operation_parameters(domain: OperationDomain, text: str) -> dict[str, Any]:
+    if domain == "timing":
+        match = re.search(r"(?:时长|时间).{0,8}?([0-9]+(?:\.[0-9]+)?)\s*(?:秒|s)", text, re.I)
+        if match:
+            return {"duration_seconds": max(0.0, float(match.group(1)))}
+        delta = re.search(r"(增加|减少|延长|缩短).{0,5}?([0-9]+(?:\.[0-9]+)?)\s*(?:秒|s)", text, re.I)
+        if delta:
+            value = float(delta.group(2)) * (-1 if delta.group(1) in {"减少", "缩短"} else 1)
+            return {"duration_delta_seconds": value}
+    if domain == "notes":
+        match = re.search(r"(?:备注|讲解备注|教师备注).{0,4}?(?:改为|写成|设置为|为)\s*[：:]?\s*(.+)$", text)
+        if match:
+            return {"notes_text": match.group(1).strip(" 。")}
+    if domain == "style":
+        style: dict[str, Any] = {}
+        if _has(text, r"强调|重点|突出"):
+            style.update({"color": "accent", "bold": True})
+        elif _has(text, r"配色|颜色|色彩|视觉"):
+            style["color"] = "primary"
+        if _has(text, r"背景"):
+            style["fill"] = "surface"
+        return {"style": style} if style else {}
+    return {}
+
+
 def _operation(
     domain: OperationDomain,
     action: OperationAction,
@@ -416,6 +444,7 @@ def _operation(
         object_targets=_object_targets(text, domain=domain, default=default_target),
         strength=_strength(text),
         hard_requirement=hard,
+        parameters=_operation_parameters(domain, text),
         execution_order=order,
     )
 
@@ -437,8 +466,8 @@ def _parse_operations(text: str, relation: TurnRelation) -> tuple[list[PolishOpe
         operations.append(_operation("template", "switch", text, default_target="theme", order=40))
     if _has(
         text,
-        r"(?:修改|改写|润色|补充|精简).{0,5}(?:讲解备注|教师备注|备注)"
-        r"|(?:讲解备注|教师备注|备注).{0,5}(?:修改|改写|润色|补充|精简)",
+        r"(?:修改|改写|改为|设置为|润色|补充|精简).{0,5}(?:讲解备注|教师备注|备注)"
+        r"|(?:讲解备注|教师备注|备注).{0,5}(?:修改|改写|改为|设置为|润色|补充|精简)",
     ):
         operations.append(_operation("notes", "rewrite", text, default_target="notes", order=15))
     if _has(
@@ -754,7 +783,7 @@ def resolve_polish_command(
 ) -> ResolvedPolishCommandV2:
     """Resolve a user turn into a safe, multi-objective polishing command.
 
-    Scope precedence is explicit UI selection, explicit page text, active-page
+    Scope precedence is explicit page text, explicit UI selection, active-page
     deixis, inherited follow-up scope, then the whole deck.  Invalid or
     conflicting explicit scope never falls through to the whole deck.
     """
@@ -802,19 +831,19 @@ def resolve_polish_command(
     if active_scope_required:
         ambiguities.extend(f"scope.invalid_active_page:{item}" for item in invalid_active)
 
-    if supplied_targets:
-        scope = PolishScope(
-            target_slide_ids=selected_targets,
-            reference_slide_ids=references,
-            source="explicit_selection",
-        )
-        if parsed_pages.target_page_numbers and set(text_targets) != set(selected_targets):
-            ambiguities.append("scope.selection_text_conflict")
-    elif parsed_pages.target_page_numbers:
+    if parsed_pages.target_page_numbers:
         scope = PolishScope(
             target_slide_ids=text_targets,
             reference_slide_ids=references,
             source="explicit_text",
+        )
+        if supplied_targets and set(text_targets) != set(selected_targets):
+            ambiguities.append("scope.selection_text_conflict:text_wins")
+    elif supplied_targets:
+        scope = PolishScope(
+            target_slide_ids=selected_targets,
+            reference_slide_ids=references,
+            source="explicit_selection",
         )
     elif parsed_pages.has_deictic_target:
         scope = PolishScope(
@@ -995,7 +1024,9 @@ def resolve_polish_command(
         preservation=preservation,
         confidence=confidence,
         ambiguities=ambiguities,
-        needs_confirmation=bool(ambiguities) or confidence < 0.80,
+        needs_confirmation=(
+            bool(ambiguities) or confidence < 0.80
+        ) if _gates_active() else False,
     )
     command.summary = _summary(command, canonical)
     return command

@@ -40,6 +40,47 @@ def test_semantic_body_projection_does_not_repeat_title_from_lead_block():
     assert resolve_content_ref(slide, "body") == "八年级物理\n潜水艇下潜时浮力会变大吗？"
 
 
+@pytest.mark.asyncio
+async def test_remove_image_asset_only_removes_image_and_records_evidence(tmp_path):
+    image_path = tmp_path / "remove.png"
+    Image.new("RGB", (120, 90), "navy").save(image_path)
+    builder = PresentationBuilder().from_ppt_content({"theme": "lessonforge_deck_academic", "slides": [{
+        "id": "slide_01", "page_type": "concept", "title": "标题", "purpose": "",
+        "body": ["正文"], "blocks": [], "speaker_notes": "", "duration_seconds": 30,
+        "elements": [
+            {"id": "T01", "kind": "textbox", "role": "body", "text": "正文"},
+            {"id": "I01", "kind": "image", "role": "visual", "asset_path": str(image_path)},
+        ],
+    }]})
+    runtime = SimpleNamespace(selected_slide_ids=["slide_01"], affected_slide_ids=[], mutation_evidence=[], mutation_applied=False)
+    result = await execute_tool("remove_image_asset", ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime), {
+        "patches": [{"slide_id": "slide_01", "element_id": "I01"}],
+    })
+    assert result.ok
+    assert [item["id"] for item in builder.get_slide("slide_01")["elements"]] == ["T01"]
+    assert runtime.mutation_applied is True
+    assert runtime.mutation_evidence[-1]["tool_name"] == "remove_image_asset"
+
+
+@pytest.mark.asyncio
+async def test_patch_slide_metadata_updates_notes_and_duration_without_canvas_change(tmp_path):
+    slide = {"id": "slide_01", "page_type": "concept", "title": "标题", "purpose": "",
+             "body": ["正文"], "blocks": [], "speaker_notes": "旧备注", "duration_seconds": 30,
+             "elements": [{"id": "T01", "kind": "textbox", "role": "body", "text": "正文"}]}
+    builder = PresentationBuilder().from_ppt_content({"theme": "lessonforge_deck_academic", "slides": [slide]})
+    before_elements = deepcopy(builder.get_slide("slide_01")["elements"])
+    runtime = SimpleNamespace(selected_slide_ids=["slide_01"], affected_slide_ids=[], mutation_evidence=[], mutation_applied=False)
+    result = await execute_tool("patch_slide_metadata", ToolContext(builder=builder, workspace_root=tmp_path, runtime=runtime), {
+        "patches": [{"slide_id": "slide_01", "notes_text": "新备注", "duration_seconds": 45}],
+    })
+    assert result.ok
+    updated = builder.get_slide("slide_01")
+    assert updated["speaker_notes"] == "新备注"
+    assert updated["duration_seconds"] == 45
+    assert updated["elements"] == before_elements
+    assert runtime.mutation_evidence[-1]["kind"] == "metadata"
+
+
 def test_revision_content_ids_are_normalized_without_initial_deck_alignment():
     baseline = [
         {"id": "slide_01", "page_type": "cover", "title": "旧封面", "purpose": "",
@@ -76,8 +117,9 @@ def test_smart_ai_absolute_layout_stays_outside_template_rail_and_visual_slot():
         "lessonforge_deck_smart_ai",
     )
     by_role = {element.get("role"): element for element in layout["elements"]}
-    assert by_role["title"]["x"] >= 2.45
-    assert by_role["body"]["x"] >= 2.45
+    # content_x 由 TEMPLATE_DECOR 推导：smart_ai shell 左栏 1.7 → 1.7+0.55 = 2.25
+    assert by_role["title"]["x"] >= 2.25
+    assert by_role["body"]["x"] >= 2.25
     assert by_role["body"]["x"] + by_role["body"]["w"] <= 7.6 + 1e-6
     assert by_role["title"]["x"] + by_role["title"]["w"] <= 12.6
 
@@ -946,7 +988,7 @@ async def test_layout_batch_stages_pages_and_partially_applies_safe_candidates(t
     assert result.output["preserved_slide_ids"] == ["slide_02"]
     assert builder.get_slide("slide_01")["elements"]
     assert builder.get_slide("slide_02") == before_2
-    assert runtime.result_status == "partial"
+    assert runtime.result_status == "applied_with_warnings"
     assert runtime.mutation_applied is True
     assert next(
         item for item in runtime.layout_compile_results if item["slide_id"] == "slide_02"
@@ -1048,7 +1090,7 @@ async def test_text_only_patch_updates_visible_copy_without_geometry_change(tmp_
 
 
 @pytest.mark.asyncio
-async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkeypatch):
+async def test_layout_qa_warns_without_render_evidence_but_does_not_reject(tmp_path, monkeypatch):
     from app.renderers.ppt_visual_qa import PPTVisualQARenderer
 
     source = {
@@ -1095,12 +1137,11 @@ async def test_layout_qa_rejects_target_without_render_evidence(tmp_path, monkey
     assert result.output["missing_render_slide_ids"] == ["slide_01"]
     assert result.output["qa_level"] == "geometry"
     assert result.output["degraded"] is True
-    assert runtime.result_status == "no_change"
-    assert runtime.layout_compile_results[0]["decision"] == "preserved"
-    assert runtime.layout_compile_results[0]["rejection_code"] == "render_unavailable"
-    assert runtime.layout_compile_results[0]["material_change"] is False
+    assert runtime.result_status == "applied"
+    assert runtime.layout_compile_results[0]["decision"] == "applied"
+    assert runtime.layout_compile_results[0]["material_change"] is True
     assert any(
-        issue["rule_id"] == "layout.candidate_preserved"
+        issue["rule_id"] == "render.evidence_missing"
         for issue in result.output["issues"]
     )
 
@@ -1160,10 +1201,14 @@ async def test_image_geometry_round_trip_only_changes_existing_visual_box(tmp_pa
 
     assert result.ok
     final = builder.get_slide("slide_01")
-    assert final["elements"][:2] == source["elements"][:2]
+    identity_fields = {"semantic_id", "origin_content_ref", "revision_hash"}
+    assert [
+        {key: value for key, value in item.items() if key not in identity_fields}
+        for item in final["elements"][:2]
+    ] == source["elements"][:2]
     final_image = final["elements"][2]
     assert {
-        key: value for key, value in final_image.items() if key not in {"x", "y", "w", "h"}
+        key: value for key, value in final_image.items() if key not in {"x", "y", "w", "h", *identity_fields}
     } == {
         key: value for key, value in source["elements"][2].items() if key not in {"x", "y", "w", "h"}
     }

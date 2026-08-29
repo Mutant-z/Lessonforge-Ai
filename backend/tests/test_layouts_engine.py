@@ -5,19 +5,34 @@ from app.agent.layouts.engine import adaptive_quality_delta
 
 
 def test_academic_content_page_zones():
+    # content_x 由 TEMPLATE_DECOR 推导：shell 左条 0.16 宽 → 0.16+0.55 = 0.71
+    # （真实模板 shell 标题就在 x=0.65；旧的 2.2 是封面左栏值被误用于内容页）
     z = zones_for("lessonforge_deck_academic", "concept", has_visual=False)
-    assert z.content_x == 2.2
+    assert z.content_x == pytest.approx(0.71)
     assert z.title_rail.y == 0.55
     assert z.body_column.y == 1.7
     assert z.body_column.bottom == 6.8
     # 无视觉槽时正文列右缘 = 画布宽 - content_x - 0.78
-    assert z.body_column.right == pytest.approx(13.333 - 2.2 - 0.78)
+    assert z.body_column.right == pytest.approx(13.333 - 0.71 - 0.78)
     assert z.visual_slot is None
 
 
+def test_academic_cover_zones_content_x():
+    # 封面左栏（2.1 主栏 + 右缘）→ content_x = 2.1+0.55，与真实封面标题 x=2.7 吻合
+    assert zones_for("lessonforge_deck_academic", "cover", has_visual=False).content_x == pytest.approx(2.65)
+
+
 def test_smart_ai_cover_zones_content_x():
-    assert zones_for("lessonforge_deck_smart_ai", "cover", has_visual=False).content_x == 2.95
-    assert zones_for("lessonforge_deck_smart_ai", "concept", has_visual=False).content_x == 2.45
+    # smart_ai：shell 左栏 1.7 → 2.25；封面左栏 2.6 → 3.15（真实封面标题 x=3.2）
+    assert zones_for("lessonforge_deck_smart_ai", "cover", has_visual=False).content_x == pytest.approx(3.15)
+    assert zones_for("lessonforge_deck_smart_ai", "concept", has_visual=False).content_x == pytest.approx(2.25)
+
+
+def test_templates_without_vertical_rail_fall_back_to_margin():
+    # ai_future/business 只有上下细条、cartoon 只有圆形装饰 → 默认边距
+    for template_id in ("lessonforge_deck_ai_future", "lessonforge_deck_business", "lessonforge_deck_cartoon"):
+        assert zones_for(template_id, "concept", has_visual=False).content_x == pytest.approx(0.65)
+        assert zones_for(template_id, "cover", has_visual=False).content_x == pytest.approx(0.65)
 
 
 def test_visual_slot_narrows_body_column():
@@ -465,6 +480,56 @@ async def test_ensure_executable_layout_compiles_directive_via_engine():
 
 
 @pytest.mark.asyncio
+async def test_finalize_layout_keeps_material_candidate_when_objective_is_unmet():
+    """Regression: an unmet polish objective is a warning, not a restore gate."""
+    from types import SimpleNamespace
+
+    from app.agent.agents.layout import LAYOUT_AGENT
+    from app.agent.layouts.engine import compile_layout
+    from app.agent.pipeline import _ensure_executable_layout
+    from app.agent.schemas import AgentDecision
+
+    semantic = {**_slide(), "id": "slide_03_km"}
+    baseline = compile_layout(
+        "lessonforge_deck_academic", semantic,
+        {"slide_id": "slide_03_km", "layout_type": "bullet_flow"},
+    )
+    source = {**semantic, "render_mode": "absolute", "elements": baseline["elements"]}
+
+    class Artifacts:
+        async def latest(self, artifact_type):
+            return None
+
+    runtime = SimpleNamespace(
+        selected_slide_ids=["slide_03_km"], content_policy="preserve",
+        active_intent="LAYOUT_ONLY", baseline_slides=[source], artifacts=Artifacts(),
+        emitter=None, preferred_template="lessonforge_deck_academic",
+        expected_visual_requests=[], builder=None, diagnostics=[],
+        layout_compile_results=[], layout_engine_params={
+            "quality_mode": "polish_v2", "polish_mode": True,
+            "objectives": [{
+                "metric": "layout_quality", "direction": "increase",
+                "minimum_delta": 100.0, "hard_requirement": True,
+            }],
+        },
+    )
+    decision = AgentDecision(completed=True, output={"slides": [{
+        "slide_id": "slide_03_km", "layout_type": "cards",
+        "style": {"gap_scale": 1.2}, "rationale": "调整第四页排版与页面分布",
+    }]})
+
+    normalized = await _ensure_executable_layout(runtime, LAYOUT_AGENT, decision)
+    result = normalized.output["slides"][0]
+
+    assert result["compile_status"] != "preserved"
+    assert result["layout_type"] != "preserve_original"
+    assert result["elements"] != baseline["elements"]
+    assert result["decision"] == "applied"
+    assert any("仍应用" in warning for warning in result["warnings"])
+    assert any(item["code"] == "objective_unmet" for item in runtime.diagnostics)
+
+
+@pytest.mark.asyncio
 async def test_layout_only_ignores_phantom_visual_region_from_structured_model():
     """Regression for b2ae2c7b: optional model fields must not invent an image slot."""
     from types import SimpleNamespace
@@ -882,7 +947,7 @@ def test_underused_baseline_cannot_use_existing_absolute_scaled_shortcut():
     assert out["final_metrics"]["body_vertical_utilization"] >= 0.60
 
 
-def test_layout_polish_without_adaptive_gain_is_preserved_no_change():
+def test_layout_polish_without_adaptive_gain_applies_best_renderable_candidate():
     semantic = {**_slide(), "id": "slide_03"}
     baseline = compile_layout(
         "lessonforge_deck_academic", semantic,
@@ -895,12 +960,12 @@ def test_layout_polish_without_adaptive_gain_is_preserved_no_change():
         "polish_mode": True,
     })
 
-    assert out["compile_status"] == "preserved"
-    assert out["layout_type"] == "preserve_original"
-    assert out["quality_delta"] == 0.0
-    assert out["elements"] == baseline["elements"]
+    assert out["compile_status"] != "preserved"
+    assert out["layout_type"] != "preserve_original"
+    assert out["elements"] != baseline["elements"]
     assert out["objective_results"][0]["metric"] == "layout_quality"
     assert out["objective_results"][0]["passed"] is False
+    assert out["decision"] == "applied"
 
 
 @pytest.mark.parametrize(
@@ -931,7 +996,7 @@ def test_v64_high_quality_page_gain_of_three_passes_adaptive_gate():
     assert results[0]["evidence"]["quality_gate_threshold"] == 3.0
 
 
-def test_candidate_confirmation_ignores_close_candidate_that_failed_hard_objective(monkeypatch):
+def test_layout_auto_selects_candidate_without_confirmation(monkeypatch):
     import app.agent.layouts.engine as engine
 
     semantic = {**_slide(), "id": "slide_03"}
@@ -979,7 +1044,8 @@ def test_candidate_confirmation_ignores_close_candidate_that_failed_hard_objecti
         and not candidate["objective_results"][0]["passed"]
         for candidate in out["candidate_rankings"]
     )
-    assert out["candidate_score_gap"] is None
+    assert out["selected_candidate_id"]
+    assert out["candidate_score_gap"] == pytest.approx(0.0)
     assert out["requires_candidate_confirmation"] is False
 
 

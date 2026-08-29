@@ -33,6 +33,7 @@ from app.services.ppt_pipeline_service import (
     PAUSE_EVENTS, PipelineRunResult, _get_or_create_pipeline_run, _latest_artifact,
 )
 from app.services.project_knowledge_service import build_project_knowledge_context
+from app.services.chat_attachment_service import attachment_prompt, prepare_chat_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ def _workspace_root(course_id: str, generation_run_id: str) -> Path:
 
 async def _build_runtime(db, course, task, generation_run, blueprint, source, profile, provider, config,
                          knowledge_context, source_versions, locks, user_message) -> LessonPlanAgentRuntime:
+    attachments, runtime_provider = await prepare_chat_attachments(db, course, user_message, provider)
     pipeline_run = await _get_or_create_pipeline_run(db, generation_run, max_rounds=3)
     pipeline_run.pipeline_type = DEFAULT_PIPELINE_TYPE
     await db.commit()
@@ -68,7 +70,7 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
     emitter = await PipelineEventEmitter.for_run(generation_run, pipeline_run, task_type="lesson_plan")
     runtime = LessonPlanAgentRuntime(
         course=course, task=task, blueprint=blueprint, generation_run=generation_run,
-        pipeline_run=pipeline_run, profile=profile, provider=provider, config=config,
+        pipeline_run=pipeline_run, profile=profile, provider=runtime_provider, config=config,
         knowledge_context=knowledge_context, source_versions=source_versions,
         locks=locks, source_artifact=source, user_message=user_message,
         trigger_type=generation_run.trigger_type,
@@ -76,10 +78,12 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         workspace_root=workspace, pause_event=PAUSE_EVENTS.setdefault(generation_run.id, asyncio.Event()),
         request_metadata=dict(getattr(user_message, "metadata_json", None) or {}),
     )
+    if attachments:
+        context.add_note(attachment_prompt(attachments))
     tool_context = ToolContext(
         ctx=context, workspace_root=workspace, course=course, task=task,
         generation_run_id=generation_run.id, pipeline_run_id=pipeline_run.id,
-        provider=provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
+        provider=runtime_provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
     )
     runtime.tool_context = tool_context
     checkpoint = pipeline_run.checkpoint_json or {}

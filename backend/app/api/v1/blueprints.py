@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import current_user, owned_course
 from app.core.database import get_db
 from app.models.entities import CourseBlueprint, Material, User
-from app.schemas.blueprint import BlueprintUpdate, CourseBlueprintSchema
+from app.schemas.blueprint import BlueprintUpdate, CourseBlueprintSchema, normalize_blueprint_references
 from app.services.quality_service import validate_blueprint
 from app.workflows.course_graph import build_blueprint_graph
 from app.services.agent_initialization_service import create_initialization_run, start_initialization_run
@@ -36,7 +36,7 @@ async def generate_blueprint(course_id: str, user: User = Depends(current_user),
         },
         config={"configurable": {"thread_id": f"blueprint-{course.id}-{course.current_blueprint_version + 1}"}},
     )
-    schema = CourseBlueprintSchema.model_validate(result["blueprint"])
+    schema = normalize_blueprint_references(CourseBlueprintSchema.model_validate(result["blueprint"]))
     version = (await db.scalar(select(func.max(CourseBlueprint.version)).where(CourseBlueprint.course_id == course_id)) or 0) + 1
     item = CourseBlueprint(course_id=course_id, version=version, content_json=schema.model_dump(), content_markdown=f"# {course.title}课程蓝图\n\n版本：V{version}", status="review")
     db.add(item)
@@ -72,7 +72,8 @@ async def update_blueprint(blueprint_id: str, payload: BlueprintUpdate, user: Us
     if source.is_locked:
         raise HTTPException(409, "蓝图已锁定，请创建修订版本")
     version = (await db.scalar(select(func.max(CourseBlueprint.version)).where(CourseBlueprint.course_id == source.course_id)) or 0) + 1
-    item = CourseBlueprint(course_id=source.course_id, version=version, content_json=payload.content.model_dump(), content_markdown=source.content_markdown, status="review", created_by="teacher")
+    schema = normalize_blueprint_references(payload.content)
+    item = CourseBlueprint(course_id=source.course_id, version=version, content_json=schema.model_dump(), content_markdown=source.content_markdown, status="review", created_by="teacher")
     db.add(item)
     course.current_blueprint_version = version
     course.status = "blueprint_review"
@@ -87,7 +88,9 @@ async def approve_blueprint(blueprint_id: str, user: User = Depends(current_user
     if not item:
         raise HTTPException(404, "蓝图不存在")
     course = await owned_course(item.course_id, user, db)
-    issues = validate_blueprint(CourseBlueprintSchema.model_validate(item.content_json))
+    schema = normalize_blueprint_references(CourseBlueprintSchema.model_validate(item.content_json))
+    item.content_json = schema.model_dump()
+    issues = validate_blueprint(schema)
     if any(x["severity"] == "critical" for x in issues):
         raise HTTPException(409, "蓝图仍有严重规则问题")
     item.status = "approved"

@@ -229,6 +229,27 @@ async def test_runtime_no_qa_blocking_for_content_issues(client, auth_headers, _
 
 
 @pytest.mark.asyncio
+async def test_runtime_publishes_narration_without_legacy_required_term(client, auth_headers, _runtime_course):
+    """口播润色后可以不再包含旧 required_terms；候选稿仍直接进入发布。"""
+    def corrupt(source):
+        scene = source["scenes"][0]
+        scene["spoken_text"] = "这是 Agent 润色后的新口播，直接保留教师确认的表达。"
+        scene["required_terms"] = ["旧版必需术语"]
+
+    runtime = await _make_runtime(
+        _runtime_course,
+        instruction="润色目标分镜口播",
+        corrupt=corrupt,
+        pre_upgrade=True,
+    )
+    await runtime.run()
+
+    assert runtime.result_status == "applied"
+    assert runtime.publishable
+    assert runtime.draft_content["scenes"][0]["spoken_text"].startswith("这是 Agent 润色后")
+
+
+@pytest.mark.asyncio
 async def test_runtime_intent_resolution_initial(client, auth_headers, _runtime_course):
     plan = await infer_video_script_intent(None, "initial", "")
     assert plan.intent == "GENERATE"

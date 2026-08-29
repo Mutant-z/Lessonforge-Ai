@@ -35,6 +35,7 @@ from app.agent.agents.video_script.qa import blocking_issues as _blocking
 from app.agent.agents.video_script.qa import fingerprint as _fingerprint
 from app.agent.agents.video_script.qa import validate_video_script_v4
 from app.agent.core.error import AgentError
+from app.agent.core.gates import gates_active
 from app.agent.core.loop import PipelinePaused, run_agent_loop
 from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext
@@ -49,6 +50,7 @@ from app.services.video_generation_settings_service import (
     normalize_native_video_resolution,
     preferred_video_resolution,
 )
+from app.services.chat_attachment_service import apply_runtime_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -365,11 +367,13 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
                 return []
             texts: list[str] = []
             setting_rows: list[AgentRunInstruction] = []
+            attachment_metadata: list[dict[str, Any]] = []
             selected_sections: list[str] = []
             selected_scenes: list[str] = []
             latest_mode = (self.request_metadata or {}).get("mode") or "auto"
             for row in rows:
                 metadata = dict(row.metadata_json or {})
+                attachment_metadata.extend(metadata.get("attachments") or [])
                 setting_hint = str(metadata.get("mode") or "") in {"resolution", "video_generation_settings"}
                 if setting_hint or "分辨率" in (row.content or ""):
                     row.status = "settings_queued"
@@ -382,6 +386,10 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
                 selected_scenes.extend(str(item) for item in metadata.get("selected_scene_ids") or [])
                 latest_mode = str(metadata.get("mode") or latest_mode)
             await db.commit()
+            if attachment_metadata:
+                await apply_runtime_attachments(
+                    db, self.course, self, {"attachments": attachment_metadata},
+                )
         # 设置类追加指令不进入脚本上下文；在同一安全边界通过独立设置 Agent 处理。
         for setting_row in setting_rows:
             decision = await infer_video_script_intent(
@@ -521,7 +529,8 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
         await self._clear_confirmation_checkpoint()
         intent_decision = await self._resolve_intent()
         # 破坏性/低置信度修改必须在任何设置落库或编辑工具调用之前暂停确认。
-        if intent_decision.requires_confirmation and not self.confirmation_tokens:
+        # relaxed 门禁模式：直接按当前意图执行，不再等待确认。
+        if gates_active() and intent_decision.requires_confirmation and not self.confirmation_tokens:
             await self._request_confirmation(intent_decision)
             return
         # 下游视频生成设置走独立控制 Agent + typed tool，不运行脚本 Builder。
@@ -574,8 +583,6 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
                 persist_artifact=_persist_artifact,
                 retry_classifier=_retry_classifier,
             )
-            if intent_decision.intent == "QA_ONLY":
-                await self._collect_validation_issues()
             self.result_status = "no_change"
             self.dialogue_summary = await self._answer_only_reply(intent_decision.intent)
             return
@@ -593,7 +600,7 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
         await self._run_once(chain)
         late_instructions = await self._drain_instructions()
         if late_instructions:
-            if self.intent_plan and self.intent_plan.requires_confirmation and not self.confirmation_tokens:
+            if gates_active() and self.intent_plan and self.intent_plan.requires_confirmation and not self.confirmation_tokens:
                 await self._request_confirmation(self.intent_plan)
                 raise PipelinePaused()
             if self.intent_plan and self.intent_plan.resolution_error:
@@ -649,8 +656,7 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
             f"总时长约 {minutes} 分钟。"
         )
         if intent == "QA_ONLY":
-            blocking = _blocking(self.blocking_issues)
-            return base + ("发布前约束均已通过。" if not blocking else f"发现 {len(blocking)} 个需要修复的阻断问题。")
+            return base + "内容质量自动检验已关闭；本轮未执行术语、数字、语速或表达门禁。"
         return base
 
     async def _run_once(self, chain: list[str]) -> None:
@@ -761,17 +767,20 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
         from app.schemas.video_script_v4 import video_script_v4_to_markdown
 
         self.draft_markdown = video_script_v4_to_markdown(content)
-        # 范围守护：只拦截越出用户显式选中章节/分镜的修改，不拦截内容质量。
+        # 范围守护：strict 模式拦截越出用户显式选中章节/分镜的修改；
+        # relaxed 模式降级为 diagnostics，修改照常发布（差异由 diff 摘要展示）。
         scope_violations = self._scope_violations(content)
         if scope_violations:
             self.blocking_issues.extend({
                 "severity": "critical", "location": "$", "dimension": "scope",
                 "description": violation, "suggestion": "只修改教师选中的章节、分镜和字段",
             } for violation in scope_violations)
-            self.result_status = "rejected"
-            self.publishable = False
-            self.dialogue_summary = "修改范围超出了教师选中的章节/分镜，原版本保持不变。"
-            return
+            if gates_active():
+                self.result_status = "rejected"
+                self.publishable = False
+                self.dialogue_summary = "修改范围超出了教师选中的章节/分镜，原版本保持不变。"
+                return
+            self.blocking_issues = []
         # 无真实变更 → no_change（保留原版，不创建空版本）。
         source_content = self.source_artifact.content_json if self.source_artifact else None
         if source_content is not None:
@@ -802,7 +811,7 @@ class VideoScriptAgentRuntime(AgentRuntimeState):
             teacher_reply = str(((finalizer_artifact or {}).get("data") or {}).get("teacher_reply") or "").strip()
         actual_result = (
             f"实际差异涉及 {len(changed_sections)} 个章节、{len(changed_scenes)} 个分镜；"
-            "发布前约束已通过，并已创建新版本。"
+            "候选稿已准备发布为新版本。"
         )
         self.dialogue_summary = f"{teacher_reply}\n{actual_result}".strip()
 
@@ -816,7 +825,7 @@ async def _call_agent(runtime: VideoScriptAgentRuntime, agent_key: str, agent, d
     """调用角色；只向 UI 发布阶段摘要，不转发模型的隐藏推理增量。"""
     merged = await runtime._drain_instructions()
     if merged and runtime.intent_plan:
-        if runtime.intent_plan.requires_confirmation and not runtime.confirmation_tokens:
+        if gates_active() and runtime.intent_plan.requires_confirmation and not runtime.confirmation_tokens:
             await runtime._request_confirmation(runtime.intent_plan)
             raise PipelinePaused()
         if runtime.intent_plan.resolution_error:

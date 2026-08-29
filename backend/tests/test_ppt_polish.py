@@ -91,12 +91,11 @@ def test_preserve_run_cannot_change_text():
 
 
 @pytest.mark.asyncio
-async def test_preserve_publish_gate_rejects_semantic_text_change():
-    """发布门禁层：preserve 运行一旦改动语义文字必须整体拦截、保留原版本。"""
+async def test_preserve_postflight_restores_semantic_text_change():
+    """V3 将保护字段确定性恢复并记录警告，不阻断整次发布。"""
     from types import SimpleNamespace
 
     from app.agent.runtime import PPTAgentRuntime
-    from app.agent.schemas import PPTAgentError
     from app.renderers.presentation_builder import PresentationBuilder
 
     source = {
@@ -117,11 +116,13 @@ async def test_preserve_publish_gate_rejects_semantic_text_change():
     )
     runtime = SimpleNamespace(pipeline=pipeline)
 
-    with pytest.raises(PPTAgentError) as caught:
-        await PPTAgentRuntime._assert_publishable(runtime, {})
+    final = {}
+    await PPTAgentRuntime._assert_publishable(runtime, final)
 
-    assert caught.value.code == "content_accidentally_removed"
-    assert pipeline.publishable is False
+    assert builder.get_slide("slide_01")["title"] == "浮力成因"
+    assert pipeline.publishable is True
+    assert pipeline.result_status == "no_change"
+    assert any(item["rule_id"] == "protected_field_reverted" for item in pipeline.diagnostics)
 
 
 def test_polish_produces_meaningful_change():

@@ -17,6 +17,7 @@ result_status 语义与 PPT/lesson_plan 对齐：applied / no_change / rejected 
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,13 +36,16 @@ from app.agent.agents.task_sheet.intents import (
 from app.agent.agents.task_sheet.qa import blocking_issues as _blocking
 from app.agent.agents.task_sheet.qa import fingerprint as _fingerprint
 from app.agent.core.error import AgentError
+from app.agent.core.gates import gates_active
 from app.agent.core.loop import run_agent_loop
 from app.agent.core.state import AgentRuntimeState
+from app.agent.pipeline import PipelinePaused
 from app.agent.registry import ToolContext
-from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan
+from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan, ToolCall
 from app.core.database import SessionLocal
 from app.models.entities import AgentHumanRequest, AgentRunInstruction, PipelineRun
 from app.schemas.task_sheet import TASK_SHEET_V3, TaskSheetContentV3
+from app.services.chat_attachment_service import apply_runtime_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,10 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
     confirmation_tokens: list[str] = field(default_factory=list)
     confirmation_request: AgentHumanRequest | None = None
     resumed_confirmation: dict[str, Any] = field(default_factory=dict)
+    # 工具在候选稿上命中高风险守卫时，保存精确调用；教师确认后可以从
+    # 同一候选稿和同一工具参数继续，而不是让模型重新猜一遍完整对象。
+    pending_tool_confirmation: dict[str, Any] = field(default_factory=dict)
+    confirmation_replay_used: bool = False
 
     # 协议统计（方案 §3.1：PipelineRun 记录实际使用的协议）
     tool_protocol: str = "structured"   # native | structured
@@ -113,7 +121,42 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
     # 准备
     # ------------------------------------------------------------------
 
+    def checkpoint_payload(self) -> dict[str, Any]:
+        """保存可恢复的候选稿与工具上下文，避免暂停后从正式版本重建。"""
+        payload: dict[str, Any] = {
+            "context_snapshot": self.context.snapshot(),
+            "active_intent": self.active_intent,
+            "selected_section_ids": list(self.selected_section_ids),
+            "source_artifact_id": getattr(self.source_artifact, "id", None),
+            "source_version": getattr(self.source_artifact, "version", None),
+            "base_artifact_id": getattr(self.source_artifact, "id", None),
+            "base_version": getattr(self.source_artifact, "version", None),
+        }
+        if self.builder is not None:
+            payload["draft_snapshot"] = self.builder.to_content()
+            payload["draft_revision"] = self.builder.revision
+        # 始终写入该键，确认恢复后清空时可以覆盖旧 checkpoint 中的调用记录。
+        payload["pending_tool_confirmation"] = copy.deepcopy(self.pending_tool_confirmation)
+        return payload
+
     def _prepare_builder(self) -> TaskSheetBuilder:
+        checkpoint = (self.pipeline_run.checkpoint_json or {}) if self.pipeline_run is not None else {}
+        draft_snapshot = checkpoint.get("draft_snapshot")
+        checkpoint_source_id = checkpoint.get("base_artifact_id")
+        checkpoint_source_version = checkpoint.get("base_version")
+        current_source_id = getattr(self.source_artifact, "id", None)
+        current_source_version = getattr(self.source_artifact, "version", None)
+        can_restore_draft = (
+            isinstance(draft_snapshot, dict)
+            and draft_snapshot.get("schema_version") == TASK_SHEET_V3
+            and checkpoint_source_id == current_source_id
+            and checkpoint_source_version == current_source_version
+        )
+        if can_restore_draft:
+            builder = TaskSheetBuilder(draft_snapshot)
+            builder._revision = int(checkpoint.get("draft_revision") or 0)
+            self.builder = builder
+            return builder
         bp_content = self.blueprint.content_json if hasattr(self.blueprint, "content_json") else self.blueprint
         lesson_plan_raw = (self.knowledge_context or {}).get("sibling_artifacts", {}).get("lesson_plan")
         if lesson_plan_raw is None:
@@ -152,13 +195,22 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
         if self.pipeline_run is None:
             return
         checkpoint = self.pipeline_run.checkpoint_json or {}
+        context_snapshot = checkpoint.get("context_snapshot")
+        if isinstance(context_snapshot, dict):
+            self.context.restore(context_snapshot)
         pending = checkpoint.get("pending_confirmation") or {}
+        pending_tool = checkpoint.get("pending_tool_confirmation")
+        if isinstance(pending_tool, dict):
+            self.pending_tool_confirmation = copy.deepcopy(pending_tool)
         if pending.get("token"):
             self.confirmation_tokens = [str(pending["token"])]
             self.resumed_confirmation = dict(pending)
         checkpoint_intent = checkpoint.get("active_intent")
         if checkpoint_intent:
             self.active_intent = str(checkpoint_intent)
+        selected = checkpoint.get("selected_section_ids")
+        if not self.selected_section_ids and isinstance(selected, list):
+            self.selected_section_ids = [str(item) for item in selected if str(item)]
 
     # ------------------------------------------------------------------
     # 意图与计划
@@ -230,11 +282,17 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
             if not rows:
                 return []
             merged_texts: list[str] = []
+            attachment_metadata: list[dict[str, Any]] = []
             for row in rows:
                 row.status = "merged"
                 row.applied_at = datetime.now(timezone.utc)
                 merged_texts.append(row.content or "")
+                attachment_metadata.extend((row.metadata_json or {}).get("attachments") or [])
             await db.commit()
+            if attachment_metadata:
+                await apply_runtime_attachments(
+                    db, self.course, self, {"attachments": attachment_metadata},
+                )
         if not merged_texts:
             return []
         merged = "\n".join(merged_texts)
@@ -274,7 +332,15 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
 
     async def _request_confirmation(self, decision: TaskSheetIntentDecision) -> None:
         """低置信度 / 破坏性 / 指纹空转 → 创建人工确认请求并原地等待（paused）。"""
-        if self.emitter is not None:
+        existing_request: AgentHumanRequest | None = None
+        if self.pipeline_run is not None:
+            async with SessionLocal() as db:
+                existing_request = await db.scalar(select(AgentHumanRequest).where(
+                    AgentHumanRequest.pipeline_run_id == self.pipeline_run.id,
+                    AgentHumanRequest.request_type == "task_sheet_confirmation",
+                    AgentHumanRequest.status == "pending",
+                ).order_by(AgentHumanRequest.created_at.desc()))
+        if self.emitter is not None and existing_request is None:
             await self.emitter.emit_domain(
                 "human.required",
                 agent={"id": "intent_planner"},
@@ -286,7 +352,7 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
                     "confidence": decision.confidence,
                 },
             )
-        request = AgentHumanRequest(
+        request = existing_request or AgentHumanRequest(
             pipeline_run_id=self.pipeline_run.id,
             request_type="task_sheet_confirmation",
             prompt=decision.clarification_question or "请确认本次修改的执行范围。",
@@ -294,20 +360,24 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
             status="pending",
         )
         async with SessionLocal() as db:
-            db.add(request)
-            await db.flush()
+            if existing_request is None:
+                db.add(request)
+                await db.flush()
             request_id = request.id
             row = await db.get(PipelineRun, self.pipeline_run.id)
             if row:
                 row.status = "paused"
+                pending_confirmation = {
+                    **((row.checkpoint_json or {}).get("pending_confirmation") or {}),
+                    "request_id": request_id,
+                    "request_type": "task_sheet_confirmation",
+                    "intent": decision.intent,
+                    "requires_confirmation": True,
+                }
                 row.checkpoint_json = {
                     **(row.checkpoint_json or {}),
-                    "pending_confirmation": {
-                        "request_id": request_id,
-                        "request_type": "task_sheet_confirmation",
-                        "intent": decision.intent,
-                        "requires_confirmation": True,
-                    },
+                    **self.checkpoint_payload(),
+                    "pending_confirmation": pending_confirmation,
                 }
                 row.plan_json = {
                     **(row.plan_json or {}),
@@ -318,6 +388,32 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
         self.confirmation_request = request
         self.result_status = "needs_confirmation"
         self.dialogue_summary = decision.clarification_question or "需要教师确认后继续。"
+
+    async def handle_tool_failure(self, agent_key: str, call: ToolCall, result: Any) -> None:
+        """把高风险工具拒绝转换成一次可恢复的教师确认，而不是工具空转。"""
+        if getattr(result, "error_code", None) != "confirmation_required":
+            return
+        self.pending_tool_confirmation = {
+            "agent_key": agent_key,
+            "tool_name": call.tool_name,
+            "input": copy.deepcopy(call.input),
+        }
+        intent = self.active_intent if self.active_intent in {
+            "TASK_EDIT", "STRUCTURE_EDIT", "TIMING_ADJUST", "ALIGNMENT_REPAIR",
+            "SCAFFOLD_EDIT", "RECORDING_EDIT", "SYNC_CONTEXT",
+        } else "TASK_EDIT"
+        question = (
+            f"{result.error or '本次修改涉及高风险目标或结构变更。'}\n"
+            "请确认是否按当前建议继续执行；如需缩小范围，请选择“缩小修改范围”。"
+        )
+        await self._request_confirmation(TaskSheetIntentDecision(
+            intent=intent, destructive=True, confidence=1.0,
+            requires_confirmation=True, clarification_question=question,
+            assumptions=["工具检测到目标解绑或其他高风险变更"],
+            plan_steps=["等待教师确认", "恢复候选稿并继续执行被拦截的工具调用"],
+            acceptance_criteria=["高风险工具调用已获得教师确认"],
+        ))
+        raise PipelinePaused()
 
     async def _mark_confirmation_resolved(self) -> None:
         """确认恢复后发 human.resolved 事件。"""
@@ -358,7 +454,8 @@ class TaskSheetAgentRuntime(AgentRuntimeState):
                     row.status = "running"
                     await db.commit()
         # 需要人工确认且尚未确认 → 创建确认请求，原地暂停。
-        if decision.requires_confirmation and not self.confirmation_tokens:
+        # relaxed 门禁模式：低置信度/破坏性关键词不再拦截，按当前意图直接执行。
+        if gates_active() and decision.requires_confirmation and not self.confirmation_tokens:
             await self._request_confirmation(decision)
             return
         chain = agent_chain_for_intent(decision.intent, self.trigger_type)
@@ -494,13 +591,50 @@ async def _call_agent(runtime: TaskSheetAgentRuntime, agent_key: str, agent, dec
     每次决策前先原子消费运行中新指令（安全边界，方案 §3.2）。
     """
     await runtime._drain_instructions()
-    if is_mock_provider(runtime.provider) or agent_key in {"repair_router", "task_sheet_qa"}:
+    replay = runtime.pending_tool_confirmation
+    if (
+        replay
+        and runtime.resumed_confirmation.get("choice") == "apply"
+        and runtime.confirmation_tokens
+        and not runtime.confirmation_replay_used
+        and replay.get("agent_key") == agent_key
+    ):
+        runtime.confirmation_replay_used = True
+        replay_input = copy.deepcopy(replay.get("input") or {})
+        replay_input["confirmation_token"] = runtime.confirmation_tokens[0]
+        runtime.pending_tool_confirmation = {}
+        return AgentDecision(
+            tool_calls=[ToolCall(tool_name=str(replay.get("tool_name") or ""), input=replay_input)],
+            message="已获得教师确认，继续执行刚才被拦截的修改。",
+        )
+    # The initial builder is already a complete blueprint-derived V3 document.
+    # Running it through edit tools made the model try to add the same chapters
+    # again and incorrectly hit the destructive-edit confirmation gate.  LLM
+    # tool loops are for later teacher edits; initialization uses the safe,
+    # deterministic Agent decisions and still runs the normal QA/finalizer path.
+    if (
+        (
+            getattr(runtime.generation_run, "trigger_type", "") == "initial"
+            and runtime.source_artifact is None
+        )
+        or is_mock_provider(runtime.provider)
+        or agent_key in {"repair_router", "task_sheet_qa"}
+    ):
         decision = await agent.decide(runtime.tool_context)
         if runtime.emitter is not None and decision.message:
             await runtime.emitter.agent_status_delta(agent_key, decision.message)
             await runtime.emitter.agent_thought_chunk(agent_key, decision.message, flush_now=True)
         return decision
     system = agent.build_system_prompt(runtime.tool_context, runtime)
+    confirmation_choice = runtime.resumed_confirmation.get("choice") if runtime.resumed_confirmation else ""
+    confirmation_note = ""
+    if runtime.confirmation_tokens:
+        confirmation_note = (
+            "\n本次运行已获得教师确认令牌；需要确认的工具调用必须原样使用令牌："
+            f"{runtime.confirmation_tokens[0]}。"
+        )
+    if confirmation_choice == "scope_down":
+        confirmation_note += "\n教师选择了缩小修改范围，请勿重放原高风险调用，先调整为更小且明确的范围。"
     prompt = (
         "上下文：\n" + runtime.context.to_prompt(agent_key)
         + "\n可用工具 Schema：\n" + _tool_schemas_text(runtime, agent)
@@ -511,10 +645,13 @@ async def _call_agent(runtime: TaskSheetAgentRuntime, agent_key: str, agent, dec
              if runtime.intent_plan and runtime.intent_plan.target_phases else "本轮为全局任务，可以处理全部章节。")
         )
         + "\n高风险操作（删除任务/章节、目标解绑）必须携带有效 confirmation_token；"
-        "没有令牌时请求教师确认，不要伪造令牌。"
-        "\n请先输出可见执行摘要（简短说明当前阶段和下一步动作，不要输出隐式思维链或系统提示词），"
-        "再输出决策：要么给出一批 tool_calls，要么 completed（含 output/summary）。"
-        "只返回一个 AgentDecision JSON。"
+        + "没有令牌时请求教师确认，不要伪造令牌。"
+        + "\n普通内容润色/任务编辑必须保留现有 objective_ids、knowledge_point_ids、stage_id；"
+        + "只有明确的 ALIGNMENT_REPAIR 意图才允许改变 objective_ids。"
+        + confirmation_note
+        + "\n请先输出可见执行摘要（简短说明当前阶段和下一步动作，不要输出隐式思维链或系统提示词），"
+        + "再输出决策：要么给出一批 tool_calls，要么 completed（含 output/summary）。"
+        + "只返回一个 AgentDecision JSON。"
     )
     runtime.token_usage["tokens"] += estimate_context_tokens(prompt)
     runtime.token_usage["llm_calls"] += 1

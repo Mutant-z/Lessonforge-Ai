@@ -348,7 +348,10 @@ _EDIT_SIGNALS = (
 )
 _QA_MARKERS = ("质量检查", "合规检查", "质检", "审查", "评估教学设计", "检查一下")
 _SYNC_MARKERS = ("同步", "按最新", "依据最新")
-_STRUCTURE_VERBS = ("调整目录", "重排目录", "拆分章节", "合并章节", "移动章节", "重命名章节", "调整结构", "单独成章", "独立成章")
+_STRUCTURE_VERBS = (
+    "调整目录", "重排目录", "拆分章节", "合并章节", "移动章节", "重命名章节", "调整结构",
+    "单独成章", "独立成章",
+)
 _STRUCTURE_PATTERN = re.compile(
     r"(?:新增|添加|增加|插入|删除|移除|去掉|移动|重排|重命名|合并|拆分)"
     r"[^，。；]{0,12}(?:章节|小节|环节|目录|点|部分)"
@@ -356,6 +359,41 @@ _STRUCTURE_PATTERN = re.compile(
 _TIMING_MARKERS = ("调整时长", "修改用时", "时间分配", "环节时长", "分钟")
 #: 强格式信号：命中即进入 SECTION_FORMAT_EDIT（确定性处理优先）。
 _STRONG_FORMAT_MARKERS = ("序号", "编号", "重新编号", "层级", "格式", "排版", "为什么是", "标成", "写成了")
+
+# 这两个事实经常以“教学重难点”合称出现。它们仍然是两个稳定事实键，
+# 但“合称”不等于“必须拆成两个一级章节”；只有教师明确要求分开呈现时，
+# 才启用 must_be_distinct_top_level 门禁。
+_CORE_FACT_KEYS = ("key_points", "difficulty_points")
+_FACT_SUPPLEMENT_MARKERS = (
+    "缺少", "缺失", "没有", "未写", "未体现", "补充", "完善", "增加", "添加", "丰富", "补齐",
+)
+_DISTINCT_FACT_MARKERS = (
+    "分别", "分开", "拆分", "拆成", "分成", "各自", "独立", "单独", "两个部分", "两个章节",
+)
+
+
+def _core_fact_keys_in_instruction(instruction: str) -> list[str]:
+    """识别指令中明确提到的教学重点/难点事实键。"""
+    compact = "".join((instruction or "").split())
+    result: list[str] = []
+    if "重难点" in compact or "重难" in compact:
+        result.extend(_CORE_FACT_KEYS)
+    else:
+        if any(alias in compact for alias in FACT_ALIASES["key_points"]):
+            result.append("key_points")
+        if any(alias in compact for alias in FACT_ALIASES["difficulty_points"]):
+            result.append("difficulty_points")
+    return list(dict.fromkeys(result))
+
+
+def _fact_supplement_requested(instruction: str) -> bool:
+    compact = "".join((instruction or "").split())
+    return any(marker in compact for marker in _FACT_SUPPLEMENT_MARKERS)
+
+
+def _explicitly_separates_facts(instruction: str) -> bool:
+    compact = "".join((instruction or "").split())
+    return any(marker in compact for marker in _DISTINCT_FACT_MARKERS)
 
 
 def _fallback_contract(
@@ -455,6 +493,33 @@ def _coarse_intent_fallback(
                                   ["timing", "core_content"], ["timing"], ["outline_structure"],
                                   False, "调整教学环节时长", "coarse-timing")
 
+    is_format = any(m in compact for m in _STRONG_FORMAT_MARKERS) or (
+        mode == "content" and any(w in compact for w in ("序号", "编号"))
+    )
+
+    # 重点/难点是稳定教学事实。若当前大纲没有可展示的对应章节，“补充”
+    # 意味着需要新增一个展示章节，而不是把请求当成普通正文润色后空转。
+    core_fact_keys = _core_fact_keys_in_instruction(raw_text)
+    if (
+        core_fact_keys
+        and not is_format
+        and (_fact_supplement_requested(raw_text) or _explicitly_separates_facts(raw_text))
+    ):
+        targets = grounded or requested
+        if targets:
+            return _fallback_contract(
+                "CONTENT_ENRICH", requested, targets, core_fact_keys,
+                ["section_content", "core_content"], ["section_content"],
+                ["outline_structure", "timing"], False,
+                "补充教学重点与难点内容", "coarse-core-fact-content",
+            )
+        return _fallback_contract(
+            "RESTRUCTURE", requested, [], core_fact_keys,
+            ["outline_structure", "section_content", "core_content"],
+            ["outline_structure", "section_content"], ["timing"], True,
+            "新增教学重点与难点展示章节", "coarse-core-fact-section",
+        )
+
     # 5. 目录结构调整（新增/拆分/合并/移动/重命名等）。
     is_structure = any(v in compact for v in _STRUCTURE_VERBS) or bool(_STRUCTURE_PATTERN.search(compact))
     if is_structure:
@@ -462,9 +527,6 @@ def _coarse_intent_fallback(
                                   ["outline_structure"], ["timing"], True, "调整教学设计目录结构", "coarse-structure")
 
     # 6. 格式/序号缺陷修正（确定性处理优先，不重写正文语义）。
-    is_format = any(m in compact for m in _STRONG_FORMAT_MARKERS) or (
-        mode == "content" and any(w in compact for w in ("序号", "编号"))
-    )
     if is_format:
         unresolved = [f"format_target_unmatched:{raw}" for raw in unresolved_requested]
         return _fallback_contract(
@@ -681,7 +743,40 @@ def _augment_requirements(
                 sid for sid in targets if re.fullmatch(r"SEC-[A-Z0-9-]+", str(sid).strip())
             ]
 
+    # 模型有时只返回“重难点”这一自然语言概念，未填稳定事实键；在执行前补齐，
+    # 这样工具权限、上下文和发布门禁都能指向同一组事实。
+    instruction_fact_keys = _core_fact_keys_in_instruction(instruction)
+    if instruction_fact_keys:
+        decision.target_fact_keys = list(dict.fromkeys(
+            list(decision.target_fact_keys or []) + instruction_fact_keys
+        ))
+        if _fact_supplement_requested(instruction) and decision.intent in {
+            "SECTION_EDIT", "CONTENT_ENRICH", "RESTRUCTURE",
+        }:
+            if "section_content" not in kinds:
+                kinds.append("section_content")
+            # 没有现有目标章节时，补充“重难点”只能通过新增展示章节落地。
+            if not decision.target_section_ids and not requested and decision.intent in {
+                "SECTION_EDIT", "CONTENT_ENRICH",
+            }:
+                decision.intent = "RESTRUCTURE"
+                decision.structural = True
+                if "outline_structure" not in kinds:
+                    kinds.insert(0, "outline_structure")
+                if "outline_structure" not in decision.allowed_change_kinds:
+                    decision.allowed_change_kinds = list(decision.allowed_change_kinds or []) + ["outline_structure"]
+
     facts = list(dict.fromkeys(decision.required_separate_facts or decision.target_fact_keys))
+
+    # “教学重难点”是一个常见的合并展示单元。只有教师明确说“分别/拆分/独立”等
+    # 才要求两个事实各占一个一级章节，避免把一个合法的合并章节误判为未完成。
+    if (
+        decision.must_be_distinct_top_level
+        and facts
+        and set(facts).issubset(set(_CORE_FACT_KEYS))
+        and not _explicitly_separates_facts(instruction)
+    ):
+        decision.must_be_distinct_top_level = False
 
     # 独立事实章节（拆分评价/反思等）：按当前大纲把事实归属章节确定性加入目标范围，
     # 不依赖意图识别来源（LLM / 脚本 / 粗分类）都能保持拆分语义。

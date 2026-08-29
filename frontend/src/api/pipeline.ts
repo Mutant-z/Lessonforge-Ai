@@ -1,6 +1,6 @@
 import { api } from './client';
 import type { PipelineDetail } from '../types/agentPipeline';
-import type { PPTPolishModality } from '../types/project';
+import type { ChatAttachment, PPTPolishModality } from '../types/project';
 
 export interface PPTPolishOptions {
   strength?: 'subtle' | 'moderate' | 'strong';
@@ -52,6 +52,12 @@ export interface AgentRunHumanResponseResult {
 }
 
 export const pipelineApi = {
+  async uploadChatAttachment(courseId: string, file: File): Promise<ChatAttachment> {
+    const body = new FormData();
+    body.append('file', file);
+    const { data } = await api.post<ChatAttachment>(`/courses/${courseId}/chat-attachments`, body);
+    return data;
+  },
   async createRun(
     courseId: string,
     instruction: string,
@@ -59,6 +65,7 @@ export const pipelineApi = {
     modality: PPTPolishModality = 'auto',
     activeSlideId?: string,
     polishOptions: PPTPolishOptions = {},
+    attachmentIds: string[] = [],
   ): Promise<{
     run_id: string;
     task_id: string;
@@ -74,6 +81,7 @@ export const pipelineApi = {
       selected_slide_ids: selectedSlideIds,
       modality: modality ?? 'auto',
       polish_options: polishOptions,
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSlideId ? { active_slide_id: activeSlideId } : {}),
     });
     return data;
@@ -98,6 +106,7 @@ export const pipelineApi = {
     modality: PPTPolishModality = 'auto',
     activeSlideId?: string,
     polishOptions: PPTPolishOptions = {},
+    attachmentIds: string[] = [],
   ): Promise<{
     instruction_id: string;
     message_id: string;
@@ -111,6 +120,7 @@ export const pipelineApi = {
       resume_if_paused: resumeIfPaused,
       modality: modality ?? 'auto',
       polish_options: polishOptions,
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSlideId ? { active_slide_id: activeSlideId } : {}),
     });
     return data;
@@ -164,11 +174,13 @@ export const pipelineApi = {
     selectedSectionIds: string[] = [],
     mode: LessonPlanMode = 'auto',
     activeSectionId?: string,
+    attachmentIds: string[] = [],
   ): Promise<LessonPlanRunResult> {
     const { data } = await api.post<LessonPlanRunResult>(`/courses/${courseId}/tasks/lesson_plan/runs`, {
       content,
       selected_section_ids: selectedSectionIds,
       mode: mode ?? 'auto',
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
     return data;
@@ -181,12 +193,14 @@ export const pipelineApi = {
     selectedSceneIds: string[] = [],
     mode: VideoScriptMode = 'auto',
     activeSectionId?: string,
+    attachmentIds: string[] = [],
   ): Promise<LessonPlanRunResult> {
     const { data } = await api.post<LessonPlanRunResult>(`/courses/${courseId}/tasks/video_script/runs`, {
       content,
       selected_section_ids: selectedSectionIds,
       selected_scene_ids: selectedSceneIds,
       mode: mode ?? 'auto',
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
     return data;
@@ -203,6 +217,7 @@ export const pipelineApi = {
     clientInstructionId = '',
     activeSectionId?: string,
     activeSceneId?: string,
+    attachmentIds: string[] = [],
   ): Promise<{
     instruction_id: string;
     message_id: string;
@@ -217,6 +232,7 @@ export const pipelineApi = {
         selected_scene_ids: selectedSceneIds,
         mode: mode ?? 'auto',
         resume_if_paused: resumeIfPaused,
+        ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
         ...(clientInstructionId ? { client_instruction_id: clientInstructionId } : {}),
         ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
         ...(activeSceneId ? { active_scene_id: activeSceneId } : {}),
@@ -245,11 +261,13 @@ export const pipelineApi = {
     selectedSectionIds: string[] = [],
     mode: LessonPlanMode = 'auto',
     activeSectionId?: string,
+    attachmentIds: string[] = [],
   ): Promise<LessonPlanRunResult> {
     const { data } = await api.post<LessonPlanRunResult>(`/courses/${courseId}/tasks/task_sheet/runs`, {
       content,
       selected_section_ids: selectedSectionIds,
       mode: mode ?? 'auto',
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
     return data;
@@ -261,11 +279,13 @@ export const pipelineApi = {
     selectedSectionIds: string[] = [],
     mode: LessonPlanMode = 'auto',
     activeSectionId?: string,
+    attachmentIds: string[] = [],
   ): Promise<LessonPlanRunResult> {
     const { data } = await api.post<LessonPlanRunResult>(`/courses/${courseId}/tasks/verbatim/runs`, {
       content,
       selected_section_ids: selectedSectionIds,
       mode: mode ?? 'auto',
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
     return data;
@@ -279,6 +299,7 @@ export const pipelineApi = {
     mode: LessonPlanMode = 'auto',
     resumeIfPaused = false,
     clientInstructionId = '',
+    attachmentIds: string[] = [],
   ): Promise<{
     instruction_id: string;
     message_id: string;
@@ -292,6 +313,7 @@ export const pipelineApi = {
         selected_section_ids: selectedSectionIds,
         mode: mode ?? 'auto',
         resume_if_paused: resumeIfPaused,
+        ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
         ...(clientInstructionId ? { client_instruction_id: clientInstructionId } : {}),
       },
     );
@@ -318,11 +340,13 @@ export const pipelineApi = {
     selectedSectionIds: string[] = [],
     mode: LessonPlanMode = 'auto',
     activeSectionId?: string,
+    attachmentIds: string[] = [],
   ): Promise<{ message_id: string; run_id: string; task_id: string; status: 'queued' }> {
     const { data } = await api.post(`/courses/${courseId}/tasks/exercise/messages`, {
       content,
       selected_section_ids: selectedSectionIds,
       mode: mode ?? 'auto',
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(activeSectionId ? { active_section_id: activeSectionId } : {}),
     });
     return data;
@@ -335,6 +359,7 @@ export const pipelineApi = {
     selectedSectionIds: string[] = [],
     mode: LessonPlanMode = 'auto',
     resumeIfPaused = false,
+    attachmentIds: string[] = [],
   ): Promise<{
     instruction_id: string;
     message_id: string;
@@ -348,6 +373,7 @@ export const pipelineApi = {
         selected_section_ids: selectedSectionIds,
         mode: mode ?? 'auto',
         resume_if_paused: resumeIfPaused,
+        ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       },
     );
     return data;

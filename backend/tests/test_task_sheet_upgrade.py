@@ -47,7 +47,7 @@ async def _generated_course(client, headers, title, marker):
     project = await _wait_for_project(
         client, headers, course["id"],
         lambda item: all(
-            task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
+            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
             for task in item["tasks"]
         ),
     )

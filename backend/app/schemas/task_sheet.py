@@ -559,26 +559,34 @@ def make_task_sheet_v3(
             ],
         },
         {
-            "id": "SEC-TASKS", "parent_id": "", "order": 2,
+            "id": "SEC-PREPARATION", "parent_id": "", "order": 2,
+            "title": "课前准备", "purpose": "进入任务前准备材料并明确观察重点。",
+            "objective_ids": [], "blocks": [
+                {"kind": "checklist", "id": "B-PREPARATION", "title": "课前准备清单",
+                 "items": [{"text": "准备学习用品和记录纸，带着“我观察到什么、如何验证”的问题进入任务。"}]},
+            ],
+        },
+        {
+            "id": "SEC-TASKS", "parent_id": "", "order": 3,
             "title": "学习任务链", "purpose": "从观察判断推进到解释与应用的可执行任务。",
             "objective_ids": objective_ids, "blocks": [{"kind": "learning_task", **task} for task in tasks],
         },
         {
-            "id": "SEC-RECORD", "parent_id": "", "order": 3,
+            "id": "SEC-RECORD", "parent_id": "", "order": 4,
             "title": "学习观察记录", "purpose": "任务过程中的学习证据记录表。",
             "objective_ids": objective_ids, "blocks": [
                 {"kind": "record_table", "id": "B-RECORD", **record_table},
             ],
         },
         {
-            "id": "SEC-QUESTIONS", "parent_id": "", "order": 4,
+            "id": "SEC-QUESTIONS", "parent_id": "", "order": 5,
             "title": "深度思考与延伸反思", "purpose": "过程性问题，帮助学生迁移与反思。",
             "objective_ids": [objective_ids[-1]], "blocks": [
                 {"kind": "question_set", "id": "B-QUESTIONS", "title": "课堂问题", "questions": questions},
             ],
         },
         {
-            "id": "SEC-ASSESSMENT", "parent_id": "", "order": 5,
+            "id": "SEC-ASSESSMENT", "parent_id": "", "order": 6,
             "title": "学习成效自我评价", "purpose": "对照目标完成自评，明确自己的达成情况。",
             "objective_ids": objective_ids, "blocks": [
                 {"kind": "assessment", "id": "B-ASSESSMENT", "title": "学习成效自我评价",
@@ -586,7 +594,7 @@ def make_task_sheet_v3(
             ],
         },
         {
-            "id": "SEC-EXTENSION", "parent_id": "", "order": 6,
+            "id": "SEC-EXTENSION", "parent_id": "", "order": 7,
             "title": "课后拓展", "purpose": "把本课方法迁移到生活或专业场景。",
             "objective_ids": [objective_ids[-1]], "blocks": [
                 {"kind": "checklist", "id": "B-EXTENSION", "title": "拓展任务",

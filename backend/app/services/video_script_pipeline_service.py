@@ -31,6 +31,7 @@ from app.services.ppt_pipeline_service import (
     PAUSE_EVENTS, PipelineRunResult, _get_or_create_pipeline_run, _latest_artifact,
 )
 from app.services.project_knowledge_service import build_project_knowledge_context
+from app.services.chat_attachment_service import attachment_prompt, prepare_chat_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ def _workspace_root(course_id: str, generation_run_id: str) -> Path:
 
 async def _build_runtime(db, course, task, generation_run, blueprint, source, profile, provider, config,
                          knowledge_context, source_versions, locks, user_message) -> VideoScriptAgentRuntime:
+    attachments, runtime_provider = await prepare_chat_attachments(db, course, user_message, provider)
     pipeline_run = await _get_or_create_pipeline_run(db, generation_run, max_rounds=2)
     pipeline_run.pipeline_type = DEFAULT_PIPELINE_TYPE
     await db.commit()
@@ -75,7 +77,7 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         request_metadata["renderer_max_scene_seconds"] = 10 if renderer.api_mode == "gemini_interactions_video" else 15
     runtime = VideoScriptAgentRuntime(
         course=course, task=task, blueprint=blueprint, generation_run=generation_run,
-        pipeline_run=pipeline_run, profile=profile, provider=provider, config=config,
+        pipeline_run=pipeline_run, profile=profile, provider=runtime_provider, config=config,
         knowledge_context=knowledge_context, source_versions=source_versions,
         locks=locks, source_artifact=source, user_message=user_message,
         trigger_type=generation_run.trigger_type,
@@ -83,10 +85,12 @@ async def _build_runtime(db, course, task, generation_run, blueprint, source, pr
         workspace_root=workspace, pause_event=PAUSE_EVENTS.setdefault(generation_run.id, asyncio.Event()),
         request_metadata=request_metadata,
     )
+    if attachments:
+        context.add_note(attachment_prompt(attachments))
     tool_context = ToolContext(
         ctx=context, workspace_root=workspace, course=course, task=task,
         generation_run_id=generation_run.id, pipeline_run_id=pipeline_run.id,
-        provider=provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
+        provider=runtime_provider, artifacts=artifacts, emitter=emitter, runtime=runtime,
     )
     runtime.tool_context = tool_context
     checkpoint = pipeline_run.checkpoint_json or {}
@@ -217,9 +221,6 @@ async def _run_pipeline_message(runtime: VideoScriptAgentRuntime, source: Artifa
         content = dict(runtime.draft_content)
         assistant_reply = runtime.dialogue_summary or f"已根据你的要求创建视频脚本 V{source.version + 1}；原版本仍可在版本历史中恢复。"
     runtime.dialogue_summary = assistant_reply
-    if emitter is not None:
-        await emitter.revision_completed(1, applied_changes=[f"教师指令：{message.content[:60]}"])
-        await emitter.emit_domain("draft.update.completed", message="视频脚本候选稿更新已完成", payload={"revision": source.version + 1})
     return content, AgentArtifactRevisionPayload(content_json=content, assistant_reply=assistant_reply)
 
 
@@ -261,6 +262,17 @@ async def complete_video_script_pipeline_after_publish(runtime: VideoScriptAgent
                 },
             )
         if runtime.emitter is not None:
+            if runtime.result_status == "applied":
+                instruction = str(getattr(runtime.user_message, "content", "") or "")
+                source_version = int(getattr(runtime.source_artifact, "version", 0) or 0)
+                await runtime.emitter.revision_completed(
+                    1, applied_changes=[f"教师指令：{instruction[:60]}"],
+                )
+                await runtime.emitter.emit_domain(
+                    "draft.update.completed",
+                    message="视频脚本新版本已发布",
+                    payload={"revision": source_version + 1, "artifact_id": artifact_id},
+                )
             await runtime.emitter.emit_domain(
                 "polish.result",
                 message=runtime.dialogue_summary,

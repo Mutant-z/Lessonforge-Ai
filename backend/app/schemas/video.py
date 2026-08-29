@@ -220,6 +220,7 @@ class SeedanceVideoGenerationContent(BaseModel):
     scenes: list[SeedanceNativeScene] = Field(min_length=1)
     outputs: VideoGenerationOutputs = Field(default_factory=VideoGenerationOutputs)
     cost_summary: dict = Field(default_factory=dict)
+    audio_qa: dict = Field(default_factory=dict)
     generation_warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -271,8 +272,8 @@ class SeedanceVideoGenerationRunRequest(BaseModel):
 
 
 class SeedanceSceneRegenerateRequest(BaseModel):
-    quote_id: str = Field(min_length=1)
-    approved_max_cost_fen: int = Field(ge=0)
+    quote_id: str | None = None
+    approved_max_cost_fen: int | None = Field(default=None, ge=0)
     instruction: str = Field(min_length=1, max_length=4000)
     visual_prompt: str | None = Field(default=None, max_length=6000)
     spoken_text: str | None = Field(default=None, max_length=3000)

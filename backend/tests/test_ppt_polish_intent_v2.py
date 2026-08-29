@@ -86,15 +86,15 @@ def test_page_numbers_resolve_to_real_canonical_ids_and_reference_is_separate():
     assert command.needs_confirmation is False
 
 
-def test_explicit_frontend_scope_wins_but_conflict_requires_confirmation():
+def test_explicit_text_scope_wins_over_stale_frontend_scope():
     command = resolve_polish_command(
         "重新排版第4页",
         target_slide_ids=["slide_03"],
         canonical_ids=DECK_IDS,
     )
 
-    assert command.scope.target_slide_ids == ["slide_03"]
-    assert "scope.selection_text_conflict" in command.ambiguities
+    assert command.scope.target_slide_ids == ["slide_04"]
+    assert "scope.selection_text_conflict:text_wins" in command.ambiguities
     assert command.confidence < 0.80
     assert command.needs_confirmation is True
 
@@ -106,6 +106,16 @@ def test_invalid_explicit_page_never_expands_to_whole_deck():
     assert command.scope.target_slide_ids == []
     assert "scope.invalid_page:99" in command.ambiguities
     assert command.needs_confirmation is True
+
+
+def test_operation_parameters_preserve_timing_notes_and_style_intent():
+    timing = resolve_polish_command("把第2页时长调整为45秒", canonical_ids=DECK_IDS)
+    notes = resolve_polish_command("把第2页教师备注改为：强调压强差", canonical_ids=DECK_IDS)
+    style = resolve_polish_command("优化第2页配色并突出重点", canonical_ids=DECK_IDS)
+
+    assert timing.operations[0].parameters["duration_seconds"] == 45
+    assert notes.operations[0].parameters["notes_text"] == "强调压强差"
+    assert style.operations[0].parameters["style"] == {"color": "accent", "bold": True}
 
 
 def test_current_page_uses_active_id_and_missing_active_id_requires_confirmation():

@@ -542,6 +542,12 @@ export interface VideoGenerationContent {
     duration_seconds: number;
   };
   cost_summary: Record<string, number | string>;
+  audio_qa?: {
+    status: 'passed' | 'warning' | 'skipped';
+    passed_scenes: number;
+    warning_scenes: number;
+    skipped_scenes: number;
+  };
   generation_warnings?: string[];
 }
 

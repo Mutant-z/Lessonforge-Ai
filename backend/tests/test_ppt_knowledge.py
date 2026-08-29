@@ -261,6 +261,17 @@ def test_blocks_density_takes_precedence_over_body():
     assert check_ppt_against_knowledge(content) == []
 
 
+def test_total_character_count_is_not_a_structural_knowledge_violation():
+    content = compliant_blocks_content()
+    content["slides"][1]["blocks"] = [{
+        "kind": "bullets",
+        "items": [{"text": "浮力知识点内容足够完整"} for _ in range(12)],
+    }]
+
+    rules = {item.rule_id for item in check_ppt_against_knowledge(content)}
+    assert "density.body_chars" not in rules
+
+
 def test_blocks_density_violations_reported():
     content = {
         "theme": "lessonforge_deck_smart_ai",

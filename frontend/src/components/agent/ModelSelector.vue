@@ -8,12 +8,14 @@ const props = withDefaults(defineProps<{
   modelValue?: string | null;
   disabled?: boolean;
   compact?: boolean;
+  wide?: boolean;
   label?: string;
   capability?: 'text_generation' | 'structured_output' | 'vision_review' | 'image_generation' | 'video_generation' | 'native_audio_video_generation' | 'speech_generation' | 'speech_recognition' | 'media_composition' | null;
 }>(), {
   modelValue: null,
   disabled: false,
   compact: false,
+  wide: false,
   label: '文本',
   capability: null,
 });
@@ -32,8 +34,8 @@ const targetCategory = computed<ModelCategory>(() => (
 const selected = computed(() => store.configs.find(item => item.id === props.modelValue) || null);
 const mediaTransportModes: Partial<Record<NonNullable<typeof props.capability>, string[]>> = {
   image_generation: ['openai_images', 'google_gemini_image', 'custom_image_http', 'mock_media'],
-  video_generation: ['custom_video_async_http', 'volcengine_ark_video', 'gemini_interactions_video', 'mock_media'],
-  native_audio_video_generation: ['volcengine_ark_video', 'gemini_interactions_video'],
+  video_generation: ['protocol_video'],
+  native_audio_video_generation: ['protocol_video'],
   speech_recognition: ['volcengine_asr'],
   speech_generation: ['custom_speech_http', 'mock_media'],
   media_composition: ['local_ffmpeg', 'mock_media'],
@@ -41,7 +43,7 @@ const mediaTransportModes: Partial<Record<NonNullable<typeof props.capability>, 
 
 function hasCompatibleTransport(item: typeof store.configs[number]) {
   if (props.capability === 'native_audio_video_generation') {
-    return ['volcengine_ark_video', 'gemini_interactions_video'].includes(item.api_mode);
+    return item.api_mode === 'protocol_video' && ['openai_compatible', 'anthropic'].includes(item.provider);
   }
   if (!props.capability || item.provider === 'mock') return true;
   const modes = mediaTransportModes[props.capability];
@@ -49,11 +51,18 @@ function hasCompatibleTransport(item: typeof store.configs[number]) {
 }
 
 const availableConfigs = computed(() => {
-  const categoryConfigs = store.configs.filter(item => (item.model_category || 'text') === targetCategory.value);
+  const categoryConfigs = store.configs.filter(item => !item.is_archived && (
+    props.capability ? item.capabilities?.includes(props.capability) : (item.model_category || 'text') === targetCategory.value
+  ));
   if (!props.capability) return categoryConfigs.filter(item => (item.model_purpose || 'text_chat') === 'text_chat');
   // 能力型选择器不能回退展示不具备该能力的模型，否则会造成“选了图片模型但实际只能生成文本”的假象。
   return categoryConfigs.filter(item => (
-    item.capabilities?.includes(props.capability!) && hasCompatibleTransport(item)
+    item.capabilities?.includes(props.capability!)
+    && hasCompatibleTransport(item)
+    && (props.capability !== 'video_generation' || (
+      item.model_purpose === 'video_generation'
+      && ['openai_compatible', 'anthropic'].includes(item.provider)
+    ))
   ));
 });
 const effectiveModelValue = computed(() => (
@@ -73,10 +82,10 @@ function providerLabel(provider: string) {
   return provider;
 }
 
-function nativeVideoRange(apiMode: string) {
-  if (apiMode === 'gemini_interactions_video') return '3–10 秒/段';
-  if (apiMode === 'volcengine_ark_video') return '4–15 秒/段';
-  return '';
+function videoStatus(config: typeof store.configs[number]) {
+  if (config.video_capability_status === 'verified') return '已验证';
+  if (config.video_capability_status === 'failed') return '上次生成失败';
+  return '待验证';
 }
 
 function selectModel(value: string) {
@@ -101,7 +110,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="model-selector" :class="{ compact }">
+  <div class="model-selector" :class="{ compact, wide }">
     <span v-if="label && !compact" class="selector-label">{{ label }}</span>
     <div v-if="availableConfigs.length" class="selector-control">
       <el-select
@@ -136,11 +145,12 @@ onMounted(() => {
           <div class="model-option">
             <div class="option-main">
               <strong>{{ config.name || config.model_name }}</strong>
-              <span>{{ providerLabel(config.provider) }} · {{ config.model_name }}<template v-if="nativeVideoRange(config.api_mode)"> · {{ nativeVideoRange(config.api_mode) }}</template></span>
+              <span>{{ providerLabel(config.provider) }} · {{ config.model_name }}</span>
             </div>
             <div class="option-tags">
-              <span>{{ formatTokens(config.context_window_tokens) }}</span>
-              <span v-if="config.supports_multimodal" class="multimodal"><el-icon><Picture /></el-icon> 多模态</span>
+              <span v-if="config.model_category !== 'video'">{{ formatTokens(config.context_window_tokens) }}</span>
+              <span v-if="config.model_category === 'video'" class="multimodal">{{ videoStatus(config) }}</span>
+              <span v-else-if="config.supports_multimodal" class="multimodal"><el-icon><Picture /></el-icon> 多模态</span>
               <span v-else>纯文本</span>
               <span v-if="config.is_active" class="default-tag">默认</span>
             </div>
@@ -148,9 +158,9 @@ onMounted(() => {
         </el-option>
       </el-select>
       <div v-if="selected" class="capability-tags" aria-label="模型能力">
-        <span>{{ formatTokens(selected.context_window_tokens) }}</span>
+        <span v-if="selected.model_category !== 'video'">{{ formatTokens(selected.context_window_tokens) }}</span>
         <span :class="{ multimodal: selected.supports_multimodal }">
-          {{ selected.supports_multimodal ? '多模态' : '纯文本' }}
+          {{ selected.model_category === 'video' ? videoStatus(selected) : selected.supports_multimodal ? '多模态' : '纯文本' }}
         </span>
       </div>
     </div>
@@ -191,10 +201,16 @@ onMounted(() => {
   gap: 6px;
   max-width: 100%;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .model-select {
   width: 190px;
+  max-width: 100%;
+}
+
+.wide .model-select {
+  width: 250px;
   max-width: 100%;
 }
 

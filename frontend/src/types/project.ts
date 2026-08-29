@@ -52,6 +52,14 @@ export interface CourseTaskError {
   retryable: boolean;
 }
 
+export interface ChatAttachment {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  parse_status?: string;
+}
+
 export interface CourseTask {
   id: string;
   course_id: string;
@@ -91,12 +99,12 @@ export interface CourseTask {
   /** 视频生成任务：课程级偏好分辨率（由视频脚本 Agent 保存）。 */
   preferred_video_resolution?: NativeVideoResolution | null;
   video_generation_capabilities?: {
-    provider: string;
     model_name: string;
-    api_mode: string;
     supported_resolutions: Array<{ value: NativeVideoResolution; label: string }>;
-    duration_seconds: [number, number];
-    source: string;
+    available: boolean;
+    unavailable_reason: string | null;
+    verification_status?: 'unverified' | 'verified' | 'failed';
+    output_spec?: { resolution: NativeVideoResolution | null; native_audio: boolean };
   } | null;
   activity_run_id?: string | null;
   activities?: TaskActivity[];
@@ -147,6 +155,7 @@ export interface ProjectAgentMessage {
   status?: 'pending' | 'streaming' | 'completed' | 'failed';
   artifact_id?: string | null;
   run_id?: string | null;
+  metadata?: Record<string, any> & { attachments?: ChatAttachment[] };
   created_at?: string;
 }
 

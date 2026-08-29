@@ -6,7 +6,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
-import { VideoPause, VideoPlay } from '@element-plus/icons-vue';
+import { CircleCheck, VideoPause, VideoPlay } from '@element-plus/icons-vue';
 import { errorMessage } from '../../../api/client';
 import { pipelineApi } from '../../../api/pipeline';
 import { useProjectStore } from '../../../stores/project';
@@ -14,6 +14,7 @@ import { usePipelineStore } from '../../../stores/pipeline';
 import { useModelConfigStore } from '../../../stores/modelConfigs';
 import { PIPELINE_STATUS_LABELS } from '../../../types/agentPipeline';
 import type { VideoScriptContent, VideoScriptContentV4 } from '../../../types';
+import type { ChatAttachment } from '../../../types/project';
 import AgentExecutionTimeline from './AgentExecutionTimeline.vue';
 import AgentComposer from './AgentComposer.vue';
 import VideoScriptPreviewWorkbench from '../videoScript/VideoScriptPreviewWorkbench.vue';
@@ -42,8 +43,14 @@ const status = computed(() => {
 const paused = computed(() => status.value === 'paused');
 const pausing = computed(() => status.value === 'pausing');
 const isRunning = computed(() => ['queued', 'running', 'pausing'].includes(status.value));
+const failureMessage = computed(() => (
+  pipelineStore.run?.error?.message
+  || task.value?.error?.message
+  || '视频脚本修改失败，已保留原正式版本。'
+));
 const queuedCount = computed(() => (pipelineStore.detail?.instructions || []).filter(item => item.status === 'queued').length);
 const humanResponsePending = ref('');
+const approving = ref(false);
 const leftPercent = ref(38);
 const isDragging = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
@@ -128,13 +135,17 @@ async function loadDetail() {
     if (!detail) return null;
     pipelineStore.restoreThoughtsFromHistory();
     pipelineStore.syncThoughts();
+    if (['completed', 'failed', 'cancelled'].includes(detail.run?.status || '')) {
+      pipelineStore.clearDraft();
+      await projectStore.refreshCurrentTask().catch(() => undefined);
+    }
     return detail;
   } finally {
     detailLoading = false;
   }
 }
 
-async function send(content: string, modality: string = 'auto') {
+async function send(content: string, modality: string = 'auto', attachments: ChatAttachment[] = []) {
   const modeValue = (modality !== 'auto' ? modality : mode.value) as VideoScriptMode;
   const runId = activeRunId.value;
   try {
@@ -148,6 +159,7 @@ async function send(content: string, modality: string = 'auto') {
       const result = await pipelineApi.enqueueVideoScriptInstruction(
         props.courseId, runId, content, selectedSectionIds.value, selectedSceneIds.value,
         modeValue, paused.value, crypto.randomUUID(), activeSectionId.value || undefined, activeSceneId.value,
+        attachments.map(item => item.id),
       );
       ElMessage.success(result.status === 'resumed' ? '已恢复运行并加入当前执行' : '指令已加入当前执行，将在安全边界合并');
       if (paused.value) {
@@ -157,7 +169,7 @@ async function send(content: string, modality: string = 'auto') {
       await loadDetail();
     } else {
       pipelineStore.beginRun();
-      await projectStore.createVideoScriptRun(props.courseId, content, selectedSectionIds.value, selectedSceneIds.value, modeValue);
+      await projectStore.createVideoScriptRun(props.courseId, content, selectedSectionIds.value, selectedSceneIds.value, modeValue, attachments);
       await loadDetail();
       startPolling();
     }
@@ -205,6 +217,23 @@ function setModel(modelId: string) {
   void projectStore.setTaskModel(props.courseId, props.taskType, modelId);
 }
 
+function setVisionModel(modelId: string) {
+  void projectStore.setTaskVisionModel(props.courseId, props.taskType, modelId);
+}
+
+async function approveArtifact() {
+  if (!task.value?.current_artifact || approving.value) return;
+  approving.value = true;
+  try {
+    await projectStore.approveTask(props.courseId, props.taskType);
+    ElMessage.success('视频脚本已标记为确认交付；视频生成始终使用最新有效版本。');
+  } catch (cause) {
+    ElMessage.error(errorMessage(cause));
+  } finally {
+    approving.value = false;
+  }
+}
+
 // Splitter resizing logic
 function startResize(e: MouseEvent | TouchEvent) {
   isDragging.value = true;
@@ -249,7 +278,10 @@ function startPolling() {
     const s = pipelineStore.run?.status;
     const realtimeUnavailable = !projectStore.eventSource || Boolean(projectStore.connectionError);
     const snapshotPending = Boolean(activeRunId.value) && !pipelineMatchesActiveRun.value;
-    if (pipelineStore.draftNeedsRefresh || snapshotPending || ['pausing', 'paused'].includes(s || '') || realtimeUnavailable) {
+    const active = ['queued', 'running', 'pausing', 'paused'].includes(s || status.value);
+    // SSE remains the low-latency path, but an active run is always reconciled with
+    // the authoritative snapshot so a dropped terminal event cannot leave the UI stuck.
+    if (active || pipelineStore.draftNeedsRefresh || snapshotPending || realtimeUnavailable) {
       void loadDetail();
     }
   }, 5000);
@@ -284,7 +316,13 @@ onUnmounted(() => {
 
 watch(() => status.value, newStatus => {
   if (['queued', 'running', 'pausing', 'paused'].includes(newStatus)) startPolling();
-  else stopPolling();
+  else {
+    stopPolling();
+    if (['completed', 'failed', 'cancelled'].includes(newStatus)) {
+      pipelineStore.clearDraft();
+      void projectStore.refreshCurrentTask();
+    }
+  }
 });
 
 // SSE 实时思考增量 → 单调累加到 pipeline store（打字机渲染）
@@ -336,6 +374,15 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
         </div>
       </header>
 
+      <el-alert
+        v-if="status === 'failed'"
+        class="pipeline-failure-alert"
+        type="error"
+        :title="failureMessage"
+        :closable="false"
+        show-icon
+      />
+
       <AgentExecutionTimeline
         :items="pipelineStore.timeline"
         :task="task"
@@ -368,11 +415,14 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
       </div>
 
       <AgentComposer
+        :course-id="props.courseId"
         :target-slide="activeSectionId as any"
         :target-slides="selectedSectionIds as any"
         :is-running="isRunning"
         :pausing="pausing || pipelineStore.pauseLoading"
         :model-config-id="task?.model_config_id"
+        :vision-model-config-id="task?.vision_model_config_id"
+        :show-vision-model="true"
         task-type="video_script"
         unit-name="镜"
         :submit="send"
@@ -380,6 +430,7 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
         @pause="pause"
         @clear-target-slide="clearTargetSections"
         @change-model="setModel"
+        @change-vision-model="setVisionModel"
       />
     </aside>
 
@@ -402,15 +453,27 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
       :style="{ width: `${100 - leftPercent}%` }"
     >
       <VideoScriptPreviewWorkbench
+        class="script-preview"
         :content="artifactContent"
         :source-versions="task?.current_artifact?.source_versions_json"
         :draft="isDraft"
         :affected-section-ids="pipelineStore.lastAffectedSectionIds"
         :affected-scene-ids="pipelineStore.lastAffectedSceneIds"
-        :preferred-resolution="task?.preferred_video_resolution"
         @select-section="selectSection"
         @select-scene="selectScene"
       />
+      <div class="preview-footer">
+        <el-button size="small" text :disabled="!task?.current_artifact" @click="emit('open-version-drawer')">版本历史</el-button>
+        <el-button size="small" text :disabled="!task?.current_artifact || isRunning" @click="projectStore.runTask(courseId, taskType, 'sync_context')">同步项目上下文</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :icon="CircleCheck"
+          :loading="approving"
+          :disabled="!task?.current_artifact || isRunning || task?.status === 'approved' || task?.stale_agent_profile"
+          @click="approveArtifact"
+        >{{ task?.status === 'approved' ? '已确认' : '确认文件' }}</el-button>
+      </div>
     </main>
   </div>
 </template>
@@ -519,6 +582,11 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
   flex-shrink: 0;
 }
 
+.pipeline-failure-alert {
+  margin: 10px 14px 0;
+  width: auto;
+}
+
 .pane-title {
   font-size: 13px;
   font-weight: 800;
@@ -563,6 +631,23 @@ watch(() => pipelineStore.draftNeedsRefresh, needsRefresh => {
   min-width: 400px;
   overflow: hidden;
   background: #ffffff;
+  display: flex;
+  flex-direction: column;
+}
+
+.script-preview {
+  flex: 1;
+  min-height: 0;
+}
+
+.preview-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px 14px;
+  border-top: 1px solid #e2e8f0;
+  background: #ffffff;
+  flex-shrink: 0;
 }
 
 @media (max-width: 900px) {

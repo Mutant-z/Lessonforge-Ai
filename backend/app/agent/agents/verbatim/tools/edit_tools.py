@@ -111,6 +111,7 @@ async def _vb_update_section(tc: ToolContext, inp: UpdateVerbatimSectionInput) -
     return _ok({
         "summary": f"更新章节 {inp.section_id}：{', '.join(changed)}",
         "affected_json_paths": [_section_path(inp.section_id)],
+        "affected_section_ids": [str(section.get("id") or inp.section_id)],
         "revision": revision,
         "section": builder.find_section(inp.section_id),
     })
@@ -133,6 +134,7 @@ async def _vb_batch_style(tc: ToolContext, inp: BatchVerbatimStyleInput) -> Tool
     return _ok({
         "summary": f"批量风格润色（{len(changed)} 段）",
         "affected_json_paths": ["$.sections"],
+        "affected_section_ids": changed,
         "revision": revision,
         "changed_section_ids": changed,
     })
@@ -154,6 +156,7 @@ async def _vb_rebalance_timing(tc: ToolContext, inp: RebalanceVerbatimTimingInpu
     return _ok({
         "summary": "重算语速与停顿",
         "affected_json_paths": ["$.sections", "$.speaking_rate_cps"],
+        "affected_section_ids": result["changed_section_ids"],
         "revision": revision,
         "changed_section_ids": result["changed_section_ids"],
         "speaking_rate_cps": result["speaking_rate_cps"],
@@ -184,6 +187,7 @@ async def _vb_add_section(tc: ToolContext, inp: AddVerbatimSectionInput) -> Tool
     return _ok({
         "summary": f"新增章节 {inp.section_id}（场景 {inp.scene_id}）",
         "affected_json_paths": [_section_path(inp.section_id)],
+        "affected_section_ids": [str(node.get("id") or inp.section_id)],
         "revision": revision,
         "section": dict(node),
     })
@@ -207,6 +211,7 @@ async def _vb_delete_section(tc: ToolContext, inp: DeleteVerbatimSectionInput) -
     return _ok({
         "summary": f"删除章节 {inp.section_id}（原因：{inp.reason[:60]}）",
         "affected_json_paths": [_section_path(inp.section_id)],
+        "affected_section_ids": [str(deleted.get("id") or inp.section_id)],
         "revision": revision,
         "deleted_section": dict(deleted),
     })
@@ -232,6 +237,7 @@ async def _vb_move_section(tc: ToolContext, inp: MoveVerbatimSectionInput) -> To
     return _ok({
         "summary": f"移动章节 {inp.section_id} 到场景 {inp.target_scene_id}",
         "affected_json_paths": ["$.sections"],
+        "affected_section_ids": [str(moved.get("id") or inp.section_id)],
         "revision": revision,
         "section": dict(moved),
     })

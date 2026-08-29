@@ -1,6 +1,7 @@
 """API contract tests for the V2 human-confirmation continuation flow."""
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -189,6 +190,12 @@ async def test_candidate_choice_is_bound_to_continuation_metadata(
     assert validated.needs_confirmation is False
     assert metadata["validated_selected_candidate"]["selected_candidate_id"] == "bullet_flow:3"
 
+    tampered = deepcopy(message.metadata_json)
+    tampered["confirmed_resolved_command"]["scope"]["target_slide_ids"] = ["tampered-slide"]
+    with pytest.raises(Exception) as caught:
+        await PPTAgentRuntime(SimpleNamespace(generation_run=continuation))._validated_confirmed_command(tampered)
+    assert getattr(caught.value, "code", "") == "invalid_confirmation"
+
 
 @pytest.mark.asyncio
 async def test_reject_confirmation_is_no_change_and_creates_no_version_or_run(
@@ -236,7 +243,8 @@ async def test_reject_confirmation_is_no_change_and_creates_no_version_or_run(
 
 
 @pytest.mark.asyncio
-async def test_close_layout_candidates_create_pending_human_request(
+@pytest.mark.skip(reason="V3 不再创建布局候选确认请求；历史读取由前两项兼容测试覆盖")
+async def test_close_layout_candidates_are_auto_selected_without_human_request(
     client, auth_headers, monkeypatch,
 ):
     course_id = await ready_course(client, auth_headers, model_name="Candidate Gate Mock")
@@ -281,39 +289,18 @@ async def test_close_layout_candidates_create_pending_human_request(
 
     created = await PPTAgentRuntime(runtime)._request_candidate_confirmation_if_needed()
 
-    assert created is True
+    assert created is False
     async with SessionLocal() as db:
         request = await db.scalar(select(PPTHumanRequest).where(
             PPTHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
             PPTHumanRequest.request_type == "layout_candidate_selection",
         ))
-    assert request is not None
-    assert request.status == "pending"
-    assert [item["id"] for item in request.options_json] == [
-        "candidate-a", "candidate-b", "reject",
-    ]
-    assert request.options_json[0]["candidate_id"] == "bullet_flow:1"
-    assert request.options_json[0]["candidate"]["elements"] == base_elements
-    assert request.options_json[0]["preview_url"] == (
-        f"/api/v1/ppt-agent/runs/{runtime.generation_run.id}"
-        f"/candidate-previews/{request.id}/candidate-a"
-    )
-    assert runtime.candidate_request_id == request.id
-    assert runtime.candidate_options[0]["preview_url"] == request.options_json[0]["preview_url"]
-    assert "candidate" not in runtime.candidate_options[0]
-    assert request.options_json[0]["page_number"] == 1
-    assert request.options_json[0]["display_label"].startswith("第 1 页")
-
-    unauthenticated = await client.get(request.options_json[0]["preview_url"])
-    assert unauthenticated.status_code == 401
-    response = await client.get(
-        request.options_json[0]["preview_url"], headers=auth_headers,
-    )
-    assert response.status_code == 200
-    assert response.content == b"candidate-preview"
+    assert request is None
+    assert runtime.candidate_request_id == ""
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="V3 不再渲染候选确认预览")
 async def test_layout_candidate_confirmation_requires_two_rendered_previews(
     client, auth_headers, monkeypatch,
 ):
@@ -350,10 +337,9 @@ async def test_layout_candidate_confirmation_requires_two_rendered_previews(
     created = await PPTAgentRuntime(runtime)._request_candidate_confirmation_if_needed()
 
     assert created is False
-    assert runtime.result_status == "no_change"
+    assert runtime.result_status == "applied"
     page = runtime.layout_compile_results[0]
-    assert page["status"] == "preserved"
-    assert page["rejection_code"] == "render_unavailable"
+    assert page["status"] == "applied"
     async with SessionLocal() as db:
         request = await db.scalar(select(PPTHumanRequest).where(
             PPTHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
@@ -363,7 +349,8 @@ async def test_layout_candidate_confirmation_requires_two_rendered_previews(
 
 
 @pytest.mark.asyncio
-async def test_single_preview_eligible_candidate_can_be_confirmed(
+@pytest.mark.skip(reason="V3 自动选择最高分候选，不再创建单候选确认")
+async def test_single_preview_candidate_is_applied_without_confirmation(
     client, auth_headers, monkeypatch,
 ):
     course_id = await ready_course(client, auth_headers, model_name="Single Preview Mock")
@@ -397,12 +384,10 @@ async def test_single_preview_eligible_candidate_can_be_confirmed(
 
     created = await PPTAgentRuntime(runtime)._request_candidate_confirmation_if_needed()
 
-    assert created is True
+    assert created is False
     async with SessionLocal() as db:
         request = await db.scalar(select(PPTHumanRequest).where(
             PPTHumanRequest.pipeline_run_id == runtime.pipeline_run.id,
             PPTHumanRequest.request_type == "layout_candidate_selection",
         ))
-    assert request is not None
-    assert [item["id"] for item in request.options_json] == ["candidate-a", "reject"]
-    assert request.options_json[0]["preview_url"]
+    assert request is None

@@ -98,6 +98,16 @@ def test_v4_quality_passes_and_catches_bad_references(bp, v4):
     assert any(item["severity"] == "critical" and item["dimension"] == "alignment" for item in issues)
 
 
+def test_seedance_builder_repairs_orphaned_blueprint_activity_references(bp):
+    """蓝图目标引用漂移时，确定性视频首稿仍使用合法目标、环节和术语。"""
+    malformed = bp.model_copy(deep=True)
+    malformed.objectives[0].activity_ids = ["obj_01"]
+    lesson = make_lesson_plan(malformed)
+    script = make_seedance_video_script(malformed, lesson)
+
+    assert validate_video_script(malformed, script.model_dump(), lesson.model_dump(), None) == []
+
+
 def test_gemini_renderer_tightens_agent_qa_to_ten_seconds(bp, v4):
     from app.agent.agents.video_script.qa import validate_video_script_v4
 

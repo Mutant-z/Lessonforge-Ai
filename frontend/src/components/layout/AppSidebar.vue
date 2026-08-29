@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { useAuthStore } from '../../stores/auth';
 import { useCourseStore } from '../../stores/courses';
+import { errorMessage } from '../../api/client';
 import { 
   DataBoard, 
+  VideoCamera,
   Plus, 
   Setting, 
   Fold, 
-  Expand 
+  Expand,
+  Delete,
 } from '@element-plus/icons-vue';
 import StatusBadge from '../feedback/StatusBadge.vue';
 
@@ -19,6 +23,7 @@ const route = useRoute();
 
 const isCollapsed = ref(localStorage.getItem('lf_sidebar_collapsed') === 'true');
 const isCompactViewport = ref(false);
+const deletingCourseId = ref<string | null>(null);
 const sidebarCollapsed = computed(() => isCollapsed.value || isCompactViewport.value);
 let compactViewportQuery: MediaQueryList | undefined;
 
@@ -47,6 +52,38 @@ function navigate(path: string) {
     router.push(path);
   } else {
     router.push({ path: '/login', query: { redirect: path } });
+  }
+}
+
+async function handleDeleteCourse(course: { id: string; title: string }) {
+  if (deletingCourseId.value) return;
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除项目“${course.title}”吗？删除后项目将从项目库中移除，生成内容也将无法继续访问。`,
+      '删除微课项目',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      },
+    );
+  } catch {
+    return;
+  }
+
+  deletingCourseId.value = course.id;
+  try {
+    await courses.delete(course.id);
+    ElMessage.success('项目已删除');
+    if (route.params.id === course.id || route.params.courseId === course.id) {
+      await router.replace('/');
+    }
+  } catch (cause) {
+    ElMessage.error(errorMessage(cause));
+  } finally {
+    deletingCourseId.value = null;
   }
 }
 </script>
@@ -96,6 +133,17 @@ function navigate(path: string) {
         </button>
       </el-tooltip>
 
+      <el-tooltip :disabled="!sidebarCollapsed" content="视频生成中心" placement="right">
+        <button
+          class="nav-item"
+          :class="{ active: route.path.startsWith('/videos') }"
+          @click="navigate('/videos')"
+        >
+          <div class="nav-item-icon"><el-icon><VideoCamera /></el-icon></div>
+          <span v-if="!sidebarCollapsed" class="nav-item-label">视频生成</span>
+        </button>
+      </el-tooltip>
+
       <el-tooltip :disabled="!sidebarCollapsed" content="模型与系统偏好" placement="right">
         <button 
           class="nav-item" 
@@ -116,19 +164,35 @@ function navigate(path: string) {
       </div>
       
       <div v-if="!sidebarCollapsed" class="course-list-scroll">
-        <button
+        <div
           v-for="course in courses.items"
           :key="course.id"
           class="course-list-item"
           :class="{ selected: route.params.id === course.id }"
           @click="navigate(`/courses/${course.id}/project`)"
+          @keydown.enter.self="navigate(`/courses/${course.id}/project`)"
+          role="button"
+          tabindex="0"
         >
           <div class="course-item-main">
             <span class="course-item-title">{{ course.title }}</span>
             <span class="course-item-info">{{ course.subject }} · {{ course.duration_minutes }}分钟</span>
           </div>
-          <StatusBadge :status="course.status" size="small" />
-        </button>
+          <div class="course-item-actions">
+            <StatusBadge :status="course.status" size="small" />
+            <el-tooltip content="删除项目" placement="top">
+              <button
+                type="button"
+                class="course-delete-btn"
+                :disabled="deletingCourseId === course.id"
+                aria-label="删除项目"
+                @click.stop="handleDeleteCourse(course)"
+              >
+                <el-icon><Delete /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+        </div>
       </div>
     </div>
   </aside>
@@ -415,6 +479,11 @@ function navigate(path: string) {
   box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
 }
 
+.course-list-item:focus-visible {
+  outline: 2px solid #818cf8;
+  outline-offset: 2px;
+}
+
 .course-list-item.selected {
   border-color: #4f46e5;
   background: linear-gradient(135deg, #f5f3ff 0%, #ffffff 100%);
@@ -435,6 +504,44 @@ function navigate(path: string) {
   font-size: 12px;
   font-weight: 600;
   color: #64748b;
+}
+
+.course-item-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.course-delete-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #be123c;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 160ms ease;
+}
+
+.course-list-item:hover .course-delete-btn,
+.course-list-item:focus-within .course-delete-btn {
+  opacity: 1;
+}
+
+.course-delete-btn:hover {
+  background: #ffe4e6;
+  border-color: #fda4af;
+}
+
+.course-delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .sidebar-footer {

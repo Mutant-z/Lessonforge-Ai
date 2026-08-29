@@ -8,7 +8,13 @@ from fastapi import HTTPException, UploadFile
 from pypdf import PdfReader
 from pptx import Presentation
 
-ALLOWED = {".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown"}
+# Course materials are also used as short-lived chat attachments.  Keep the
+# existing document formats and add common image/text formats so the six task
+# agents can receive the original visual input instead of only a filename.
+ALLOWED = {
+    ".pdf", ".docx", ".pptx", ".txt", ".md", ".markdown", ".csv", ".json",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+}
 
 
 def safe_filename(name: str) -> str:
@@ -22,7 +28,7 @@ def safe_filename(name: str) -> str:
 async def save_upload(upload: UploadFile, target_dir: Path, max_bytes: int) -> tuple[Path, int, str]:
     suffix = Path(upload.filename or "").suffix.lower()
     if suffix not in ALLOWED:
-        raise HTTPException(status_code=415, detail="仅支持 PDF、DOCX、PPTX、TXT 和 Markdown")
+        raise HTTPException(status_code=415, detail="仅支持 PDF、DOCX、PPTX、TXT、Markdown、CSV、JSON 和常见图片")
     data = await upload.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail="文件超过大小限制")
@@ -35,6 +41,11 @@ async def save_upload(upload: UploadFile, target_dir: Path, max_bytes: int) -> t
 def extract_text(path: Path) -> tuple[str, list[dict]]:
     suffix = path.suffix.lower()
     chunks: list[dict] = []
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        # Images are consumed by the vision model directly.  They intentionally
+        # have no text chunks; marking the material as parseable lets the chat
+        # attachment stay visible without pretending OCR was performed.
+        return "", []
     if suffix == ".pdf":
         reader = PdfReader(str(path))
         for index, page in enumerate(reader.pages, 1):
@@ -66,4 +77,3 @@ def chunk_text(text: str, size: int = 1800) -> list[dict]:
         {"content": cleaned[i:i + size], "page_number": None, "heading_path": ""}
         for i in range(0, len(cleaned), size)
     ] if cleaned else []
-

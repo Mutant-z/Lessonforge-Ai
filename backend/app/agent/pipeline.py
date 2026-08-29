@@ -122,6 +122,11 @@ class PipelineRuntime:
     operation_agent_chain: list[str] = field(default_factory=list)
     candidate_request_id: str = ""
     candidate_options: list[dict[str, Any]] = field(default_factory=list)
+    resolved_request: dict[str, Any] = field(default_factory=dict)
+    mutation_plan: dict[str, Any] = field(default_factory=dict)
+    change_set: dict[str, Any] = field(default_factory=dict)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    intent_fallback_used: bool = False
 
     def request_pause(self):
         if self.pause_event is not None:
@@ -295,8 +300,8 @@ def _ensure_executable_slide_content(
             from app.services.ppt_template_service import resolve_ppt_template
             if resolve_ppt_template(runtime.preferred_template).get("composition") == "deck":
                 slides = _align_initial_deck(runtime, slides)
-        # 编辑类内容先在语义层确定性收敛密度（逐条 ≤25 字、去装饰前缀、合计 ≤120 字），
-        # 避免模型反复产出边缘超标条目（如 27>25）让 QA 门禁在修复轮内无法收敛而失败。
+        # 编辑类内容先在语义层清洗装饰前缀；页面是否拥挤由真实渲染
+        # 与溢出检查判断，不再用固定总字数作为发布门禁。
         if runtime.content_policy == "edit":
             from app.agent.slide_rendering import sanitize_slide_density
             for slide in slides:
@@ -636,18 +641,17 @@ async def _ensure_executable_layout(runtime: PipelineRuntime, agent, decision: A
                     "requires_candidate_confirmation": False,
                 }
             if result.get("compile_status") != "preserved" and _size_goal_regressed(runtime, canonical, result):
-                result = {
-                    "slide_id": slide_id,
-                    "layout_type": "preserve_original",
-                    "designRationale": "安全候选的实际字号小于原页，不符合放大目标",
-                    "elements": list(canonical.get("elements") or []),
-                    "render_mode": str(canonical.get("render_mode") or "absolute"),
-                    "compile_status": "preserved",
-                    "requested_style": directive_data.get("style") or {},
-                    "effective_style": {},
-                    "warnings": [f"{slide_id} 无法在不缩小文字的前提下继续放大，已保留原布局"],
-                    "compile_attempts": list(result.get("compile_attempts") or []),
-                }
+                warning = f"{slide_id} 的字号目标未完全达到，仍应用最高分可渲染候选"
+                result["warnings"] = list(dict.fromkeys([
+                    *(result.get("warnings") or []), warning,
+                ]))
+                result["decision"] = "applied"
+                if not hasattr(runtime, "diagnostics"):
+                    runtime.diagnostics = []
+                runtime.diagnostics.append({
+                    "slide_id": slide_id, "code": "size_goal_unmet",
+                    "severity": "warning", "message": warning,
+                })
             if not hasattr(runtime, "layout_compile_results"):
                 runtime.layout_compile_results = []
             runtime.layout_compile_results.append({
@@ -939,6 +943,12 @@ async def _finalize_executable_layout(
             bound, unresolved = bind_content_refs(canonical, list(data.get("elements") or []))
             if not unresolved:
                 data["elements"] = bound
+        # 模板安全区钳制：越栏文本先平移回内容区（保留 LLM 设计），不再整页重编译。
+        from app.agent.agents.layout import clamp_template_rail
+
+        clamp_template_rail(
+            runtime.preferred_template, page_type, list(data.get("elements") or []),
+        )
         normalized_slides.append(data)
     # 源页已有需要保留的图片/图表时，LLM 布局即使通过校验也必须预留视觉槽。
     # 否则 _layout_slide_batch 重建元素后会把保留图片放到旧坐标，与加宽的正文
@@ -1072,8 +1082,9 @@ async def _finalize_executable_layout(
         verified_slides.append({**item, "elements": bound})
     # Every transformation after candidate selection (visual-slot fallback,
     # aggregate expansion, canonicalization) invalidates the earlier metrics.
-    # Recompute the final geometry/objectives and preserve the baseline page if
-    # the effective result no longer meets a hard target.
+    # Recompute the final geometry/objectives for diagnostics.  In V3 an unmet
+    # quality objective is not a publication gate: a structurally executable,
+    # materially different candidate must continue to the editor.
     runtime_engine_params = getattr(runtime, "layout_engine_params", None) or {}
     if runtime_engine_params.get("quality_mode") == "polish_v2":
         from app.agent.layouts.analysis import analyze_layout
@@ -1142,8 +1153,27 @@ async def _finalize_executable_layout(
                 "quality_delta": quality_delta,
                 "material_change": material_change,
             })
-            if not material_change or (objectives and not objectives_passed):
-                warning = "最终有效版式未达到硬目标，已保留原布局"
+            if objectives and not objectives_passed:
+                warning = "最终版式未完全达到目标，仍应用综合评分最高的可渲染候选"
+                item["warnings"] = list(dict.fromkeys([
+                    *(item.get("warnings") or []), warning,
+                ]))
+                # PageLayoutSpec keeps the execution decision as ``applied``;
+                # warnings are promoted to the run-level
+                # ``applied_with_warnings`` status during postflight.
+                item["decision"] = "applied"
+                item["rejection_code"] = ""
+                item["rejection_reasons"] = []
+                runtime.diagnostics.extend({
+                    "slide_id": slide_id,
+                    "code": "objective_unmet",
+                    "severity": "warning",
+                    "metric": result.get("metric"),
+                    "message": f"目标 {result.get('metric')} 未完全达到，已继续应用当前候选。",
+                } for result in objective_results
+                  if not result.get("passed") and bool(result.get("hard_requirement", True)))
+            if not material_change:
+                warning = "候选与当前页面没有实际差异，已保留原布局"
                 item.update({
                     "layout_type": "preserve_original",
                     "designRationale": warning,
@@ -1158,10 +1188,7 @@ async def _finalize_executable_layout(
                     "quality_delta": 0.0,
                     "material_change": False,
                     "decision": "preserved",
-                    "rejection_code": (
-                        "objective_unmet" if objectives and not objectives_passed
-                        else "identical_to_baseline"
-                    ),
+                    "rejection_code": "identical_to_baseline",
                     "rejection_reasons": list(dict.fromkeys([
                         *(item.get("rejection_reasons") or []), warning,
                     ])),
@@ -1385,17 +1412,17 @@ def _compile_layout_from_analysis(
                         f"{requested_layout} 无法覆盖全部内容，已切换 {fallback.get('layout_type')}",
                     ]))
             if fallback.get("compile_status") != "preserved" and _size_goal_regressed(runtime, source, fallback):
-                fallback = {
-                    "slide_id": slide_id,
-                    "layout_type": "preserve_original",
-                    "designRationale": "安全候选的实际字号小于原页，不符合放大目标",
-                    "elements": list(source.get("elements") or []),
-                    "render_mode": str(source.get("render_mode") or "absolute"),
-                    "compile_status": "preserved",
-                    "requested_style": {}, "effective_style": {},
-                    "warnings": [f"{slide_id} 无法在不缩小文字的前提下继续放大，已保留原布局"],
-                    "compile_attempts": list(fallback.get("compile_attempts") or []),
-                }
+                warning = f"{slide_id} 的字号目标未完全达到，仍应用最高分可渲染候选"
+                fallback["warnings"] = list(dict.fromkeys([
+                    *(fallback.get("warnings") or []), warning,
+                ]))
+                fallback["decision"] = "applied"
+                if not hasattr(runtime, "diagnostics"):
+                    runtime.diagnostics = []
+                runtime.diagnostics.append({
+                    "slide_id": slide_id, "code": "size_goal_unmet",
+                    "severity": "warning", "message": warning,
+                })
             fallback["designRationale"] = rationale or fallback.get("designRationale", "")
             if not hasattr(runtime, "layout_compile_results"):
                 runtime.layout_compile_results = []
@@ -1837,4 +1864,9 @@ def finalize_content(runtime: PipelineRuntime) -> dict[str, Any]:
             "ppt_structure_invalid", f"页面结构校验失败，已保留原 PPT 版本。{repair_error}",
             retryable=True,
         )
+    if repair_error:
+        runtime.diagnostics.append({
+            "code": "knowledge_advisory", "severity": "warning",
+            "message": repair_error,
+        })
     return repaired

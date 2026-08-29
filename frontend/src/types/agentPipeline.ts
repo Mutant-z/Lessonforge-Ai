@@ -3,7 +3,23 @@
 export type PipelineStatus =
   | 'queued' | 'running' | 'pausing' | 'paused' | 'completed' | 'failed' | 'cancelled';
 
-export type PPTPolishResultStatus = 'applied' | 'partial' | 'no_change' | 'needs_confirmation' | 'rejected' | 'answer_only';
+export type PPTPolishResultStatus = 'applied' | 'applied_with_warnings' | 'partial' | 'no_change' | 'needs_confirmation' | 'rejected' | 'failed' | 'answer_only';
+
+export interface PPTResolvedEditRequest {
+  raw_text?: string;
+  relation?: string;
+  scope?: { target_slide_ids?: string[]; reference_slide_ids?: string[]; source?: string };
+  operations?: Array<{ domain?: string; action?: string; object_targets?: string[]; targets?: Array<Record<string, unknown>> }>;
+  preserve?: Record<string, boolean>;
+  summary?: string;
+  confidence?: number;
+  warnings?: string[];
+}
+
+export interface PPTChangeSet {
+  changed_slide_ids?: string[];
+  pages?: Array<{ slide_id: string; changed?: boolean; changes?: Array<Record<string, unknown>> }>;
+}
 
 export interface PPTPolishObjectiveResult {
   metric?: string;
@@ -69,6 +85,10 @@ export interface PPTPolishResult {
   applied_slide_ids?: string[];
   preserved_slide_ids?: string[];
   warnings?: string[];
+  resolved_request?: PPTResolvedEditRequest;
+  change_set?: PPTChangeSet;
+  diagnostics?: Array<Record<string, any>>;
+  fallback_used?: boolean;
 }
 
 export interface PipelineRunInfo {
@@ -206,4 +226,7 @@ export const ARTIFACT_TYPE_LABELS: Record<string, string> = {
   presentation_file: 'PPT 文件',
   visual_qa: '视觉 QA',
   revision_note: '修订记录',
+  edit_intent: 'V3 修改意图',
+  slide_edit_plan: '元素级修改计划',
+  change_set: '逐元素变更记录',
 };

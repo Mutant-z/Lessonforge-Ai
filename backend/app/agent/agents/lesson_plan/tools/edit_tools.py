@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 from app.agent.agents.lesson_plan.tools._common import (
     ToolGuardError,
     atomic_edit,
+    normalize_blocks,
+    normalize_outline_sections,
     patch_paths,
 )
 from app.agent.registry import Tool, ToolContext, ToolResult, register_tool
@@ -80,7 +82,7 @@ async def _lesson_create_outline(tc: ToolContext, inp: LessonCreateOutlineInput)
             )
         atomic_edit(
             tc,
-            lambda builder: builder.set_outline(inp.sections),
+            lambda builder: builder.set_outline(normalize_outline_sections(inp.sections)),
             change_paths=["$.outline"],
             global_change=True,
             is_add_section=True,
@@ -286,7 +288,7 @@ async def _lesson_write_section(tc: ToolContext, inp: LessonWriteSectionInput) -
             tc,
             lambda builder: builder.write_section(
                 inp.section_id,
-                blocks=inp.blocks or None,
+                blocks=normalize_blocks(inp.blocks) or None,
                 summary=inp.summary,
                 coverage_refs=inp.coverage_refs,
                 title=inp.title,
@@ -321,13 +323,33 @@ class LessonApplyPatchInput(BaseModel):
     patch: dict[str, Any] = Field(min_length=1, description="深层合并补丁（可同时改大纲与内核）")
 
 
+def _normalize_patch_blocks(patch: dict[str, Any]) -> dict[str, Any]:
+    """深层遍历补丁，把其中所有 blocks 列表归一化（lesson_apply_patch 用）。"""
+    normalized = dict(patch)
+    outline = normalized.get("outline")
+    if isinstance(outline, dict) and isinstance(outline.get("sections"), list):
+        normalized["outline"] = {
+            **outline,
+            "sections": normalize_outline_sections(outline.get("sections")),
+        }
+    for key, value in list(normalized.items()):
+        if key == "outline":
+            continue
+        if isinstance(value, list) and key == "blocks":
+            normalized[key] = normalize_blocks(value)
+        elif isinstance(value, dict):
+            normalized[key] = _normalize_patch_blocks(value)
+    return normalized
+
+
 async def _lesson_apply_patch(tc: ToolContext, inp: LessonApplyPatchInput) -> ToolResult:
     try:
-        core_keys = list((inp.patch.get("pedagogical_core") or {}).keys()) if isinstance(inp.patch.get("pedagogical_core"), dict) else None
+        patch = _normalize_patch_blocks(inp.patch)
+        core_keys = list((patch.get("pedagogical_core") or {}).keys()) if isinstance(patch.get("pedagogical_core"), dict) else None
         content = atomic_edit(
             tc,
-            lambda builder: builder.apply_patch(inp.patch),
-            change_paths=patch_paths(inp.patch),
+            lambda builder: builder.apply_patch(patch),
+            change_paths=patch_paths(patch),
             global_change=True,
             core_keys=core_keys,
         )
@@ -349,6 +371,10 @@ def _register_edit_tools() -> None:
     register_tool(Tool("lesson_rename_section", "重命名章节", LessonRenameSectionInput, _lesson_rename_section))
     register_tool(Tool("lesson_merge_sections", "合并多个同级章节为一个", LessonMergeSectionsInput, _lesson_merge_sections))
     register_tool(Tool("lesson_delete_section", "删除章节（含子孙）", LessonDeleteSectionInput, _lesson_delete_section))
-    register_tool(Tool("lesson_write_section", "写入章节内容（blocks/summary/coverage_refs）", LessonWriteSectionInput, _lesson_write_section))
+    register_tool(Tool("lesson_write_section", "写入章节内容（blocks 支持 paragraph[text]/bullets[items]/"
+                                      "steps[steps[{title,detail}]]/table[columns+rows[{cells}]]/"
+                                      "process_table[steps]/note[text]/checklist[items]；"
+                                      "其他字段名写法会被自动归一化）",
+                       LessonWriteSectionInput, _lesson_write_section))
     register_tool(Tool("lesson_update_core", "更新稳定教学内核（目标/环节/评价等）", LessonUpdateCoreInput, _lesson_update_core))
     register_tool(Tool("lesson_apply_patch", "深层合并补丁，同时改大纲与内核", LessonApplyPatchInput, _lesson_apply_patch))

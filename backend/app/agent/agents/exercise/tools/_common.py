@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.agent.core.gates import gates_active
 from app.agent.registry import ToolContext
 
 
@@ -97,7 +98,11 @@ def _scope_guard(tc: ToolContext, question_ids: list[str] | None = None,
     目标 ID 若在文档中不存在（如模型编造的 ID），视为无效并忽略——避免用 LLM
     幻觉 ID 拦截真实 ID 的修改（真实场景：意图识别把"第六题"猜成 q6，而文档
     真实 ID 是 ex_06，此时应放行全局修改而不是误拦）。
+
+    relaxed 门禁模式：不拒绝调用，仅由提示词引导优先修改目标。
     """
+    if not gates_active():
+        return
     runtime = getattr(tc, "runtime", None)
     plan = getattr(runtime, "intent_plan", None) if runtime else None
     if plan is None:
@@ -134,7 +139,12 @@ def _confirmation_tokens(tc: ToolContext) -> list[str]:
 
 
 def _require_confirmation(tc: ToolContext, token: str | None = None, *, operation: str = "删除或结构调整") -> None:
-    """高风险操作（删除分区/题目/题组等）要求有效的人工确认令牌。"""
+    """高风险操作（删除分区/题目/题组等）要求有效的人工确认令牌。
+
+    relaxed 门禁模式：删除/结构调整直接执行，不再要求确认令牌。
+    """
+    if not gates_active():
+        return
     tokens = _confirmation_tokens(tc)
     if not token or token not in tokens:
         raise ValueError(

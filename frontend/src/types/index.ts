@@ -5,6 +5,7 @@ export * from './artifact';
 export * from './intake';
 export * from './settings';
 export * from './project';
+export * from './videoCenter';
 
 export interface Course {
   id: string;

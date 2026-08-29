@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
-from app.api.v1.projects import _owned_task
+from app.api.v1.projects import _owned_task, _validated_chat_attachment_metadata
 from app.core.database import get_db
 from app.models.entities import AgentMessage, User
 from app.services.course_task_service import create_task_run, start_task_run
@@ -32,6 +32,7 @@ class VerbatimMessageRequest(BaseModel):
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
     active_section_id: str | None = None
     mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 @verbatim_router.post("/courses/{course_id}/tasks/verbatim/runs", status_code=202)
@@ -50,15 +51,17 @@ async def create_verbatim_run(
     content = payload.content.strip()
     if not content:
         raise HTTPException(422, "修改指令不能为空")
+    attachment_meta = await _validated_chat_attachment_metadata(db, user, course_id, payload.attachment_ids)
     message = AgentMessage(
         course_id=course_id, task_id=task.id, module_type=TASK_TYPE,
         role="user", content=content, status="pending",
     )
-    if any((payload.selected_section_ids, payload.active_section_id, payload.mode != "auto")):
+    if any((payload.selected_section_ids, payload.active_section_id, payload.mode != "auto")) or attachment_meta:
         message.metadata_json = {
             "selected_section_ids": list(payload.selected_section_ids),
             "active_section_id": payload.active_section_id,
             "mode": payload.mode,
+            **attachment_meta,
         }
     db.add(message)
     try:

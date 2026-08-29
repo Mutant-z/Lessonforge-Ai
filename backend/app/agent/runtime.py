@@ -24,7 +24,7 @@ from app.agent.schemas import OrchestratorActionDecision, OrchestratorPlanDecisi
 from app.agent.skills import SkillRegistry, get_skill_registry
 from app.agent.state import PPTAgentState, PPTIntent
 from app.agent.slide_rendering import (
-    canonical_slide_id, render_coverage,
+    canonical_slide_id, render_coverage, resolve_content_ref,
     runtime_baseline_slides,
     semantic_content_changed,
     semantic_content_hash,
@@ -113,12 +113,52 @@ def _modality_from_instruction(instruction: str) -> str:
 
 # 几何/结构性 QA 规则：修复路径不需要重新调用 LLM 换版式，直接对受影响页用引擎
 # 按规则换参重编译（确定性收敛），避免审美 LLM 在同一缺陷上反复空转。
+HARD_QA_RULES = frozenset({
+    "geometry.overlap", "geometry.out_of_bounds", "geometry.text_overflow",
+    "geometry.font_too_small", "geometry.min_margin", "geometry.min_gap",
+    "layout.incomplete_absolute", "content.not_rendered", "render.evidence_missing",
+    "image.missing", "image.slot_missing", "visual.slot_missing",
+    "visual.overlaps_template", "visual.overlaps_content",
+})
+
+#: preserve/restore（模板切换/样式切换/内容锁定）意图下降级为警告的硬规则。
+#: 这类任务的承诺是"语义内容与视觉资源一个不动"，版式瑕疵（重叠/越界/遮挡）
+#: 记入 diagnostics 供教师查看，但不再否决发布；内容完整性规则
+#: （layout.incomplete_absolute / content.not_rendered / content.accidentally_removed）
+#: 与图片资源丢失（image.* / visual.slot_missing）仍然一票否决。
+PRESERVE_SOFT_HARD_RULES = frozenset({
+    "geometry.overlap", "geometry.out_of_bounds", "geometry.text_overflow",
+    "geometry.font_too_small", "geometry.min_margin", "geometry.min_gap",
+    "visual.overlaps_template", "visual.overlaps_content",
+    "render.evidence_missing",
+})
+
+
+def hard_blockers(issues: list[dict[str, Any]], *, preserve_policy: bool) -> list[dict[str, Any]]:
+    """按意图策略从 QA 问题中筛出真正阻断发布的问题。"""
+    blockers: list[dict[str, Any]] = []
+    for item in issues:
+        rule_id = str(item.get("rule_id") or "")
+        if rule_id not in HARD_QA_RULES:
+            continue
+        if item.get("severity") not in {"critical", "major"}:
+            continue
+        if preserve_policy and rule_id in PRESERVE_SOFT_HARD_RULES:
+            continue
+        blockers.append(item)
+    return blockers
+
+
 DETERMINISTIC_RULES = frozenset({
     "geometry.overlap", "geometry.out_of_bounds", "geometry.text_overflow",
     "geometry.font_too_small", "geometry.min_margin", "geometry.min_gap",
-    "geometry.title_in_rail", "layout.vertical_underuse", "layout.cluster_cramming",
+    "geometry.title_in_rail", "geometry.font_role_minimum",
+    "layout.vertical_underuse", "layout.cluster_cramming",
     "layout.column_balance", "layout.blank_region", "layout.monotony",
     "layout.incomplete_absolute", "content.not_rendered",
+    # 模板安全区越界（文字进入模板导轨）是纯几何问题：确定性重编译即可修复，
+    # 不应走 LLM 反馈路径（LLM 重排对几何违规不收敛且耗时）。
+    "visual.overlaps_template",
 })
 
 
@@ -252,10 +292,20 @@ def _resolved_command_runtime(command: Any) -> tuple[PPTIntent, str, list[str], 
         intent = "TEMPLATE_SWITCH"
         policy = "preserve"
         chain = ["template_analysis", "layout", "ppt_editor", "visual_qa"]
-    elif "image_asset" in domains:
-        intent = "IMAGE_UPDATE"
+    elif domains & {"notes", "timing"}:
+        intent = "LAYOUT_ONLY"
         policy = "preserve"
-        chain = ["visual_plan", "layout", "media", "ppt_editor", "visual_qa"]
+        chain = ["ppt_editor", "visual_qa"]
+    elif "image_asset" in domains:
+        image_actions = {str(item.action) for item in command.operations if item.domain == "image_asset"}
+        if image_actions and image_actions <= {"remove"}:
+            intent = "LAYOUT_ONLY"
+            policy = "preserve"
+            chain = ["ppt_editor", "visual_qa"]
+        else:
+            intent = "IMAGE_UPDATE"
+            policy = "preserve"
+            chain = ["visual_plan", "layout", "media", "ppt_editor", "visual_qa"]
     elif domains & {"image_geometry"}:
         # Existing images are repositioned through a visual_region-aware layout
         # directive; the media generator must never run for geometry-only work.
@@ -519,6 +569,12 @@ class PPTAgentRuntime:
                     instruction_metadata = dict(
                         (instruction.result_json or {}).get("request_metadata") or {}
                     )
+                    if instruction_metadata.get("attachments"):
+                        from app.services.chat_attachment_service import apply_runtime_attachments
+
+                        await apply_runtime_attachments(
+                            db, self.pipeline.course, self.pipeline, instruction_metadata,
+                        )
                     if instruction_metadata:
                         self.pipeline.request_metadata = instruction_metadata
                     urgent = any(word in instruction.content for word in ("立即", "先停止", "优先处理"))
@@ -591,6 +647,10 @@ class PPTAgentRuntime:
                             instruction_metadata.get("polish_options") or {},
                             canonical_ids=canonical,
                         )
+                        from app.agent.edit_v3 import validate_command_scope
+                        validate_command_scope(command.scope, canonical)
+                        command.needs_confirmation = False
+                        command.ambiguities = []
                         self.pipeline.resolved_polish_command = command.model_dump()
                         self.pipeline.polish_intent = resolved_command_to_polish_intent(command)
                         instruction_scope = list(command.scope.target_slide_ids)
@@ -612,8 +672,6 @@ class PPTAgentRuntime:
                         self.pipeline.context.add_note(command.summary)
                         instruction_agents = list(self.pipeline.operation_agent_chain)
                         queued_analysis_refresh = True
-                        if command.needs_confirmation:
-                            queued_confirmation = command
                     else:
                         # Initial generation has no authoritative slide IDs yet;
                         # retain the compatible router until the deck exists.
@@ -670,20 +728,8 @@ class PPTAgentRuntime:
                                 "content_policy": self.pipeline.content_policy,
                             }
                     await db.commit()
-            if queued_analysis_refresh and queued_confirmation is None:
+            if queued_analysis_refresh:
                 await self._prepare_target_slide_analysis()
-            if queued_confirmation is not None:
-                await self._request_intent_confirmation(queued_confirmation)
-                self.pipeline.result_status = "needs_confirmation"
-                self.pipeline.publishable = True
-                return {
-                    "planned_agents": planned, "remaining_agents": [],
-                    "completed_agents": completed, "selected_skills": selected,
-                    "loaded_skills": loaded, "next_agent": None,
-                    "status": "completed", "intent": effective_intent,
-                    "messages": messages, "selected_slide_ids": selected_slide_ids,
-                    "publishable": True, "result_status": "needs_confirmation",
-                }
             if getattr(self.pipeline, "result_status", "applied") == "needs_confirmation":
                 return {
                     "planned_agents": planned, "remaining_agents": [],
@@ -852,14 +898,8 @@ class PPTAgentRuntime:
                 "publishable": self.pipeline.publishable,
                 "blocking_issues": list(self.pipeline.blocking_issues),
             }
-            if key == "layout" and await self._request_candidate_confirmation_if_needed():
-                self.pipeline.result_status = "needs_confirmation"
-                self.pipeline.publishable = True
-                update.update({
-                    "remaining_agents": [], "status": "running",
-                    "result_status": "needs_confirmation", "publishable": True,
-                })
-                return update
+            # V3 automatically applies the top-ranked structurally valid
+            # candidate. Candidate score gaps remain diagnostic metadata.
             if key == "visual_qa" and self.pipeline.artifacts is not None:
                 live_visual = self.pipeline.context.get_tool_output("run_qa") or {}
                 live_content = self.pipeline.context.get_tool_output("run_content_qa") or {}
@@ -933,49 +973,25 @@ class PPTAgentRuntime:
                         if block.tool_name not in {"render_preview", "run_qa", "run_content_qa"}
                     ]
                     await self.pipeline.emitter.emit_domain("repair.started", message=f"开始第 {repair_round + 1} 轮页面修复", payload={"target_agents": targets, "issues": issues[:20]})
-                elif issues:
-                    self.pipeline.blocking_issues = list(issues)
-                    if self.pipeline.active_intent == "IMAGE_UPDATE":
-                        rules = {str(item.get("rule_id") or "") for item in issues}
-                        if "layout.incomplete_absolute" in rules:
-                            error_code, error_message = "layout_incomplete", "图片布局没有覆盖页面全部必要文字，已保留原 PPT 版本。"
-                        elif "content.not_rendered" in rules:
-                            error_code, error_message = "content_not_rendered", "页面文字没有完整进入最终渲染层，已保留原 PPT 版本。"
-                        elif "content.accidentally_removed" in rules:
-                            error_code, error_message = "content_accidentally_removed", "图片润色意外修改了页面文字，已保留原 PPT 版本。"
-                        else:
-                            error_code, error_message = "qa_blocked", "生成图片未通过目标页质量检查，已保留原 PPT 版本。"
-                        raise PPTAgentError(
-                            error_code, error_message,
-                            retryable=True, details={"issues": issues[:20]},
-                        )
-                    if self.pipeline.active_intent in {"TEMPLATE_SWITCH", "STYLE_CHANGE"}:
-                        raise PPTAgentError(
-                            "template_switch_qa_failed", "新模板布局未通过视觉质量检查，已保留原 PPT 版本。",
-                            retryable=True, details={"issues": issues[:20]},
-                        )
-                    from app.models.entities import PPTHumanRequest
-                    from app.core.database import SessionLocal
-                    async with SessionLocal() as db:
-                        request = PPTHumanRequest(
-                            pipeline_run_id=self.pipeline.pipeline_run.id,
-                            request_type="repair_limit",
-                            prompt="自动修复已达到上限，是否保留当前版本？",
-                            options_json=[
-                                {"id": "keep", "label": "保留当前版本"},
-                                {"id": "review", "label": "进入人工检查"},
-                            ],
-                        )
-                        db.add(request)
-                        await db.commit()
-                        request_id = request.id
                     await self.pipeline.emitter.emit_domain(
-                        "human.required", message="自动修复达到上限，需要教师确认",
-                        payload={"request_id": request_id, "issues": issues[:20], "options": [
-                            {"id": "keep", "label": "保留当前版本"},
-                            {"id": "review", "label": "进入人工检查"},
-                        ]},
+                        "edit.corrected", message=f"已根据验收差距启动第 {repair_round + 1} 轮自动纠偏",
+                        payload={"round": repair_round + 1, "mode": self.pipeline.repair_mode, "issues": issues[:20]},
                     )
+                elif issues:
+                    # Keep structural findings blocking when repair rounds are
+                    # exhausted; advisory findings may still be published as
+                    # diagnostics. preserve 类意图下版式瑕疵不阻断（见
+                    # PRESERVE_SOFT_HARD_RULES），内容完整性问题仍阻断。
+                    hard_issues = hard_blockers(
+                        issues,
+                        preserve_policy=self.pipeline.content_policy in {"preserve", "restore"},
+                    )
+                    self.pipeline.blocking_issues = hard_issues
+                    self.pipeline.diagnostics.extend(dict(item) for item in issues)
+                    self.pipeline.result_status = (
+                        "blocked" if hard_issues else "applied_with_warnings"
+                    )
+                    self.pipeline.publishable = not bool(hard_issues)
             return update
 
         def route(state: PPTAgentState) -> str:
@@ -1050,16 +1066,9 @@ class PPTAgentRuntime:
             prompt_analyses = [self._compact_slide_analysis(item) for item in analyses]
         self.pipeline.context.target_slide_analysis = prompt_analyses
 
-    async def _ensure_required_final_qa(self, final: PPTAgentState) -> None:
-        """Guarantee that a mutating run cannot exit the graph before QA.
-
-        LangGraph normally carries ``visual_qa`` as the last remaining agent.
-        A media/editor handoff or a resumed legacy checkpoint can nevertheless
-        exhaust that list after the mutation is committed.  The publication
-        gate must rely on actual QA evidence, so execute the same registered
-        agent once when neither live nor persisted evidence exists.
-        """
-        if getattr(self.pipeline, "result_status", "applied") in {
+    async def _ensure_required_final_qa(self, final: PPTAgentState, *, force: bool = False) -> None:
+        """Guarantee current visual evidence before a mutating run can publish."""
+        if not force and getattr(self.pipeline, "result_status", "applied") in {
             "no_change", "needs_confirmation",
         }:
             return
@@ -1073,12 +1082,26 @@ class PPTAgentRuntime:
         )
         if not requires_qa or self.pipeline.builder is None or not self.pipeline.builder.slides:
             return
+        if force:
+            self.pipeline.context.tool_results = [
+                block for block in self.pipeline.context.tool_results
+                if block.tool_name not in {"render_preview", "run_qa", "run_content_qa", "get_qa_report"}
+            ]
+            self.pipeline.render_coverage = {}
         qa_data = self.pipeline.context.get_tool_output("run_qa") or {}
         if not qa_data and self.pipeline.artifacts is not None:
             artifact = await self.pipeline.artifacts.latest("visual_qa")
             qa_data = dict((artifact or {}).get("data") or {})
-        if qa_data:
-            return
+        if qa_data and not force:
+            target_ids = set(self.pipeline.selected_slide_ids or [])
+            rendered_ids = {
+                str(value) for value in (qa_data.get("rendered_slide_ids") or [])
+            }
+            missing_ids = {
+                str(value) for value in (qa_data.get("missing_render_slide_ids") or [])
+            }
+            if not target_ids or target_ids.issubset(rendered_ids) and not (target_ids & missing_ids):
+                return
         agent = AGENT_BY_KEY["visual_qa"]
         await run_agent_loop(
             self.pipeline,
@@ -1205,7 +1228,19 @@ class PPTAgentRuntime:
                 "invalid_confirmation", "人机确认凭证无效或已失配，请重新确认。",
                 retryable=False,
             )
-        command = ResolvedPolishCommandV2.model_validate(snapshot)
+        server_snapshot = response.get("resolved_command")
+        if not isinstance(server_snapshot, dict):
+            raise PPTAgentError(
+                "invalid_confirmation", "服务端确认内容已失效，请重新确认。",
+                retryable=False,
+            )
+        command = ResolvedPolishCommandV2.model_validate(server_snapshot)
+        client_command = ResolvedPolishCommandV2.model_validate(snapshot)
+        if client_command.model_dump() != command.model_dump():
+            raise PPTAgentError(
+                "invalid_confirmation", "确认内容与服务端记录不一致，请重新确认。",
+                retryable=False,
+            )
         selected_candidate_id = str(link.get("selected_candidate_id") or "")
         if selected_candidate_id:
             option = next((
@@ -1217,10 +1252,29 @@ class PPTAgentRuntime:
                     "invalid_candidate_confirmation", "已确认的布局候选不存在，请重新选择。",
                     retryable=False,
                 )
-            metadata["validated_selected_candidate"] = dict(option["candidate"])
+            candidate = dict(option["candidate"])
+            canonical_ids = {
+                str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
+            }
+            candidate_slide_id = str(candidate.get("slide_id") or "")
+            if canonical_ids and candidate_slide_id and candidate_slide_id not in canonical_ids:
+                raise PPTAgentError(
+                    "invalid_candidate_confirmation", "已确认的布局候选不属于当前 PPT。",
+                    retryable=False,
+                )
+            scope_ids = set(command.scope.target_slide_ids)
+            if scope_ids and candidate_slide_id and candidate_slide_id not in scope_ids:
+                raise PPTAgentError(
+                    "invalid_candidate_confirmation", "已确认的布局候选超出本次修改范围。",
+                    retryable=False,
+                )
+            metadata["validated_selected_candidate"] = candidate
         return command
 
     async def _request_intent_confirmation(self, command: Any) -> None:
+        """Historical compatibility hook; V3 resolves ambiguity automatically."""
+        return None
+        # Legacy writer kept unreachable while historical rows remain readable.
         from app.core.database import SessionLocal
         from app.models.entities import PPTHumanRequest
         async with SessionLocal() as db:
@@ -1286,7 +1340,10 @@ class PPTAgentRuntime:
             return ""
 
     async def _request_candidate_confirmation_if_needed(self) -> bool:
-        """Pause a single-page polish when two safe candidates are too close."""
+        """Historical compatibility hook; V3 never creates candidate requests."""
+        return False
+        # Historical implementation retained below so old request records and
+        # continuation payloads remain readable during the compatibility window.
         if (self.pipeline.request_metadata or {}).get("selected_candidate_id"):
             return False
         pending = [
@@ -1476,28 +1533,76 @@ class PPTAgentRuntime:
         if self.pipeline.trigger_type == "message":
             from app.agent.intents import resolve_polish_command, resolved_command_to_polish_intent
             from app.agent.polish_command import apply_polish_options
+            from app.agent.edit_v3 import build_mutation_plan, resolve_edit_intent_v3
             metadata = dict(getattr(self.pipeline, "request_metadata", None) or {})
             canonical_ids = [
                 str(item.get("id") or "") for item in runtime_baseline_slides(self.pipeline)
             ]
             command = await self._validated_confirmed_command(metadata)
             if command is None:
-                command = resolve_polish_command(
+                previous_command = await self._previous_resolved_command()
+                source_slides = runtime_baseline_slides(self.pipeline)
+                # Use deterministic scope only to decide which real pages to
+                # render for intent grounding. The LLM remains authoritative
+                # for the V3 semantic interpretation that follows.
+                context_scope = resolve_polish_command(
                     instruction,
-                    target_slide_ids=(
-                        metadata.get("target_slide_ids")
-                        or metadata.get("selected_slide_ids")
-                        or selected_slide_ids
-                        or []
-                    ),
+                    target_slide_ids=(metadata.get("target_slide_ids") or metadata.get("selected_slide_ids") or selected_slide_ids or []),
                     active_slide_id=str(metadata.get("active_slide_id") or "") or None,
                     modality=str(metadata.get("modality") or "auto"),
                     canonical_ids=canonical_ids,
-                    previous_command=await self._previous_resolved_command(),
+                    previous_command=previous_command,
+                )
+                self.pipeline.selected_slide_ids = list(context_scope.scope.target_slide_ids)
+                await self._prepare_target_slide_analysis()
+                intent_v3, command = await resolve_edit_intent_v3(
+                    self.pipeline, instruction=instruction, slides=source_slides,
+                    metadata={
+                        **metadata,
+                        "target_slide_ids": (
+                            metadata.get("target_slide_ids")
+                            or metadata.get("selected_slide_ids")
+                            or selected_slide_ids
+                            or []
+                        ),
+                        "slide_analysis": list(self.pipeline.context.target_slide_analysis or []),
+                    },
+                    previous_command=previous_command,
                 )
                 command = apply_polish_options(
                     command, metadata.get("polish_options") or {}, canonical_ids=canonical_ids,
                 )
+                from app.agent.edit_v3 import validate_command_scope
+                validate_command_scope(command.scope, canonical_ids)
+                command.needs_confirmation = False
+                command.ambiguities = []
+                intent_v3.preserve = command.preservation.model_copy(deep=True)
+                intent_v3.scope = command.scope.model_copy(deep=True)
+                self.pipeline.resolved_request = intent_v3.model_dump()
+                self.pipeline.intent_fallback_used = bool(intent_v3.fallback_used)
+                mutation_plan = build_mutation_plan(intent_v3, source_slides)
+                self.pipeline.mutation_plan = mutation_plan.model_dump()
+                if self.pipeline.artifacts is not None:
+                    await self.pipeline.artifacts.create(
+                        "edit_intent", "default", self.pipeline.resolved_request,
+                        producer_agent="intent_interpreter", producer_tool="resolve_edit_intent_v3",
+                    )
+                    await self.pipeline.artifacts.create(
+                        "slide_edit_plan", "default", self.pipeline.mutation_plan,
+                        producer_agent="orchestrator", producer_tool="build_mutation_plan",
+                    )
+                if self.pipeline.emitter is not None:
+                    await self.pipeline.emitter.emit_domain(
+                        "intent.resolved", message=intent_v3.summary or "已理解本次 PPT 修改需求",
+                        payload=self.pipeline.resolved_request,
+                    )
+                    await self.pipeline.emitter.emit_domain(
+                        "edit.plan.created", message=f"已生成 {len(mutation_plan.steps)} 条元素级修改计划",
+                        payload=self.pipeline.mutation_plan,
+                    )
+            else:
+                command.needs_confirmation = False
+                command.ambiguities = []
             self.pipeline.resolved_polish_command = command.model_dump()
             self.pipeline.polish_intent = resolved_command_to_polish_intent(command)
             self.pipeline.selected_slide_ids = list(command.scope.target_slide_ids)
@@ -1533,6 +1638,9 @@ class PPTAgentRuntime:
                         "effective_scope": list(command.scope.target_slide_ids),
                         "scope_mode": command.scope.source,
                         "content_policy": self.pipeline.content_policy,
+                        "resolved_request": dict(self.pipeline.resolved_request),
+                        "mutation_plan": dict(self.pipeline.mutation_plan),
+                        "fallback_used": self.pipeline.intent_fallback_used,
                     }
                     await db.commit()
         else:
@@ -1552,18 +1660,8 @@ class PPTAgentRuntime:
         initial["content_policy"] = self.pipeline.content_policy
         initial["selected_slide_ids"] = list(self.pipeline.selected_slide_ids)
 
-        command_data = getattr(self.pipeline, "resolved_polish_command", None) or {}
-        if command_data.get("needs_confirmation"):
-            from app.agent.intents import ResolvedPolishCommandV2
-            command = ResolvedPolishCommandV2.model_validate(command_data)
-            await self._request_intent_confirmation(command)
-            self.pipeline.result_status = "needs_confirmation"
-            self.pipeline.publishable = True
-            initial.update({
-                "status": "completed", "publishable": True,
-                "result_status": "needs_confirmation",
-            })
-            return initial
+        # PPT V3 never pauses for intent confirmation. Ambiguities are exposed
+        # as non-blocking warnings on intent.resolved/polish.result.
 
         if self.pipeline.trigger_type == "message" and self.pipeline.operation_agent_chain:
             await self._prepare_target_slide_analysis()
@@ -1586,7 +1684,9 @@ class PPTAgentRuntime:
         if not self.persistent_checkpoints:
             final = await self._build_graph(MemorySaver()).ainvoke(initial, config)
             await self._ensure_required_final_qa(final)
-            await self._assert_publishable(final)
+            await self.collect_postflight_diagnostics(final)
+            await self._ensure_required_final_qa(final, force=True)
+            await self.collect_postflight_diagnostics(final)
             for name in final.get("selected_skills", []):
                 await self.pipeline.emitter.skill_completed(name)
             return final
@@ -1597,12 +1697,294 @@ class PPTAgentRuntime:
             existing = await saver.aget_tuple(config)
             final = await graph.ainvoke(None if existing else initial, config)
             await self._ensure_required_final_qa(final)
-            await self._assert_publishable(final)
+            await self.collect_postflight_diagnostics(final)
+            await self._ensure_required_final_qa(final, force=True)
+            await self.collect_postflight_diagnostics(final)
             for name in final.get("selected_skills", []):
                 await self.pipeline.emitter.skill_completed(name)
             return final
 
+    async def collect_postflight_diagnostics(self, final: PPTAgentState) -> None:
+        """V3 non-blocking postflight: restore protected drift and report QA.
+
+        Only structurally valid content reaches the domain renderer. Quality,
+        objective and vision findings become diagnostics instead of a publish
+        gate. Scope/preservation drift is repaired field-by-field.
+        """
+        from app.agent.edit_v3 import build_change_set, ensure_stable_element_identity
+        from app.core.database import SessionLocal
+        from app.models.entities import PipelineRun
+
+        builder = self.pipeline.builder
+        if builder is None:
+            self.pipeline.publishable = True
+            final["publishable"] = True
+            return
+        baseline = deepcopy(runtime_baseline_slides(self.pipeline))
+        ensure_stable_element_identity(baseline)
+        baseline_by_id = {str(item.get("id") or ""): item for item in baseline}
+        is_revision = getattr(self.pipeline, "trigger_type", "message") == "message" and bool(baseline_by_id)
+        current_ids = {str(item.get("id") or "") for item in builder.slides}
+        target_ids = set(self.pipeline.selected_slide_ids or baseline_by_id) if is_revision else current_ids
+        diagnostics: list[dict[str, Any]] = list(getattr(self.pipeline, "diagnostics", None) or [])
+        corrected_ids: set[str] = set()
+
+        # Non-target pages are authoritative. Repair accidental graph/tool
+        # drift in-place instead of rejecting the whole revision.
+        remove_indexes: list[int] = []
+        for index, current in enumerate(list(builder.slides)):
+            slide_id = str(current.get("id") or "")
+            source = baseline_by_id.get(slide_id)
+            if source is None:
+                if is_revision and slide_id not in target_ids:
+                    remove_indexes.append(index)
+                    diagnostics.append({
+                        "severity": "warning", "rule_id": "scope_reverted",
+                        "slide_id": slide_id, "message": "已移除目标范围之外新增的页面。",
+                    })
+                continue
+            if slide_id not in target_ids and current != source:
+                builder.slides[index] = deepcopy(source)
+                corrected_ids.add(slide_id)
+                diagnostics.append({
+                    "severity": "warning", "rule_id": "scope_reverted",
+                    "slide_id": slide_id, "message": "已自动恢复目标页之外的修改。",
+                })
+        for index in reversed(remove_indexes):
+            builder.slides.pop(index)
+
+        # Enforce the element-level plan inside target pages. Any field that
+        # was not authorized by a mutation step is restored deterministically.
+        plan_steps = list((getattr(self.pipeline, "mutation_plan", None) or {}).get("steps") or [])
+        for current in builder.slides:
+            slide_id = str(current.get("id") or "")
+            source = baseline_by_id.get(slide_id)
+            steps = [item for item in plan_steps if str(item.get("slide_id") or "") == slide_id]
+            if source is None or not steps or any(item.get("tool_name") == "apply_slide_relayout" for item in steps):
+                continue
+            allowed_refs = {
+                str(ref) for item in steps for ref in (item.get("content_refs") or []) if str(ref)
+            }
+            intended_text = {ref: resolve_content_ref(current, ref) for ref in allowed_refs}
+            for field in ("title", "purpose", "body", "blocks", "visual_suggestion", "speaker_notes", "duration_seconds"):
+                if field in source:
+                    current[field] = deepcopy(source[field])
+                else:
+                    current.pop(field, None)
+            from app.agent.tools.editing_tools import _set_content_ref
+            for ref, value in intended_text.items():
+                if value is not None:
+                    _set_content_ref(current, ref, value)
+
+            allowed_by_element: dict[str, set[str]] = {}
+            for item in steps:
+                fields = set(item.get("fields") or [])
+                for element_id in item.get("element_ids") or []:
+                    allowed_by_element.setdefault(str(element_id), set()).update(fields)
+            source_elements = {str(item.get("id") or ""): item for item in source.get("elements") or []}
+            current_elements = {str(item.get("id") or ""): item for item in current.get("elements") or []}
+            next_elements: list[dict[str, Any]] = []
+            plan_drift = set(current_elements) != set(source_elements)
+            for original in source.get("elements") or []:
+                element_id = str(original.get("id") or "")
+                element = current_elements.get(element_id)
+                allowed_fields = allowed_by_element.get(element_id, set())
+                if element is None:
+                    plan_drift = True
+                    next_elements.append(deepcopy(original))
+                    continue
+                restored = deepcopy(original)
+                if "text" in allowed_fields and str(element.get("content_ref") or "") in allowed_refs:
+                    restored["text"] = element.get("text")
+                if "style" in allowed_fields:
+                    restored["style"] = deepcopy(element.get("style") or {})
+                for field in allowed_fields & {"x", "y", "w", "h", "asset_path", "asset_id", "crop"}:
+                    restored[field] = deepcopy(element.get(field))
+                if allowed_fields:
+                    restored["revision_hash"] = element.get("revision_hash", restored.get("revision_hash"))
+                if restored != element:
+                    plan_drift = True
+                next_elements.append(restored)
+            if plan_drift:
+                current["elements"] = next_elements
+                corrected_ids.add(slide_id)
+                diagnostics.append({
+                    "severity": "warning", "rule_id": "locked_field_reverted",
+                    "slide_id": slide_id, "message": "已恢复元素级计划之外的字段变化。",
+                })
+
+        # Isolate schema-invalid target pages.  Each failed page falls back to
+        # its immutable snapshot while valid target pages continue to publish.
+        from app.schemas.artifact import PPTContent
+        for index, current in enumerate(list(builder.slides)):
+            slide_id = str(current.get("id") or "")
+            source = baseline_by_id.get(slide_id)
+            if slide_id not in target_ids or source is None:
+                continue
+            candidate_slides = deepcopy(baseline)
+            baseline_index = next(
+                (position for position, item in enumerate(candidate_slides) if str(item.get("id") or "") == slide_id),
+                None,
+            )
+            if baseline_index is None:
+                continue
+            candidate_slides[baseline_index] = deepcopy(current)
+            try:
+                PPTContent.model_validate({
+                    **builder.to_ppt_content(), "slides": candidate_slides,
+                })
+            except Exception as exc:
+                builder.slides[index] = deepcopy(source)
+                corrected_ids.add(slide_id)
+                diagnostics.append({
+                    "severity": "warning", "rule_id": "invalid_page_reverted",
+                    "slide_id": slide_id, "message": "该页无法形成合法 PPTContent，已单页回滚。",
+                    "detail": str(exc)[:300],
+                })
+
+        if self.pipeline.content_policy in {"preserve", "restore"}:
+            protected = (
+                "title", "purpose", "body", "blocks", "speaker_notes",
+                "duration_seconds", "script_segment_ids",
+            )
+            for current in builder.slides:
+                slide_id = str(current.get("id") or "")
+                if slide_id not in target_ids or slide_id not in baseline_by_id:
+                    continue
+                source = baseline_by_id[slide_id]
+                restored: list[str] = []
+                for field in protected:
+                    if current.get(field) != source.get(field):
+                        if field in source:
+                            current[field] = deepcopy(source[field])
+                        else:
+                            current.pop(field, None)
+                        restored.append(field)
+                if restored:
+                    corrected_ids.add(slide_id)
+                    diagnostics.append({
+                        "severity": "warning", "rule_id": "protected_field_reverted",
+                        "slide_id": slide_id,
+                        "message": "已恢复本轮要求保留的字段：" + "、".join(restored),
+                        "fields": restored,
+                    })
+
+        qa_payloads = [self.pipeline.context.get_tool_output("run_qa") or {}]
+        content_qa = self.pipeline.context.get_tool_output("run_content_qa") or {}
+        if content_qa:
+            qa_payloads.append(content_qa)
+        # 陈旧结果防御：最后一次 run_qa 运行在最终落版之前，随后 ppt_editor/
+        # finalize 仍可能修改内容。发布判定必须基于最终 builder 内容重算
+        # 确定性 QA，否则修复已生效的违规仍会把整轮打成 blocked。
+        tool_context = getattr(self.pipeline, "tool_context", None)
+        if tool_context is not None and getattr(tool_context, "builder", None) is not None:
+            from app.agent.registry import execute_tool
+
+            final_qa = await execute_tool("run_qa", tool_context, {})
+            if final_qa.ok and isinstance(final_qa.output, dict):
+                qa_payloads[0] = final_qa.output
+        hard_issues: list[dict[str, Any]] = []
+        preserve_policy = self.pipeline.content_policy in {"preserve", "restore"}
+        for payload in qa_payloads:
+            for issue in payload.get("issues") or []:
+                item = dict(issue)
+                item["original_severity"] = issue.get("severity", "")
+                if str(item.get("rule_id") or "") in HARD_QA_RULES:
+                    if item.get("severity") in {"critical", "major"}:
+                        if preserve_policy and str(item.get("rule_id") or "") in PRESERVE_SOFT_HARD_RULES:
+                            # preserve 类意图：版式瑕疵降级为警告，不阻断发布。
+                            item["severity"] = "warning"
+                        else:
+                            hard_issues.append(item)
+                else:
+                    item["severity"] = "warning"
+                diagnostics.append(item)
+
+        current_slides = builder.to_ppt_content().get("slides") or []
+        ensure_stable_element_identity(current_slides)
+        change_set = build_change_set(
+            baseline, current_slides, list(target_ids), diagnostics,
+        )
+        change_set["acceptance_results"] = [
+            {"slide_id": result.get("slide_id"), **criterion}
+            for result in (getattr(self.pipeline, "layout_compile_results", None) or [])
+            for criterion in (result.get("objective_results") or [])
+        ]
+        change_set["correction_rounds"] = int(final.get("repair_round") or 0)
+        visual_qa = self.pipeline.context.get_tool_output("run_qa") or {}
+        for page in change_set.get("pages") or []:
+            slide_id = str(page.get("slide_id") or "")
+            page["render_paths"] = dict((visual_qa.get("render_paths") or {}).get(slide_id) or {})
+            page["raster_metrics"] = dict((visual_qa.get("raster_metrics") or {}).get(slide_id) or {})
+            page["vision_review"] = dict((visual_qa.get("vision_reviews") or {}).get(slide_id) or {})
+        changed_ids = list(change_set.get("changed_slide_ids") or [])
+        if not is_revision:
+            changed_ids = sorted(current_ids)
+            change_set["changed_slide_ids"] = changed_ids
+        self.pipeline.change_set = change_set
+        self.pipeline.diagnostics = diagnostics
+        self.pipeline.mutation_applied = bool(changed_ids)
+        self.pipeline.affected_slide_ids = changed_ids
+        self.pipeline.blocking_issues = hard_issues
+        self.pipeline.result_status = (
+            "blocked" if hard_issues
+            else "no_change" if not changed_ids
+            else "applied_with_warnings" if diagnostics
+            else "applied"
+        )
+        self.pipeline.publishable = not bool(hard_issues)
+        final.update({
+            "publishable": self.pipeline.publishable, "result_status": self.pipeline.result_status,
+            "affected_slide_ids": changed_ids, "blocking_issues": hard_issues,
+        })
+        if getattr(self.pipeline, "artifacts", None) is not None:
+            await self.pipeline.artifacts.create(
+                "change_set", "default", change_set,
+                producer_agent="postflight", producer_tool="collect_postflight_diagnostics",
+            )
+        if getattr(self.pipeline, "emitter", None) is not None:
+            for slide_id in changed_ids:
+                page = next((item for item in change_set["pages"] if item["slide_id"] == slide_id), {})
+                await self.pipeline.emitter.emit_domain(
+                    "slide.change.applied", message=f"{slide_id} 已应用元素级修改",
+                    slide={"slide_id": slide_id}, payload=page,
+                )
+            if corrected_ids:
+                await self.pipeline.emitter.emit_domain(
+                    "edit.corrected", message="已自动恢复超出范围或保护字段的修改",
+                    payload={"slide_ids": sorted(corrected_ids)},
+                )
+            for diagnostic in diagnostics[:50]:
+                await self.pipeline.emitter.emit_domain(
+                    "qa.warning", message=str(diagnostic.get("message") or "PPT 质量提示"),
+                    slide={"slide_id": diagnostic.get("slide_id", "")}, payload=diagnostic,
+                )
+        if getattr(self.pipeline, "pipeline_run", None) is not None:
+            async with SessionLocal() as db:
+                row = await db.get(PipelineRun, self.pipeline.pipeline_run.id)
+                if row is not None:
+                    row.plan_json = {
+                        **(row.plan_json or {}),
+                        "result_status": self.pipeline.result_status,
+                        "resolved_request": dict(getattr(self.pipeline, "resolved_request", None) or {}),
+                        "mutation_plan": dict(getattr(self.pipeline, "mutation_plan", None) or {}),
+                        "change_set": dict(change_set),
+                        "diagnostics": diagnostics,
+                        "fallback_used": bool(getattr(self.pipeline, "intent_fallback_used", False)),
+                        "metrics": {
+                            "intent_fallback": bool(getattr(self.pipeline, "intent_fallback_used", False)),
+                            "auto_correction_rounds": int(final.get("repair_round") or 0),
+                            "warning_count": len(diagnostics),
+                            "no_effective_change": not bool(changed_ids),
+                        },
+                    }
+                    await db.commit()
+
     async def _assert_publishable(self, final: PPTAgentState) -> None:
+        """Compatibility entry point; V3 performs non-blocking diagnostics."""
+        await PPTAgentRuntime.collect_postflight_diagnostics(self, final)
+
+    async def _legacy_assert_publishable(self, final: PPTAgentState) -> None:
         """Apply the strict publish gate before the domain Artifact can be saved."""
         if getattr(self.pipeline, "result_status", "applied") == "needs_confirmation":
             self.pipeline.publishable = True
@@ -1710,7 +2092,7 @@ class PPTAgentRuntime:
                     str(item.get("slide_id") or ""): item
                     for item in (getattr(self.pipeline, "layout_compile_results", None) or [])
                 }
-                weak_changes = {
+                diagnostic_changes = {
                     slide_id for slide_id in changed_visual
                     if slide_id in compile_by_id and (
                         compile_by_id[slide_id].get("material_change") is False
@@ -1721,30 +2103,23 @@ class PPTAgentRuntime:
                         )
                     )
                 }
-                if weak_changes and self.pipeline.builder is not None:
-                    # Last-resort monotonicity guard. Staging normally rejects
-                    # these pages; if a legacy editor path bypasses staging,
-                    # restore them here before final content is serialized.
-                    for index, slide in enumerate(self.pipeline.builder.slides):
-                        slide_id = str(slide.get("id") or "")
-                        if slide_id in weak_changes:
-                            self.pipeline.builder.slides[index] = deepcopy(source_slides[slide_id])
-                    self.pipeline.affected_slide_ids = [
-                        value for value in self.pipeline.affected_slide_ids
-                        if value not in weak_changes
-                    ]
-                    for slide_id in weak_changes:
+                if diagnostic_changes:
+                    # V3 records objective/quality misses but never restores a
+                    # structurally valid page merely because the gain is weak.
+                    # Exact scope and content integrity checks below remain hard
+                    # technical constraints.
+                    for slide_id in sorted(diagnostic_changes):
                         item = compile_by_id[slide_id]
-                        item["status"] = "preserved"
                         item["warnings"] = list(dict.fromkeys([
                             *(item.get("warnings") or []),
-                            "未达到显式目标或可感知改善阈值，已保留原布局",
+                            "修改已应用，但部分目标或可感知改善阈值未完全达到",
                         ]))
-                    current_slides = {
-                        str(item.get("id") or ""): item
-                        for item in self.pipeline.builder.to_ppt_content().get("slides", [])
-                    }
-                    changed_visual -= weak_changes
+                        self.pipeline.diagnostics.append({
+                            "slide_id": slide_id,
+                            "code": "objective_unmet",
+                            "severity": "warning",
+                            "message": "修改已应用，但部分目标或可感知改善阈值未完全达到。",
+                        })
                 coverage = {
                     slide_id: render_coverage(current_slides[slide_id], baseline=source_slides[slide_id])
                     for slide_id in changed_visual if slide_id in source_slides and slide_id in current_slides
@@ -1765,7 +2140,13 @@ class PPTAgentRuntime:
                 if not changed_visual:
                     self.pipeline.result_status = "no_change"
                 elif unchanged:
-                    self.pipeline.result_status = "partial"
+                    self.pipeline.result_status = "applied_with_warnings"
+                    self.pipeline.diagnostics.append({
+                        "code": "target_page_unchanged",
+                        "severity": "warning",
+                        "slide_ids": unchanged,
+                        "message": "部分目标页没有形成实际差异，其余页面已发布。",
+                    })
                 else:
                     self.pipeline.result_status = "applied"
             elif self.pipeline.content_policy == "edit" and source_slides:

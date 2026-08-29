@@ -29,6 +29,14 @@ TASK_EDITABLE_FIELDS = {
     "stage_id", "scaffolds", "record_table",
 }
 
+# 普通内容编辑不应改变任务与学习目标的既有映射。模型在返回完整任务
+# 对象时可能遗漏 objective_ids，遗漏不能被解释为“解绑目标”；真正的
+# 映射调整必须明确走 ALIGNMENT_REPAIR 意图。
+CONTENT_EDIT_INTENTS = {
+    "GENERATE", "TASK_EDIT", "STRUCTURE_EDIT", "TIMING_ADJUST", "SCAFFOLD_EDIT",
+    "RECORDING_EDIT", "SYNC_CONTEXT",
+}
+
 
 def _ok(output: dict[str, Any]) -> ToolResult:
     return ToolResult(output={"ok": True, **output})
@@ -219,21 +227,42 @@ async def _task_sheet_update_task(tc: ToolContext, inp: UpdateTaskSheetTaskInput
     )
     if ref_error:
         return _fail(ref_error, "invalid_reference")
+    preserved_alignment = False
+    runtime = getattr(tc, "runtime", None)
+    active_intent = str(getattr(runtime, "active_intent", "") or "")
+    if (
+        "objective_ids" in patch
+        and active_intent in CONTENT_EDIT_INTENTS
+        and list(patch.get("objective_ids") or []) != list(block.get("objective_ids") or [])
+    ):
+        # 只保留已有映射；新增/删除映射都属于对齐修复，避免普通润色
+        # 因模型输出不完整而意外解绑目标。
+        patch["objective_ids"] = list(block.get("objective_ids") or [])
+        preserved_alignment = True
     if "objective_ids" in patch:
         removed = set(block.get("objective_ids") or []) - set(patch["objective_ids"])
         if removed:
             # 目标解绑 → 高风险，需确认
             _require_confirmation(tc, inp.confirmation_token, operation="目标解绑")
     before = dict(block)
+    changed_keys = [key for key, value in patch.items() if key != "id" and before.get(key) != value]
+    if not changed_keys:
+        return _ok({
+            "summary": f"任务 {inp.task_id} 内容未变化，已保留目标映射",
+            "affected_json_paths": [],
+            "revision": builder.revision,
+            "preserved_fields": ["objective_ids"] if preserved_alignment else [],
+        })
     for key, value in patch.items():
         if key == "id":
             continue
         block[key] = value
     revision = builder.bump_revision()
     return _ok({
-        "summary": f"更新任务 {inp.task_id}：{', '.join(sorted(patch))}",
+        "summary": f"更新任务 {inp.task_id}：{', '.join(sorted(changed_keys))}",
         "affected_json_paths": [builder.task_json_path(inp.task_id)],
         "revision": revision,
+        "preserved_fields": ["objective_ids"] if preserved_alignment else [],
         "before": summarize_diff(before, dict(block)),
     })
 
@@ -313,17 +342,36 @@ async def _task_sheet_update_objectives(tc: ToolContext, inp: UpdateTaskSheetObj
     if len(catalog_ids) != len(set(catalog_ids)):
         return _fail("目标目录包含重复 ID", "duplicate_objective_id")
     # 目标目录允许新增/拆分蓝图外目标（教师细化指令，非破坏性，免确认）；
-    # 移除现有目录条目仍属目标解绑，要求人工确认令牌。
+    # 明确对齐修复中的移除仍属目标解绑，要求人工确认令牌。
     _lock_guard(tc, ["$.objective_catalog"])
     existing_ids = {item.get("id") for item in builder.objective_catalog}
     removed = existing_ids - set(catalog_ids)
+    preserved_catalog = False
+    active_intent = str(getattr(getattr(tc, "runtime", None), "active_intent", "") or "")
+    catalog_items = [dict(item) for item in inp.objective_catalog]
     if removed:
-        _require_confirmation(tc, inp.confirmation_token, operation="目标解绑（移除目标目录条目）")
-    builder._content["objective_catalog"] = [dict(item) for item in inp.objective_catalog]
+        if active_intent in CONTENT_EDIT_INTENTS:
+            # 普通内容润色传回不完整目录时，保留原目录条目；目标目录的
+            # 增删/解绑必须由明确的 ALIGNMENT_REPAIR 意图承担。
+            incoming_by_id = {str(item.get("id")): item for item in catalog_items}
+            merged_catalog: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for item in builder.objective_catalog:
+                item_id = str(item.get("id"))
+                merged_catalog.append(dict(incoming_by_id.get(item_id) or item))
+                seen_ids.add(item_id)
+            merged_catalog.extend(
+                item for item in catalog_items if str(item.get("id")) not in seen_ids
+            )
+            catalog_items = merged_catalog
+            preserved_catalog = True
+        else:
+            _require_confirmation(tc, inp.confirmation_token, operation="目标解绑（移除目标目录条目）")
+    builder._content["objective_catalog"] = catalog_items
     # 同步所有 objective_list Block：把目录中新增的 ID 追加到每个展示区域的末尾。
     # 目录是权威来源；渲染时前端从 objective_list Block 的 objective_ids 读取，
     # 不自动同步会导致用户看到的目标数与目录不符（显示 N-1 条而非 N 条）。
-    new_catalog_ids: list[str] = [str(item.get("id") or "") for item in inp.objective_catalog]
+    new_catalog_ids: list[str] = [str(item.get("id") or "") for item in catalog_items]
     synced_block_paths: list[str] = []
     for section in builder.sections:
         for block in section.get("blocks", []):
@@ -339,11 +387,12 @@ async def _task_sheet_update_objectives(tc: ToolContext, inp: UpdateTaskSheetObj
                 )
     revision = builder.bump_revision()
     return _ok({
-        "summary": f"更新目标目录（{len(inp.objective_catalog)} 条）" + (
+        "summary": f"更新目标目录（{len(catalog_items)} 条）" + (
             f"；已同步更新 {len(synced_block_paths)} 个目标展示区域" if synced_block_paths else ""
         ),
         "affected_json_paths": ["$.objective_catalog", *synced_block_paths],
         "revision": revision,
+        "preserved_fields": ["objective_catalog"] if preserved_catalog else [],
     })
 
 
@@ -372,6 +421,10 @@ async def _task_sheet_update_record_table(tc: ToolContext, inp: UpdateTaskSheetR
             return _fail("候选稿缺少章节级记录表，请指定任务或先初始化草稿", "record_table_missing")
         _lock_guard(tc, [_block_path(builder, section.get("id", ""), target.get("id", ""))])
         for key, value in table.items():
+            if key == "id":
+                if value != target.get("id"):
+                    return _fail("不允许修改记录表 ID", "immutable_id")
+                continue
             if key not in {"title", "instructions", "columns", "blank_rows"}:
                 return _fail(f"不支持字段：{key}", "invalid_field")
             target[key] = value
@@ -466,18 +519,22 @@ async def _task_sheet_update_preparation_extension(tc: ToolContext, inp: UpdateT
     builder = _builder(tc)
     changed_paths: list[str] = []
     if inp.preparation is not None:
-        target, section = _find_checklist(builder, "preparation")
-        if target is None or section is None:
-            return _fail("候选稿缺少课前准备清单", "checklist_missing")
+        items = _checklist_items(inp.preparation)
+        if items is None:
+            return _fail("课前准备至少需要一项非空内容", "checklist_empty")
+        _lock_guard(tc, ["$.sections[SEC-PREPARATION]"])
+        target, section = _ensure_checklist(builder, "preparation")
         _lock_guard(tc, [_block_path(builder, section.get("id", ""), target.get("id", ""))])
-        target["items"] = [{"text": text} for text in inp.preparation]
+        target["items"] = items
         changed_paths.append(_block_path(builder, section.get("id", ""), target.get("id", "")))
     if inp.extension is not None:
-        target, section = _find_checklist(builder, "extension")
-        if target is None or section is None:
-            return _fail("候选稿缺少课后拓展清单", "checklist_missing")
+        items = _checklist_items(inp.extension)
+        if items is None:
+            return _fail("课后拓展至少需要一项非空内容", "checklist_empty")
+        _lock_guard(tc, ["$.sections[SEC-EXTENSION]"])
+        target, section = _ensure_checklist(builder, "extension")
         _lock_guard(tc, [_block_path(builder, section.get("id", ""), target.get("id", ""))])
-        target["items"] = [{"text": text} for text in inp.extension]
+        target["items"] = items
         changed_paths.append(_block_path(builder, section.get("id", ""), target.get("id", "")))
     if not changed_paths:
         return _fail("未提供任何修改内容", "missing_input")
@@ -500,6 +557,55 @@ def _find_checklist(builder, kind: str) -> tuple[dict[str, Any] | None, dict[str
                 if any(marker in title for marker in titles):
                     return block, section
     return None, None
+
+
+def _checklist_items(values: list[str]) -> list[dict[str, str]] | None:
+    """把工具输入规范化为 V3 checklist items；空内容不能生成非法候选稿。"""
+    normalized = [str(value).strip() for value in values]
+    if not normalized or any(not value for value in normalized):
+        return None
+    return [{"text": value} for value in normalized]
+
+
+def _ensure_checklist(builder, kind: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """缺少可选清单时补建对应章节和 Block，再返回可编辑目标。"""
+    target, section = _find_checklist(builder, kind)
+    if target is not None and section is not None:
+        return target, section
+
+    specs = {
+        "preparation": ("SEC-PREPARATION", "课前准备", "课前需要完成的准备工作。", "B-PREPARATION", "课前准备清单"),
+        "extension": ("SEC-EXTENSION", "课后拓展", "把本课方法迁移到生活或专业场景。", "B-EXTENSION", "拓展任务"),
+    }
+    section_id, title, purpose, block_id, block_title = specs[kind]
+    section = builder.find_section(section_id)
+    if section is None:
+        top_level = builder.top_level_sections()
+        if kind == "preparation":
+            index = next(
+                (int(item.get("order", 0)) for item in top_level if item.get("id") == "SEC-TASKS"),
+                len(top_level),
+            )
+        else:
+            index = len(top_level)
+        builder.add_section(section_id, title, index=index)
+        section = builder.find_section(section_id)
+    if section is None:  # defensive guard for unusual builder implementations
+        raise ValueError(f"无法创建清单章节：{section_id}")
+    if block_id in builder.all_block_ids():
+        suffix = 2
+        candidate = f"{block_id}-{suffix}"
+        while candidate in builder.all_block_ids():
+            suffix += 1
+            candidate = f"{block_id}-{suffix}"
+        block_id = candidate
+    builder.add_block(section_id, {
+        "kind": "checklist", "id": block_id, "title": block_title, "items": [],
+    })
+    target, section = _find_checklist(builder, kind)
+    if target is None or section is None:
+        raise ValueError(f"无法创建清单 Block：{block_id}")
+    return target, section
 
 
 # ---------------------------------------------------------------------------

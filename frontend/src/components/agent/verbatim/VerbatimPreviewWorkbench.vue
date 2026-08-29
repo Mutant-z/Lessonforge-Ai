@@ -589,6 +589,8 @@ function formatInteractionText(text: string): string {
   color: #0f172a;
   font-weight: 500;
   letter-spacing: 0.01em;
+  /* required_text may contain intentional paragraph breaks from the Agent. */
+  white-space: pre-line;
 }
 
 :deep(.vb-formula) {

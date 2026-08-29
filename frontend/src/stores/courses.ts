@@ -27,6 +27,11 @@ export const useCourseStore = defineStore('courses', {
       const { data } = await api.post('/courses', payload);
       this.items.unshift(data);
       return data;
+    },
+    async delete(courseId: string) {
+      await api.delete(`/courses/${courseId}`);
+      this.items = this.items.filter(course => course.id !== courseId);
+      if (this.current?.id === courseId) this.current = null;
     }
   }
 })

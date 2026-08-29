@@ -93,13 +93,39 @@ def canonicalize_spatial_layout(
     return {**layout, "elements": kept}
 
 
+def clamp_template_rail(template_id: str, page_type: str, elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把越出模板安全导轨的文本元素钳回内容区（确定性兜底，原地修改）。
+
+    LLM 绝对布局可能把正文放进模板左栏装饰区（visual.overlaps_template）。
+    相比整页退回确定性版式（丢失设计意图），优先平移回安全区：
+    x 钳到 content_start_x，w 收窄避免越出右缘。
+    """
+    safe_x = _content_start_x(template_id, page_type)
+    max_w = SLIDE_WIDTH - safe_x - 0.35
+    for element in elements:
+        if element.get("kind") not in {"textbox", "note"} or not element.get("content_ref"):
+            continue
+        try:
+            x = float(element.get("x") or 0)
+            w = float(element.get("w") or 0)
+        except (TypeError, ValueError):
+            continue
+        if x < safe_x - 0.01:
+            element["x"] = round(safe_x, 3)
+        if w > max_w:
+            element["w"] = round(max(1.0, max_w), 3)
+    return elements
+
+
 def _content_start_x(template_id: str, page_type: str = "concept") -> float:
-    """Match semantic rendering's safe content rail for asymmetric templates."""
-    if template_id == "lessonforge_deck_smart_ai":
-        return 2.95 if page_type == "cover" else 2.45
-    if template_id == "lessonforge_deck_academic":
-        return 2.2
-    return MARGIN_X
+    """模板安全内容区左边界：统一由 TEMPLATE_DECOR 装饰几何推导。
+
+    布局引擎、zones、QA（visual.overlaps_template）共用同一推导，
+    保证"摆放"与"检查"一致；不再维护每模板硬编码特例。
+    """
+    from app.renderers.presentation_builder import template_content_start_x
+
+    return template_content_start_x(template_id, page_type)
 
 
 def normalize_visual_region(

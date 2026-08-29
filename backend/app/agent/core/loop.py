@@ -420,6 +420,12 @@ async def run_agent_loop(
                     )
                     if not result.ok:
                         stats["failed_tool_calls"] += 1
+                        # 高风险工具缺少确认令牌时，领域 Runtime 负责把工具
+                        # 拒绝升级为可恢复的人工确认暂停；不能让模型在同一
+                        # 个错误上循环，最终伪装成“工具轮次耗尽”。
+                        failure_hook = getattr(runtime, "handle_tool_failure", None)
+                        if callable(failure_hook):
+                            await failure_hook(spec.key, call, result)
                         # 设置工具的结构化拒绝也必须回到领域 runtime，不能被当成无上下文失败。
                         if call.tool_name == "vs_set_video_generation_resolution":
                             mutation_hook = getattr(runtime, "record_tool_mutation", None)
@@ -457,6 +463,26 @@ async def run_agent_loop(
                 tool_rounds += 1
                 continue
             if decision.completed:
+                completion_validator = getattr(runtime, "validate_agent_completion", None)
+                if callable(completion_validator):
+                    validation_error = completion_validator(spec.key, decision)
+                    if validation_error:
+                        stats["completion_validation_failures"] = stats.get("completion_validation_failures", 0) + 1
+                        runtime.context.add_note(
+                            f"Agent {spec.key} 的完成声明未通过验收：{validation_error}"
+                        )
+                        if runtime.emitter is not None:
+                            await runtime.emitter.emit_domain(
+                                "agent.completion.rejected",
+                                agent={"id": spec.key},
+                                message="Agent 完成声明未满足本轮验收条件，要求继续执行。",
+                                payload={"reason": validation_error},
+                            )
+                        # 让轮次耗尽时进入明确失败分支，不能沿用这次被拒绝的
+                        # completed 决策把 Agent 当作已完成。
+                        decision = None
+                        tool_rounds += 1
+                        continue
                 if decision.handoff:
                     valid_keys = set(agent_registry)
                     canonical_handoff = normalize_handoff(

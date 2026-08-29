@@ -35,6 +35,7 @@ from app.agent.agents.verbatim.qa import blocking_issues as _blocking
 from app.agent.agents.verbatim.qa import fingerprint as _fingerprint
 from app.agent.agents.verbatim.qa import validate_verbatim_v2
 from app.agent.core.error import AgentError
+from app.agent.core.gates import gates_active
 from app.agent.core.loop import run_agent_loop
 from app.agent.core.state import AgentRuntimeState
 from app.agent.registry import ToolContext
@@ -42,6 +43,7 @@ from app.agent.schemas import AgentDecision, AgentSpec, PipelinePlan
 from app.core.database import SessionLocal
 from app.models.entities import AgentHumanRequest, AgentMessage, AgentRunInstruction, PipelineRun
 from app.schemas.verbatim_v2 import VERBATIM_V2, VerbatimContentV2
+from app.services.chat_attachment_service import apply_runtime_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +185,22 @@ class VerbatimAgentRuntime(AgentRuntimeState):
         if checkpoint_intent:
             self.active_intent = str(checkpoint_intent)
 
+    async def record_tool_mutation(self, _agent_key: str, _call: Any, result: Any) -> None:
+        """记录编辑工具实际影响的章节，供结果摘要与审计使用。"""
+        if not getattr(result, "ok", False):
+            return
+        output = dict(getattr(result, "output", None) or {})
+        affected = [
+            str(section_id)
+            for section_id in (
+                output.get("affected_section_ids")
+                or output.get("changed_section_ids")
+                or []
+            )
+        ]
+        if affected:
+            self.affected_section_ids = sorted(set([*self.affected_section_ids, *affected]))
+
     # ------------------------------------------------------------------
     # 意图与计划
     # ------------------------------------------------------------------
@@ -197,7 +215,9 @@ class VerbatimAgentRuntime(AgentRuntimeState):
         )
         self.intent_plan = decision
         self.active_intent = decision.intent
-        self.selected_section_ids = list(self.selected_section_ids or [])
+        # LLM 识别出的目标章节必须回写到运行态，供工具作用域、完成验收
+        # 和前端变更摘要共同使用；不能只保留前端显式选择的章节。
+        self.selected_section_ids = list(decision.target_section_ids or self.selected_section_ids or [])
         self.content_policy = "edit" if decision.mutates_document else "preserve"
         if decision.intent == "CLARIFICATION_REQUIRED":
             self.pending_clarification = {
@@ -261,11 +281,17 @@ class VerbatimAgentRuntime(AgentRuntimeState):
             if not rows:
                 return []
             merged_texts: list[str] = []
+            attachment_metadata: list[dict[str, Any]] = []
             for row in rows:
                 row.status = "merged"
                 row.applied_at = datetime.now(timezone.utc)
                 merged_texts.append(row.content or "")
+                attachment_metadata.extend((row.metadata_json or {}).get("attachments") or [])
             await db.commit()
+            if attachment_metadata:
+                await apply_runtime_attachments(
+                    db, self.course, self, {"attachments": attachment_metadata},
+                )
         if not merged_texts:
             return []
         merged = "\n".join(merged_texts)
@@ -401,37 +427,45 @@ class VerbatimAgentRuntime(AgentRuntimeState):
                     row.status = "running"
                     await db.commit()
         # 需要人工确认且尚未确认 → 创建确认请求，原地暂停。
-        if decision.requires_confirmation and not self.confirmation_tokens:
+        # relaxed 门禁模式：低置信度/破坏性关键词不再拦截，按当前意图直接执行。
+        if gates_active() and decision.requires_confirmation and not self.confirmation_tokens:
             await self._request_confirmation(decision)
             return
-        # 关键歧义：只返回澄清问题，不修改文件；本轮不创建版本。
+        # 关键歧义：strict 模式返回澄清问题，不修改文件；
+        # relaxed 模式不拦截，回退为默认内容修改意图继续执行。
         if decision.intent == "CLARIFICATION_REQUIRED":
-            self.result_status = "needs_confirmation"
-            self.dialogue_summary = (
-                f"为准确完成任务，请补充说明：{decision.clarification_question or '你的修改目标'}"
-            )
-            if self.pipeline_run is not None:
-                async with SessionLocal() as db:
-                    row = await db.get(PipelineRun, self.pipeline_run.id)
-                    if row is not None:
-                        row.status = "paused"
-                        row.checkpoint_json = {
-                            **(row.checkpoint_json or {}),
-                            "active_intent": decision.intent,
-                            "pending_clarification": dict(self.pending_clarification),
-                            **self.checkpoint_payload(),
-                        }
-                    assistant = await db.scalar(select(AgentMessage).where(
-                        AgentMessage.run_id == self.generation_run.id,
-                        AgentMessage.role == "assistant",
-                    ).order_by(AgentMessage.created_at.desc()))
-                    if assistant is not None:
-                        assistant.metadata_json = {
-                            **(assistant.metadata_json or {}),
-                            "clarification": dict(self.pending_clarification),
-                        }
-                    await db.commit()
-            return
+            if gates_active():
+                self.result_status = "needs_confirmation"
+                self.dialogue_summary = (
+                    f"为准确完成任务，请补充说明：{decision.clarification_question or '你的修改目标'}"
+                )
+                if self.pipeline_run is not None:
+                    async with SessionLocal() as db:
+                        row = await db.get(PipelineRun, self.pipeline_run.id)
+                        if row is not None:
+                            row.status = "paused"
+                            row.checkpoint_json = {
+                                **(row.checkpoint_json or {}),
+                                "active_intent": decision.intent,
+                                "pending_clarification": dict(self.pending_clarification),
+                                **self.checkpoint_payload(),
+                            }
+                        assistant = await db.scalar(select(AgentMessage).where(
+                            AgentMessage.run_id == self.generation_run.id,
+                            AgentMessage.role == "assistant",
+                        ).order_by(AgentMessage.created_at.desc()))
+                        if assistant is not None:
+                            assistant.metadata_json = {
+                                **(assistant.metadata_json or {}),
+                                "clarification": dict(self.pending_clarification),
+                            }
+                        await db.commit()
+                return
+            # 回退为默认内容修改意图，并同步运行态，保证事件与验收口径一致。
+            decision.intent = "SECTION_EDIT"
+            self.intent_plan = decision
+            self.active_intent = "SECTION_EDIT"
+            self.pending_clarification = {}
         # ANSWER_ONLY：读取与分析后直接回答，不创建新版本。
         if decision.intent == "ANSWER_ONLY":
             chain = agent_chain_for_intent("ANSWER_ONLY", self.trigger_type)
@@ -493,6 +527,57 @@ class VerbatimAgentRuntime(AgentRuntimeState):
             f"默认语速 {rate} 字/秒。如需改写某段口播、统一语气或调整语速停顿，请直接告诉我。"
         )
 
+    def _paragraph_format_requested(self) -> bool:
+        """判断教师是否明确要求把正文拆成可见的多段。"""
+        instruction = (self.context.user_instruction or "").strip()
+        return any(marker in instruction for marker in (
+            "分段", "分成几段", "拆成几段", "段落", "分行", "换行", "断句",
+            "堆成一行", "堆在一行", "全部一行", "不要一行",
+        ))
+
+    def _paragraph_format_targets(self) -> list[str]:
+        """返回本轮要求分段的章节范围；空目标表示全部章节。"""
+        if self.builder is None:
+            return []
+        all_section_ids = self.builder.all_section_ids()
+        raw_targets = list(self.selected_section_ids or [])
+        if not raw_targets and self.intent_plan is not None:
+            raw_targets = list(self.intent_plan.target_section_ids or [])
+        if not raw_targets:
+            return all_section_ids
+        targets: list[str] = []
+        for raw in raw_targets:
+            canonical = self.builder.canonical_section_id(raw) or str(raw)
+            if canonical in all_section_ids and canonical not in targets:
+                targets.append(canonical)
+        # 模型返回未知章节 ID 时不能绕过分段验收，退回全量范围并让门禁明确指出问题。
+        return targets or all_section_ids
+
+    def _paragraph_format_completion_issue(self) -> str | None:
+        """要求分段时，完成声明必须有可验证的正文换行。"""
+        if not self._paragraph_format_requested() or self.builder is None:
+            return None
+        targets = set(self._paragraph_format_targets())
+        missing = [
+            str(section.get("id"))
+            for section in self.builder.sections
+            if str(section.get("id")) in targets
+            and "\n" not in str(section.get("required_text") or "")
+        ]
+        if not missing:
+            return None
+        return (
+            "用户明确要求正文分段/换行，但以下章节的 required_text 仍没有换行："
+            f"{', '.join(missing)}。请调用 vb_update_section 实际写入分段后的 required_text，"
+            "完成前不能返回 completed。"
+        )
+
+    def validate_agent_completion(self, agent_key: str, _decision: Any) -> str | None:
+        """通用 loop 的领域完成门禁，防止 Agent 只报完成而未满足请求。"""
+        if agent_key in {"verbatim_director", "finalizer"}:
+            return self._paragraph_format_completion_issue()
+        return None
+
     async def _run_with_repair(self, chain: list[str]) -> None:
         """执行计划并处理 QA → 返修闭环（≤max_revision_rounds，指纹防空转）。"""
         plan = self._build_plan(chain)
@@ -544,7 +629,13 @@ class VerbatimAgentRuntime(AgentRuntimeState):
                 await self.emitter.revision_completed(round_index + 1, applied_changes=repair_agents)
 
     async def _collect_qa_issues(self) -> None:
-        """从 verbatim_qa 产物读取阻断问题（LLM 或 Mock 均已写入 verbatim_qa）。"""
+        """从 verbatim_qa 产物读取阻断问题（LLM 或 Mock 均已写入 verbatim_qa）。
+
+        relaxed 门禁模式：QA 结果只作为提示，不进入返修/阻断。
+        """
+        if not gates_active():
+            self.blocking_issues = []
+            return
         if self.artifacts is None:
             self.blocking_issues = []
             return
@@ -585,9 +676,24 @@ class VerbatimAgentRuntime(AgentRuntimeState):
                 retryable=True,
             ) from exc
         self.draft_content = content
+        paragraph_issue = self._paragraph_format_completion_issue()
+        # relaxed 门禁模式：分段完整性降级为提示，不再拒绝发布。
+        if paragraph_issue and gates_active():
+            self.result_status = "rejected"
+            self.publishable = False
+            self.dialogue_summary = "本轮未完成正文分段，未创建新版本；原逐字稿保持不变。"
+            if self.emitter is not None:
+                await self.emitter.emit_domain(
+                    "result.rejected",
+                    agent={"id": "verbatim_director"},
+                    message=self.dialogue_summary,
+                    payload={"reason": paragraph_issue, "target_section_ids": self._paragraph_format_targets()},
+                )
+            return
         source_content = self.source_artifact.content_json if self.source_artifact else None
         contract_issues = self._mutation_contract_issues(source_content, content)
-        if contract_issues:
+        # relaxed 门禁模式：修改契约降级为 diagnostics，不再以“超出已确认范围”拒绝发布。
+        if contract_issues and gates_active():
             self.result_status = "rejected"
             self.publishable = False
             self.dialogue_summary = "本轮修改超出已确认的范围，原逐字稿保持不变。"

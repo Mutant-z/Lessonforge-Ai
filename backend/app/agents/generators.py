@@ -25,7 +25,7 @@ from app.schemas.artifact import (
 )
 from app.schemas.blueprint import (
     AssessmentItem, CourseBlueprintSchema, CourseIdentity, KnowledgePoint, LearningAnalysis,
-    LearningObjective, TimelineSegment,
+    LearningObjective, TimelineSegment, normalize_blueprint_references,
 )
 
 
@@ -92,6 +92,7 @@ def make_blueprint(course: CourseProject) -> CourseBlueprintSchema:
 
 
 def make_lesson_plan(bp: CourseBlueprintSchema) -> LessonPlanContent:
+    bp = normalize_blueprint_references(bp)
     return LessonPlanContent(
         content_analysis=f"本课围绕“{bp.course_identity.title}”组织内容，由概念理解推进到情境应用。",
         learner_analysis="；".join(bp.learning_analysis.learner_characteristics),
@@ -752,6 +753,7 @@ def make_seedance_video_script(
     lesson_plan: LessonPlanContent,
 ) -> SeedanceVideoScriptContent:
     """Create a deterministic V3 mock without consulting PPT content."""
+    bp = normalize_blueprint_references(bp)
     total = float(bp.course_identity.duration_minutes * 60)
     count = max(1, math.ceil(total / 12))
     while count > 1 and total / count < 8:
@@ -765,6 +767,12 @@ def make_seedance_video_script(
         raise ValueError("教学设计缺少教学环节，无法生成视频脚本")
     objective_ids = [item.id for item in bp.objectives]
     knowledge_ids = [item.id for item in bp.knowledge_points]
+    stage_objectives_by_id = {item.segment_id: [] for item in bp.timeline}
+    for index, objective in enumerate(bp.objectives):
+        activity_ids = objective.activity_ids or [bp.timeline[index % len(bp.timeline)].segment_id]
+        for activity_id in activity_ids:
+            if activity_id in stage_objectives_by_id:
+                stage_objectives_by_id[activity_id].append(objective.id)
     scenes: list[SeedanceVideoScene] = []
     cursor = 0.0
     for index in range(count):
@@ -775,7 +783,7 @@ def make_seedance_video_script(
             bp.timeline[min(index * len(bp.timeline) // count, len(bp.timeline) - 1)],
         )
         stage = next((item for item in lesson_plan.stages if item.id == timeline.segment_id), lesson_plan.stages[0])
-        stage_objectives = [item.id for item in bp.objectives if stage.id in item.activity_ids] or objective_ids[:1]
+        stage_objectives = stage_objectives_by_id.get(stage.id) or stage_objectives_by_id.get(timeline.segment_id) or objective_ids[:1]
         stage_knowledge = list(dict.fromkeys(
             knowledge_id for item in bp.objectives if item.id in stage_objectives
             for knowledge_id in item.knowledge_point_ids

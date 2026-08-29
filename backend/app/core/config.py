@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
     llm_timeout_seconds: int = 180
     llm_max_tokens: int = 16000
+    # A project initialization fans out into several large structured requests.
+    # Keep the fan-out bounded so local gateways and SQLite are not flooded by
+    # six long-running Agent pipelines at the same instant.
+    initial_generation_concurrency: int = 2
     ppt_agent_runtime_enabled: bool = True
     # 教学设计 Agent V2 动态工具化流水线开关；关闭时回退旧单次生成路径。
     lesson_plan_agent_runtime_enabled: bool = True
@@ -34,6 +38,9 @@ class Settings(BaseSettings):
     verbatim_agent_runtime_enabled: bool = True
     # 课后练习 Agent V2 动态工具化流水线开关（意图识别 + 多角色 LLM 工具循环 +
     # LLM 语义质询 + QA 返修）；关闭时回退旧单次生成 + 后置质检路径。默认开启。
+    # Agent 交互门禁模式：relaxed（默认）关闭意图确认/作用域/发布拦截等门禁，
+    # 交互修改按教师意图直接执行；strict 保留全部历史门禁行为用于回滚对照。
+    agent_gates_mode: str = "relaxed"
     exercise_agent_runtime_enabled: bool = True
     ffmpeg_binary: str = ""
     ffprobe_binary: str = ""

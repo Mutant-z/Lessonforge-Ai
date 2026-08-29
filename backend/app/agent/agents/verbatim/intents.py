@@ -108,7 +108,8 @@ KEYWORD_INTENTS: list[tuple[tuple[str, ...], str]] = [
     (("语气", "表达", "口吻", "措辞"), "TONE_EDIT"),
     (("整体", "统一", "风格", "批量"), "STYLE_EDIT"),
     (("互动", "提问", "思考提示", "检查"), "INTERACTION_EDIT"),
-    (("口播", "台词", "正文", "必讲", "改写", "重写", "更口语", "说", "讲"), "SECTION_EDIT"),
+    (("口播", "台词", "正文", "必讲", "改写", "重写", "更口语", "说", "讲",
+      "分段", "分成几段", "拆成几段", "段落", "分行", "换行", "断句", "堆成一行", "不要一行"), "SECTION_EDIT"),
     (("检查", "质量", "问题", "评审", "门禁", "QA", "是否通过"), "QA_ONLY"),
 ]
 
@@ -278,7 +279,9 @@ async def infer_verbatim_intent(
         "只返回符合 Schema 的 JSON，不展示隐藏推理。课程名称/课程标题/课名属于课程项目元数据，不是章节标题或口播正文；"
         "课程改名必须选择 COURSE_METADATA_UPDATE，并在 course_title 输出新名称，mutation_domain=course_metadata；"
         "没有新名称时选择 CLARIFICATION_REQUIRED。口播/语气/停顿修改不要选择 STRUCTURE_EDIT；"
-        "只有明确要求增删/移动/重排章节时才选择。删除章节或解绑场景 → destructive=true 且 requires_confirmation=true。"
+        "只有明确要求增删/移动/重排章节时才选择。用户说分段、分成几段、拆段、分行、换行、断句或不要堆成一行，"
+        "表示要修改章节的 required_text 排版，必须选择 SECTION_EDIT，并将其作为可验收的正文修改；"
+        "删除章节或解绑场景 → destructive=true 且 requires_confirmation=true。"
     )
     prompt = (
         f"教师指令：\n{instruction}\n"

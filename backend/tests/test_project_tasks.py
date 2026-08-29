@@ -4,6 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.v1.projects import _generation_event_payload
+from app.core.database import SessionLocal
+from app.models.entities import Artifact, ArtifactAsset, CourseProject
 from app.services.course_task_service import is_publishable_video_artifact
 
 
@@ -33,6 +35,19 @@ def test_video_task_file_requires_native_renderer_output():
     )
     assert not is_publishable_video_artifact(legacy)
     assert is_publishable_video_artifact(native)
+
+
+def test_video_task_file_accepts_ready_partial_clip():
+    partial = SimpleNamespace(
+        artifact_type="video_generation",
+        content_json={
+            "schema_version": "3.0",
+            "mode": "seedance_native",
+            "outputs": {},
+            "scenes": [{"status": "ready", "video_asset_id": "clip-1"}],
+        },
+    )
+    assert is_publishable_video_artifact(partial)
 
 
 async def wait_for_project(client, headers, course_id, predicate, attempts=200):
@@ -92,7 +107,7 @@ async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_ta
         auth_headers,
         course_id,
         lambda item: all(
-            task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
+            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
             for task in item["tasks"]
         ),
     )
@@ -102,20 +117,7 @@ async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_ta
     ]
     assert all(task["current_artifact"] for task in project["tasks"] if task["task_type"] != "video_generation")
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
-    assert video_task["status"] == "waiting_dependency"
-    assert video_task["current_artifact"] is None
-    script_approval = await client.post(
-        f"/api/v1/courses/{course_id}/tasks/video_script/approve",
-        headers=auth_headers,
-    )
-    assert script_approval.status_code == 200, script_approval.text
-    project = await wait_for_project(
-        client, auth_headers, course_id,
-        lambda item: next(
-            task for task in item["tasks"] if task["task_type"] == "video_generation"
-        )["status"] == "ready_to_generate",
-    )
-    video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
+    assert video_task["status"] == "ready_to_generate"
     assert video_task["current_artifact"] is None
     assert project["quality"]["score"] is not None
     assert project["event_cursor"] > 0
@@ -128,6 +130,93 @@ async def test_intent_confirmation_creates_six_content_tasks_and_manual_video_ta
     assert task_response.headers["cache-control"] == "private, no-store, max-age=0"
     assert task_response.headers["pragma"] == "no-cache"
     assert task_response.headers["expires"] == "0"
+
+    artifacts = {
+        task["task_type"]: task["current_artifact"]
+        for task in project["tasks"]
+        if task["current_artifact"]
+    }
+    for artifact_type in ("task_sheet", "exercise", "video_script", "verbatim"):
+        original = artifacts[artifact_type]
+        restored = await client.post(
+            f"/api/v1/artifacts/{original['id']}/restore", headers=auth_headers,
+        )
+        assert restored.status_code == 201, restored.text
+        payload = restored.json()
+        assert payload["version"] == original["version"] + 1
+        assert payload["status"] == "draft"
+        assert payload["change_summary"] == f"恢复自 V{original['version']}"
+        assert payload["content_json"] == original["content_json"]
+        assert payload["source_versions_json"] == original["source_versions_json"]
+        history = await client.get(
+            f"/api/v1/artifacts/{payload['id']}/versions", headers=auth_headers,
+        )
+        assert [item["version"] for item in history.json()] == [payload["version"], original["version"]]
+
+    async with SessionLocal() as db:
+        course = await db.get(CourseProject, course_id)
+        final_asset = ArtifactAsset(
+            owner_id=course.owner_id,
+            course_id=course_id,
+            asset_type="video_final",
+            relative_path="generated/test/final.mp4",
+            mime_type="video/mp4",
+            checksum="restore-video-final",
+            status="approved",
+        )
+        db.add(final_asset)
+        await db.flush()
+        video_source = Artifact(
+            course_id=course_id,
+            artifact_type="video_generation",
+            version=1,
+            blueprint_version=artifacts["video_script"]["blueprint_version"],
+            content_json={
+                "schema_version": "3.0",
+                "mode": "seedance_native",
+                "outputs": {"final_asset_id": final_asset.id},
+            },
+            content_markdown="# 原生有声视频",
+            status="approved",
+            source_versions_json={"video_script": 2},
+        )
+        db.add(video_source)
+        await db.flush()
+        final_asset.artifact_id = video_source.id
+        final_asset_id = final_asset.id
+        video_source_id = video_source.id
+        await db.commit()
+
+    restored_video = await client.post(
+        f"/api/v1/artifacts/{video_source_id}/restore", headers=auth_headers,
+    )
+    assert restored_video.status_code == 201, restored_video.text
+    assert restored_video.json()["version"] == 2
+    assert restored_video.json()["content_json"]["outputs"]["final_asset_id"] == final_asset_id
+
+    async with SessionLocal() as db:
+        missing_media = Artifact(
+            course_id=course_id,
+            artifact_type="video_generation",
+            version=3,
+            blueprint_version=artifacts["video_script"]["blueprint_version"],
+            content_json={
+                "schema_version": "3.0",
+                "mode": "seedance_native",
+                "outputs": {"final_asset_id": "missing-final-asset"},
+            },
+            content_markdown="# 已丢失媒体的视频",
+            status="draft",
+            source_versions_json={"video_script": 2},
+        )
+        db.add(missing_media)
+        await db.flush()
+        missing_media_id = missing_media.id
+        await db.commit()
+    blocked_restore = await client.post(
+        f"/api/v1/artifacts/{missing_media_id}/restore", headers=auth_headers,
+    )
+    assert blocked_restore.status_code == 409
 
     repeated = await client.post(
         f"/api/v1/course-intakes/{session['id']}/confirm",
@@ -164,12 +253,12 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
         auth_headers,
         course["id"],
         lambda item: all(
-            task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
+            task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
             for task in item["tasks"]
         ),
     )
     assert all(
-        task["status"] == ("waiting_dependency" if task["task_type"] == "video_generation" else "review")
+        task["status"] == ("ready_to_generate" if task["task_type"] == "video_generation" else "review")
         for task in project["tasks"]
     ), project
     sent = await client.post(
@@ -199,7 +288,7 @@ async def test_task_message_creates_version_and_marks_dependents_stale(client, a
     # Seedance V3 is based on the lesson plan, not PPT. Editing PPT must not
     # invalidate the native video script, generated video, or scene transcript.
     assert statuses["video_script"] == "review"
-    assert statuses["video_generation"] == "waiting_dependency"
+    assert statuses["video_generation"] == "ready_to_generate"
     assert statuses["verbatim"] == "review"
 
     from sqlalchemy import select

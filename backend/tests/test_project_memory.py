@@ -20,7 +20,7 @@ from app.models.entities import (
     ProjectMemoryItem,
     ProjectMemoryRevision,
 )
-from app.services.course_task_service import CONTENT_TASK_TYPES, schedule_ready_tasks
+from app.services.course_task_service import CONTENT_TASK_TYPES, register_artifact_version, schedule_ready_tasks
 from app.services.project_knowledge_service import _artifact_keywords
 
 
@@ -87,7 +87,7 @@ async def test_six_content_agents_parallel_generation_and_memory_writes(client, 
     # 六类内容 Agent 全部生成完成（并行启动，无需等待彼此产物）。
     content = {task["task_type"]: task for task in project["tasks"] if task["task_type"] in CONTENT_TASK_TYPES}
     assert set(content) == CONTENT_TASK_TYPES
-    # 视频生成仍受运行输入契约约束：脚本确认前保持 waiting_dependency。
+    # 视频生成只要求最新脚本有效，不要求脚本先确认。
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
     assert video_task["status"] in {"waiting_dependency", "ready_to_generate"}
     # 每个内容 Agent 都携带可选参考来源与记忆版本字段。
@@ -247,7 +247,7 @@ async def test_video_script_and_verbatim_generate_without_upstreams(client, auth
 
 @pytest.mark.asyncio
 async def test_video_generation_input_contract_not_blocking(client, auth_headers):
-    """视频生成仍要求 V3/V4 脚本（运行输入契约），但缺失时不阻塞其他 Agent 生成。"""
+    """最新有效 V3/V4 脚本无需确认即可解锁视频生成。"""
     course_id = await _confirmed_course(client, auth_headers)
     project = await wait_for_project(
         client, auth_headers, course_id,
@@ -258,23 +258,59 @@ async def test_video_generation_input_contract_not_blocking(client, auth_headers
         ),
     )
     video_task = next(task for task in project["tasks"] if task["task_type"] == "video_generation")
-    # 其他内容 Agent 全部生成完成，只有视频生成还停留在输入契约等待。
-    assert video_task["status"] == "waiting_dependency"
-    assert video_task["required_input_contract"] == {"video_script": "执行前必须存在 Seedance V3/V4 视频脚本"}
+    assert video_task["status"] == "ready_to_generate"
+    assert video_task["required_input_contract"] == {
+        "video_script": "执行前必须存在最新且有效的 Seedance V3/V4 视频脚本"
+    }
     assert not video_task["current_artifact"]
-    # 确认视频脚本后，视频生成进入 ready_to_generate。
-    approved = await client.post(
-        f"/api/v1/courses/{course_id}/tasks/video_script/approve",
-        headers=auth_headers,
+
+    script_task = next(task for task in project["tasks"] if task["task_type"] == "video_script")
+    valid_script = script_task["current_artifact"]
+    async with SessionLocal() as db:
+        invalid_script = Artifact(
+            course_id=course_id,
+            artifact_type="video_script",
+            version=valid_script["version"] + 1,
+            blueprint_version=valid_script["blueprint_version"],
+            content_json={"schema_version": "2.0", "scenes": []},
+            content_markdown="# 旧版视频脚本",
+            status="draft",
+            model_name=valid_script["model_name"],
+            prompt_version=valid_script["prompt_version"],
+            change_summary="构造旧版脚本",
+            source_versions_json=valid_script["source_versions_json"],
+            agent_profile_id=valid_script["agent_profile_id"],
+        )
+        db.add(invalid_script)
+        await db.flush()
+        await register_artifact_version(db, invalid_script)
+        invalid_version = invalid_script.version
+        await db.commit()
+
+    waiting = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
+    waiting_video = next(
+        task for task in waiting["tasks"] if task["task_type"] == "video_generation"
     )
-    assert approved.status_code == 200, approved.text
-    project = await wait_for_project(
-        client, auth_headers, course_id,
-        lambda item: next(
-            task for task in item["tasks"] if task["task_type"] == "video_generation"
-        )["status"] == "ready_to_generate",
+    assert waiting_video["status"] == "waiting_dependency"
+    assert waiting_video["error"]["code"] == "video_script_invalid"
+
+    restored = await client.post(
+        f"/api/v1/artifacts/{valid_script['id']}/restore", headers=auth_headers,
     )
-    assert next(task for task in project["tasks"] if task["task_type"] == "video_generation")["status"] == "ready_to_generate"
+    assert restored.status_code == 201, restored.text
+    restored_script = restored.json()
+    assert restored_script["version"] == invalid_version + 1
+    assert restored_script["status"] == "draft"
+    assert restored_script["change_summary"] == f"恢复自 V{valid_script['version']}"
+    assert restored_script["content_json"] == valid_script["content_json"]
+    assert restored_script["source_versions_json"] == valid_script["source_versions_json"]
+
+    ready_again = (await client.get(f"/api/v1/courses/{course_id}/project", headers=auth_headers)).json()
+    ready_video = next(
+        task for task in ready_again["tasks"] if task["task_type"] == "video_generation"
+    )
+    assert ready_video["status"] == "ready_to_generate"
+    assert ready_video["error"] is None
 
 
 @pytest.mark.asyncio

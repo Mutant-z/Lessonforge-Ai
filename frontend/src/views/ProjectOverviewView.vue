@@ -14,10 +14,12 @@ const courseId = route.params.id as string;
 const showMemory = ref(false);
 const projectError = ref('');
 
-const approvedCount = computed(() => store.tasks.filter(task => task.status === 'approved').length);
-const activeCount = computed(() => store.tasks.filter(task => ['queued', 'running'].includes(task.status)).length);
-const attentionCount = computed(() => store.tasks.filter(task => ['failed', 'stale'].includes(task.status)).length);
-const reviewCount = computed(() => store.tasks.filter(task => task.status === 'review').length);
+const deliveryTasks = computed(() => store.tasks.filter(task => task.task_type !== 'video_generation'));
+const completion = computed(() => deliveryTasks.value.length ? Math.round(deliveryTasks.value.reduce((sum, task) => sum + task.progress, 0) / deliveryTasks.value.length) : 0);
+const approvedCount = computed(() => deliveryTasks.value.filter(task => task.status === 'approved').length);
+const activeCount = computed(() => deliveryTasks.value.filter(task => ['queued', 'running'].includes(task.status)).length);
+const attentionCount = computed(() => deliveryTasks.value.filter(task => ['failed', 'stale'].includes(task.status)).length);
+const reviewCount = computed(() => deliveryTasks.value.filter(task => task.status === 'review').length);
 
 async function loadProject() {
   projectError.value = '';
@@ -51,12 +53,12 @@ onUnmounted(() => store.disconnect());
       <!-- Unified Single Workbench Card Container -->
       <OverviewConsoleWorkbench
         :project="store.project"
-        :completion="store.completion"
+        :completion="completion"
         :approved-count="approvedCount"
         :active-count="activeCount"
         :attention-count="attentionCount"
         :review-count="reviewCount"
-        :tasks="store.tasks"
+        :tasks="deliveryTasks"
         :course-id="courseId"
         @retry-planning="store.retryPlanning(courseId)"
         @initialize-agents="store.initializeAgents(courseId)"

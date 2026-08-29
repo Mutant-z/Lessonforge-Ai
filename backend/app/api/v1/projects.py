@@ -46,6 +46,7 @@ from app.services.agent_initialization_service import (
     initialization_summary,
     start_initialization_run,
 )
+from app.services.chat_attachment_service import attachment_metadata, validate_attachment_ids
 
 router = APIRouter(tags=["课程项目任务"])
 
@@ -67,6 +68,7 @@ class TaskMessageRequest(BaseModel):
     selected_section_ids: list[str] = Field(default_factory=list, max_length=50)
     active_section_id: str | None = None
     mode: str = Field(default="auto", pattern="^(auto|content|structure|timing|qa)$")
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class TaskModelRequest(BaseModel):
@@ -108,6 +110,12 @@ async def _owned_task(course_id: str, task_type: str, user: User, db: AsyncSessi
     if not task:
         raise HTTPException(404, "项目任务不存在")
     return task
+
+
+async def _validated_chat_attachment_metadata(
+    db: AsyncSession, user: User, course_id: str, attachment_ids: list[str] | None,
+) -> dict:
+    return attachment_metadata(await validate_attachment_ids(db, user, course_id, attachment_ids))
 
 
 async def _cancel_active_task(db: AsyncSession, task: CourseTask) -> dict:
@@ -312,6 +320,7 @@ async def get_task(course_id: str, task_type: str, user: User = Depends(current_
         "status": row.status,
         "artifact_id": row.artifact_id,
         "run_id": row.run_id,
+        "metadata": row.metadata_json or {},
         "created_at": row.created_at,
     } for row in rows]
     payload["model_config_id"] = config.id if config else None
@@ -401,6 +410,15 @@ async def dispatch_task_run_action(db: AsyncSession, task: CourseTask, action: s
 @router.post("/courses/{course_id}/tasks/{task_type}/messages", status_code=202)
 async def send_task_message(course_id: str, task_type: str, payload: TaskMessageRequest, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     task = await _owned_task(course_id, task_type, user, db)
+    if task_type == "video_generation":
+        from app.api.v1.video_projects import VideoAgentMessageRequest, create_video_agent_message
+
+        return await create_video_agent_message(
+            course_id,
+            VideoAgentMessageRequest(content=payload.content),
+            user,
+            db,
+        )
     if not task.current_artifact_id:
         raise HTTPException(409, "任务文件尚未生成")
     artifact = await db.get(Artifact, task.current_artifact_id)
@@ -414,6 +432,7 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
         content=payload.content.strip(),
         status="pending",
     )
+    attachment_meta = await _validated_chat_attachment_metadata(db, user, course_id, payload.attachment_ids)
     if task_type in {"lesson_plan", "exercise"} and any((
         payload.selected_section_ids, payload.active_section_id, payload.mode != "auto",
     )):
@@ -421,11 +440,11 @@ async def send_task_message(course_id: str, task_type: str, payload: TaskMessage
             "selected_section_ids": list(payload.selected_section_ids),
             "active_section_id": payload.active_section_id,
             "mode": payload.mode,
+            **attachment_meta,
         }
+    elif attachment_meta:
+        message.metadata_json = attachment_meta
     db.add(message)
-    if task_type == "video_generation":
-        await db.rollback()
-        raise HTTPException(409, "原生有声视频片段修改必须先在片段编辑器中获取并确认报价")
     try:
         run = await create_task_run(db, task, "message", message)
     except ValueError as exc:
@@ -475,8 +494,6 @@ async def change_task_model(course_id: str, task_type: str, payload: TaskModelRe
         video_config = await owned_model_config(db, user.id, payload.video_model_config_id)
         if "video_generation" not in (video_config.capabilities_json or []):
             raise HTTPException(422, "所选模型未声明视频生成能力")
-        if video_config.model_category != "video":
-            raise HTTPException(422, "所选配置不是视频模型")
         if task_type == "video_generation" and "native_audio_video_generation" not in (video_config.capabilities_json or []):
             raise HTTPException(422, "视频生成任务只接受声明原生有声视频能力的模型配置")
         if not media_transport_supports(video_config.provider, video_config.api_mode, "video_generation"):
@@ -540,9 +557,7 @@ async def approve_task(course_id: str, task_type: str, user: User = Depends(curr
     tasks = list(await db.scalars(select(CourseTask).where(CourseTask.course_id == course_id)))
     course = await owned_course(course_id, user, db)
     content_ready = all(item.status == "approved" for item in tasks if item.task_type in CONTENT_TASK_TYPES)
-    video_task = next((item for item in tasks if item.task_type == "video_generation"), None)
-    video_ready = not video_task or video_task.status in {"ready_to_generate", "approved"}
-    course.status = "completed" if content_ready and video_ready else "teacher_review"
+    course.status = "completed" if content_ready else "teacher_review"
     await db.commit()
     if task_type == "video_script":
         await schedule_ready_tasks(course_id)

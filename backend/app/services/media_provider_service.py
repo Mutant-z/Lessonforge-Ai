@@ -42,8 +42,8 @@ class MediaProviderError(RuntimeError):
 
 MEDIA_CAPABILITY_API_MODES = {
     "image_generation": {"openai_images", "google_gemini_image", "custom_image_http", "mock_media"},
-    "video_generation": {"custom_video_async_http", "volcengine_ark_video", "gemini_interactions_video", "mock_media"},
-    "native_audio_video_generation": {"volcengine_ark_video", "gemini_interactions_video", "mock_media"},
+    "video_generation": {"protocol_video", "custom_video_async_http", "volcengine_ark_video", "gemini_interactions_video", "openai_chat_video", "mock_media"},
+    "native_audio_video_generation": {"protocol_video", "volcengine_ark_video", "gemini_interactions_video", "openai_chat_video", "mock_media"},
     "speech_recognition": {"volcengine_asr", "mock_media"},
     "speech_generation": {"custom_speech_http", "mock_media"},
     "media_composition": {"local_ffmpeg", "mock_media"},

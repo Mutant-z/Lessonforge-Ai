@@ -4,11 +4,13 @@
 复用 course_task_service._publish_task_event 的「短事务逐条提交」模式，
 让 SSE 端点立即观察到事件。
 """
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.core.database import SessionLocal
 from app.models.entities import AgentMessage, GenerationRun, GenerationEvent, PipelineEvent, PipelineRun
@@ -19,6 +21,7 @@ from app.models.entities import AgentMessage, GenerationRun, GenerationEvent, Pi
 _THOUGHT_FLUSH_INTERVAL = 0.12   # 秒
 _THOUGHT_FLUSH_CHARS = 400       # 字符
 _THOUGHT_BUFFERS: dict[str, dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
 
 
 class PipelineEventEmitter:
@@ -75,20 +78,33 @@ class PipelineEventEmitter:
         """短事务写入 generation_events + pipeline_events，返回 generation_events.id。"""
         self._clock += 1
         payload = self._base(**data)
-        async with SessionLocal() as db:
-            gen = GenerationEvent(run_id=self.generation_run_id, event_type=event_type, data_json=payload)
-            db.add(gen)
-            await db.flush()
-            sequence = int(gen.id)
-            payload = {**payload, "sequence": sequence, "event_id": sequence}
-            gen.data_json = payload
-            if self.pipeline_run_id:
-                db.add(PipelineEvent(
-                    pipeline_run_id=self.pipeline_run_id, event_type=event_type,
-                    sequence=sequence, data_json={**payload, "generation_event_id": sequence},
-                ))
-            await db.commit()
-            return sequence
+        try:
+            async with SessionLocal() as db:
+                gen = GenerationEvent(run_id=self.generation_run_id, event_type=event_type, data_json=payload)
+                db.add(gen)
+                await db.flush()
+                sequence = int(gen.id)
+                payload = {**payload, "sequence": sequence, "event_id": sequence}
+                gen.data_json = payload
+                if self.pipeline_run_id:
+                    db.add(PipelineEvent(
+                        pipeline_run_id=self.pipeline_run_id, event_type=event_type,
+                        sequence=sequence, data_json={**payload, "generation_event_id": sequence},
+                    ))
+                await db.commit()
+                return sequence
+        except OperationalError as exc:
+            # Event rows are observability, not domain state.  A pipeline tool
+            # can be executing inside a different SQLite write transaction;
+            # awaiting this short event transaction would otherwise turn a
+            # harmless SSE update into a tool/task failure (or self-deadlock).
+            if "database is locked" not in str(exc).lower():
+                raise
+            logger.warning(
+                "Skipped pipeline event while SQLite writer was busy",
+                extra={"event_type": event_type, "generation_run_id": self.generation_run_id},
+            )
+            return 0
 
     async def pipeline_started(self, trigger_type: str = ""):
         return await self.emit("pipeline_started", trigger_type=trigger_type,

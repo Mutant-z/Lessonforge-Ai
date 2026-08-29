@@ -9,7 +9,6 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'select', version: Artifact): void;
   (e: 'restore', version: Artifact): void;
   (e: 'close'): void;
 }>();
@@ -49,7 +48,6 @@ function isContentAnomalous(version: Artifact): boolean {
         :key="v.id"
         class="version-item-card"
         :class="{ active: v.version === currentVersion }"
-        @click="emit('select', v)"
       >
         <div class="v-meta">
           <span class="v-tag">Version {{ v.version }}</span>
@@ -85,7 +83,6 @@ function isContentAnomalous(version: Artifact): boolean {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  cursor: pointer;
   transition: all var(--motion-fast);
 }
 

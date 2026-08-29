@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.event_protocol import canonical_event
 from app.agent.events import PipelineEventEmitter
 from app.api.deps import current_user, owned_course
-from app.api.v1.projects import _owned_task
+from app.api.v1.projects import _owned_task, _validated_chat_attachment_metadata
 from app.core.database import SessionLocal, get_db
 from app.models.entities import (
     AgentMessage, Artifact, CourseTask, GenerationEvent, GenerationRun, PipelineRun,
@@ -48,6 +48,7 @@ class CreateRunRequest(BaseModel):
     modality: str = Field(default="auto", description="auto|layout|text|image")
     active_slide_id: str | None = Field(default=None, max_length=120)
     polish_options: PolishOptions = Field(default_factory=PolishOptions)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class InstructionRequest(BaseModel):
@@ -58,6 +59,7 @@ class InstructionRequest(BaseModel):
     modality: str = Field(default="auto", description="auto|layout|text|image")
     active_slide_id: str | None = Field(default=None, max_length=120)
     polish_options: PolishOptions = Field(default_factory=PolishOptions)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=5)
 
 
 class HumanResponseRequest(BaseModel):
@@ -77,15 +79,18 @@ def _target_slide_ids(payload: CreateRunRequest | InstructionRequest) -> list[st
     return list(dict.fromkeys(str(value) for value in values if str(value)))
 
 
-def _message_metadata(payload: CreateRunRequest | InstructionRequest) -> dict:
+def _message_metadata(payload: CreateRunRequest | InstructionRequest, attachments: list[dict[str, Any]] | None = None) -> dict:
     targets = _target_slide_ids(payload)
-    return {
+    metadata = {
         "target_slide_ids": targets,
         "selected_slide_ids": targets,
         "active_slide_id": payload.active_slide_id,
         "modality": payload.modality,
         "polish_options": payload.polish_options.model_dump(exclude_none=True),
     }
+    if attachments:
+        metadata["attachments"] = attachments
+    return metadata
 
 
 _NO_CHANGE_HUMAN_CHOICES = {
@@ -195,12 +200,18 @@ async def _owned_run(run_id: str, user: User, db: AsyncSession) -> tuple[Generat
 
 
 def _run_payload(generation: GenerationRun, pipeline: PipelineRun) -> dict:
+    plan = pipeline.plan_json or {}
     return {
         "id": generation.id, "pipeline_run_id": pipeline.id, "course_id": generation.course_id,
         "status": pipeline.status, "current_agent": pipeline.current_agent,
-        "current_step_index": pipeline.current_step_index, "plan": pipeline.plan_json,
+        "current_step_index": pipeline.current_step_index, "plan": plan,
         "token_usage": pipeline.token_usage_json, "revision_round": pipeline.revision_round,
         "error": pipeline.error_json,
+        "resolved_request": plan.get("resolved_request"),
+        "change_set": plan.get("change_set"),
+        "diagnostics": plan.get("diagnostics") or [],
+        "fallback_used": bool(plan.get("fallback_used")),
+        "result_status": plan.get("result_status"),
     }
 
 
@@ -213,9 +224,10 @@ async def create_run(payload: CreateRunRequest, user: User = Depends(current_use
     if payload.instruction:
         if not task.current_artifact_id:
             raise HTTPException(409, "PPT 尚未生成，不能提交修改指令")
+        attachment_meta = await _validated_chat_attachment_metadata(db, user, payload.course_id, payload.attachment_ids)
         message = AgentMessage(
             course_id=payload.course_id, task_id=task.id, module_type="ppt", role="user",
-            content=payload.instruction.strip(), metadata_json=_message_metadata(payload), status="pending",
+            content=payload.instruction.strip(), metadata_json=_message_metadata(payload, attachment_meta.get("attachments")), status="pending",
         )
         db.add(message)
         trigger = "message"
@@ -279,7 +291,8 @@ async def enqueue_instruction(run_id: str, payload: InstructionRequest, user: Us
     if pipeline.status not in {"queued", "running", "pausing", "paused"}:
         raise HTTPException(409, "当前 Run 已结束，请创建新的修改 Run")
     targets = _target_slide_ids(payload)
-    metadata = _message_metadata(payload)
+    attachment_meta = await _validated_chat_attachment_metadata(db, user, generation.course_id, payload.attachment_ids)
+    metadata = _message_metadata(payload, attachment_meta.get("attachments"))
     content = payload.content.strip()
     row = PPTAgentInstruction(
         pipeline_run_id=pipeline.id, user_id=user.id, content=content,
@@ -315,6 +328,7 @@ async def enqueue_instruction(run_id: str, payload: InstructionRequest, user: Us
         "content": user_message.content,
         "run_id": generation.id,
         "status": "completed",
+        "metadata": user_message.metadata_json or {},
     }
     await db.commit()
     emitter = await PipelineEventEmitter.for_run(generation, pipeline)
@@ -577,6 +591,7 @@ async def human_response(run_id: str, payload: HumanResponseRequest, user: User 
         "resolution": "continued",
         "continuation_run_id": continuation_run.id,
         "continuation_message_id": continuation_message.id,
+        "resolved_command": confirmed_resolved_command,
     })
     row.status = "resolved"
     row.response_json = resolution

@@ -10,6 +10,7 @@ import { ElMessage } from 'element-plus';
 import { VideoPause, VideoPlay } from '@element-plus/icons-vue';
 import { pipelineApi } from '../../../api/pipeline';
 import type { LessonPlanMode } from '../../../api/pipeline';
+import type { ChatAttachment } from '../../../types/project';
 import { useProjectStore } from '../../../stores/project';
 import { usePipelineStore } from '../../../stores/pipeline';
 import { useModelConfigStore } from '../../../stores/modelConfigs';
@@ -96,12 +97,12 @@ async function loadDetail() {
 }
 
 /** 运行中保持输入框可用——运行中指令排队（queued/merged 展示），不伪装成新的独立运行。 */
-async function send(content: string, modality: string = 'auto') {
+async function send(content: string, modality: string = 'auto', attachments: ChatAttachment[] = []) {
   const modeValue = (['auto', 'content', 'structure', 'timing', 'qa'].includes(modality) ? modality : 'auto') as LessonPlanMode;
   const runId = pipelineStore.run?.generation_run_id || task.value?.active_run_id;
   if (isRunning.value && runId) {
     const result = await pipelineApi.enqueueExerciseInstruction(
-      props.courseId, runId, content, selectedSectionIds.value, modeValue, false,
+      props.courseId, runId, content, selectedSectionIds.value, modeValue, false, attachments.map(item => item.id),
     );
     queuedCount.value += 1;
     ElMessage.success(result.status === 'resumed' ? '已恢复运行并加入队列' : '指令已加入执行队列，将在安全边界合并');
@@ -112,7 +113,7 @@ async function send(content: string, modality: string = 'auto') {
   if (paused.value && runId) {
     // 暂停后发送：先恢复运行，再排队合并到当前 Run（同一 checkpoint 恢复）。
     const result = await pipelineApi.enqueueExerciseInstruction(
-      props.courseId, runId, content, selectedSectionIds.value, modeValue, true,
+      props.courseId, runId, content, selectedSectionIds.value, modeValue, true, attachments.map(item => item.id),
     );
     queuedCount.value += 1;
     ElMessage.success('已恢复运行并加入队列');
@@ -123,7 +124,7 @@ async function send(content: string, modality: string = 'auto') {
     return;
   }
   pipelineStore.beginRun();
-  await projectStore.createExerciseRun(props.courseId, content, selectedSectionIds.value, modeValue);
+  await projectStore.createExerciseRun(props.courseId, content, selectedSectionIds.value, modeValue, attachments);
   await loadDetail();
   clearTargetSections();
 }
@@ -163,6 +164,10 @@ async function handleHumanResponse(requestId: string, choice: string, data: Reco
 
 function setModel(modelId: string) {
   void projectStore.setTaskModel(props.courseId, props.taskType, modelId);
+}
+
+function setVisionModel(modelId: string) {
+  void projectStore.setTaskVisionModel(props.courseId, props.taskType, modelId);
 }
 
 function startResize(e: MouseEvent | TouchEvent) {
@@ -307,17 +312,21 @@ watch(
       />
 
       <AgentComposer
+        :course-id="props.courseId"
         :target-slide="activeSectionId as any"
         :target-slides="selectedSectionIds as any"
         :is-running="isRunning"
         :pausing="pausing || pipelineStore.pauseLoading"
         :model-config-id="task?.model_config_id"
+        :vision-model-config-id="task?.vision_model_config_id"
+        :show-vision-model="true"
         task-type="exercise"
         unit-name="分区"
         @send="send"
         @pause="pause"
         @clear-target-slide="clearTargetSections"
         @change-model="setModel"
+        @change-vision-model="setVisionModel"
       />
     </aside>
 

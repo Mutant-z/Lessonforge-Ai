@@ -5,6 +5,8 @@ import { useAuthStore } from '../stores/auth';
 import { useCourseStore } from '../stores/courses';
 import { useCourseIntakeStore } from '../stores/courseIntake';
 import type { Course } from '../types';
+import { errorMessage } from '../api/client';
+import { ElMessage, ElMessageBox } from 'element-plus';
 
 import StatusBadge from '../components/feedback/StatusBadge.vue';
 import EmptyState from '../components/feedback/EmptyState.vue';
@@ -29,10 +31,10 @@ import {
   Cpu, 
   Select, 
   MagicStick,
+  Delete,
   Loading,
   Paperclip,
   VideoPlay,
-  VideoCamera,
   ChatDotSquare,
   Bell
 } from '@element-plus/icons-vue';
@@ -46,6 +48,7 @@ const route = useRoute();
 const searchQuery = ref((route.query.search as string) || '');
 const activeStatusFilter = ref('all');
 const startingIntake = ref(false);
+const deletingCourseId = ref<string | null>(null);
 
 const promptInput = ref('');
 const attachedFiles = ref<File[]>([]);
@@ -151,6 +154,14 @@ function applyExampleChip(text: string) {
   promptInput.value = text;
 }
 
+function onKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    handleIntakeSubmit();
+  }
+}
+
 async function handleIntakeSubmit() {
   if (!promptInput.value.trim() || startingIntake.value) return;
   startingIntake.value = true;
@@ -184,6 +195,35 @@ async function createSampleCourse() {
     router.push(`/courses/${newCourse.id}/blueprint`);
   } catch (e) {
     router.push('/courses/new');
+  }
+}
+
+async function handleDeleteCourse(course: Course) {
+  if (deletingCourseId.value) return;
+
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除项目“${course.title}”吗？删除后项目将从项目库中移除，生成内容也将无法继续访问。`,
+      '删除微课项目',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      },
+    );
+  } catch {
+    return;
+  }
+
+  deletingCourseId.value = course.id;
+  try {
+    await store.delete(course.id);
+    ElMessage.success('项目已删除');
+  } catch (cause) {
+    ElMessage.error(errorMessage(cause));
+  } finally {
+    deletingCourseId.value = null;
   }
 }
 
@@ -241,8 +281,7 @@ function getDeliverableStates(status: string) {
     { label: '任务单', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: CircleCheck, icClass: 'sheet' },
     { label: '课后练习', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Operation, icClass: 'quiz' },
     { label: '视频脚本', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: Cpu, icClass: 'script' },
-    { label: '教师逐字稿', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: ChatDotSquare, icClass: 'voice' },
-    { label: '视频生成', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: VideoCamera, icClass: 'video' }
+    { label: '教师逐字稿', ready: isDone, statusText: isDone ? '完成' : (isRunning ? '生成中' : '需同步'), ic: ChatDotSquare, icClass: 'voice' }
   ];
 }
 </script>
@@ -315,7 +354,7 @@ function getDeliverableStates(status: string) {
                 class="prompt-textarea"
                 rows="2"
                 placeholder="例如：为高一学生制作一节 15 分钟的《牛顿第二定律：加速度与合外力关系》微课，包含实验引导与考点精讲..."
-                @keydown.enter.prevent="handleIntakeSubmit"
+                @keydown="onKeydown"
               ></textarea>
 
               <!-- Attached Files Bar -->
@@ -519,7 +558,18 @@ function getDeliverableStates(status: string) {
                     <span class="tag-pill duration">{{ filteredCourses[0].duration_minutes }} 分钟</span>
                   </div>
                 </div>
-                <StatusBadge :status="filteredCourses[0].status" size="default" />
+                <div class="w-header-actions">
+                  <StatusBadge :status="filteredCourses[0].status" size="default" />
+                  <button
+                    type="button"
+                    class="delete-project-btn"
+                    :disabled="deletingCourseId === filteredCourses[0].id"
+                    @click.stop="handleDeleteCourse(filteredCourses[0])"
+                  >
+                    <el-icon><Delete /></el-icon>
+                    <span>删除项目</span>
+                  </button>
+                </div>
               </div>
 
               <div class="w-stage-strip" :class="getProjectStageInfo(filteredCourses[0].status).type">
@@ -587,7 +637,20 @@ function getDeliverableStates(status: string) {
                     </div>
                     <h4 class="g-title" :title="course.title">{{ course.title }}</h4>
                   </div>
-                  <StatusBadge :status="course.status" size="small" />
+                  <div class="g-header-actions">
+                    <StatusBadge :status="course.status" size="small" />
+                    <el-tooltip content="删除项目" placement="top">
+                      <button
+                        type="button"
+                        class="delete-project-icon"
+                        :disabled="deletingCourseId === course.id"
+                        aria-label="删除项目"
+                        @click.stop="handleDeleteCourse(course)"
+                      >
+                        <el-icon><Delete /></el-icon>
+                      </button>
+                    </el-tooltip>
+                  </div>
                 </div>
 
                 <div class="g-stage" :class="getProjectStageInfo(course.status).type">
@@ -1392,6 +1455,56 @@ function getDeliverableStates(status: string) {
   gap: 14px;
 }
 
+.w-header-actions,
+.g-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.delete-project-btn,
+.delete-project-icon {
+  border: 1px solid #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all var(--motion-fast);
+}
+
+.delete-project-btn {
+  min-height: 30px;
+  padding: 4px 10px;
+  border-radius: var(--radius-control);
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.delete-project-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+}
+
+.delete-project-btn:hover,
+.delete-project-icon:hover {
+  background: #ffe4e6;
+  border-color: #fda4af;
+  color: #9f1239;
+}
+
+.delete-project-btn:disabled,
+.delete-project-icon:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .w-left {
   flex: 1;
   min-width: 0;
@@ -1726,6 +1839,7 @@ function getDeliverableStates(status: string) {
 }
 
 .g-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.g-header-actions { gap: 6px; }
 .g-meta { flex: 1; min-width: 0; }
 .g-title { margin: 0; font-size: 16px; font-weight: 800; color: var(--text-primary); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 

@@ -34,6 +34,7 @@ from app.schemas.blueprint import (
     LearningAnalysis,
     LearningObjective,
     TimelineSegment,
+    normalize_blueprint_references,
 )
 from app.schemas.lesson_plan import (
     LessonPlanContentV2,
@@ -152,6 +153,19 @@ def test_v2_rejects_outline_depth_overflow_and_empty_top_level():
     with pytest.raises(ValueError):
         LessonPlanContentV2.model_validate(content)
 
+
+def test_deterministic_builder_repairs_orphaned_objective_activity_references():
+    """模型给出孤立 activity 引用时，首稿仍覆盖每个目标并通过语义门禁。"""
+    malformed = make_bp().model_copy(deep=True)
+    malformed.objectives[0].activity_ids = ["obj_01"]
+    canonical = normalize_blueprint_references(malformed)
+    content = make_lesson_plan_v2(canonical).model_dump()
+
+    issues = validate_lesson_plan(canonical, content)
+    assert not any(
+        item["severity"] in {"critical", "major"} for item in issues
+    )
+    assert any("OBJ-01" in stage.objective_ids for stage in make_lesson_plan_v2(canonical).pedagogical_core.stages)
 
 # ---------------------------------------------------------------------------
 # 统一投影 + 大纲投影

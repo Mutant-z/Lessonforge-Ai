@@ -83,9 +83,8 @@ MUTATING_INTENTS = {
 }
 STRUCTURAL_INTENTS = {"RESTRUCTURE"}
 
-# 意图 → 最小角色链。编辑/生成类意图不再运行发布前校验与定向返修：
-# 结构合法性由发布时的 V4 Schema 强校验兜底，内容质量由 Agent 依据意图直接产出。
-# 仅 QA_ONLY（显式检查请求）保留 validation 角色。
+# 意图 → 最小角色链。视频脚本不再运行内容质量校验或定向返修：
+# 结构合法性由发布时的 V4 Schema 强校验兜底，内容由 Agent 依据教师意图直接产出。
 INTENT_AGENTS: dict[str, list[str]] = {
     "GENERATE": ["context_researcher", "outline_architect", "script_director", "timeline_editor", "finalizer"],
     "RESTRUCTURE": ["context_researcher", "outline_architect", "script_director", "timeline_editor", "finalizer"],
@@ -99,7 +98,7 @@ INTENT_AGENTS: dict[str, list[str]] = {
     "SYNC_CONTEXT": ["context_researcher", "script_director", "timeline_editor", "finalizer"],
     "VIDEO_GENERATION_SETTINGS_UPDATE": ["project_settings"],
     "ANSWER_ONLY": ["context_researcher", "answer_finalizer"],
-    "QA_ONLY": ["validation", "answer_finalizer"],
+    "QA_ONLY": ["context_researcher", "answer_finalizer"],
     "CLARIFICATION_REQUIRED": ["finalizer"],
 }
 

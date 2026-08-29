@@ -12,7 +12,7 @@ from app.schemas.video import (
     SeedanceVideoGenerationContent,
     VideoGenerationQuoteRequest,
 )
-from app.services.seedance_video_generation_service import _dimensions_for_resolution, _fact_qa, _request_hash
+from app.services.seedance_video_generation_service import _dimensions_for_resolution, _fact_qa, _request_hash, _review_audio
 from app.services import seedance_provider_service
 
 
@@ -109,6 +109,20 @@ def test_fact_qa_requires_terms_numbers_and_conclusion():
     assert failed["status"] == "failed"
     assert failed["missing_terms"]
     assert failed["missing_numbers"]
+
+
+@pytest.mark.asyncio
+async def test_audio_review_without_transcriber_uses_script_subtitles(tmp_path):
+    scene = native_scene()
+    transcript, segments, qa, warning = await _review_audio(None, tmp_path / "unused.wav", scene)
+    assert transcript == ""
+    assert qa["status"] == "skipped"
+    assert segments == [{
+        "start_seconds": 0.0,
+        "end_seconds": scene.end_seconds - scene.start_seconds,
+        "text": scene.spoken_text,
+    }]
+    assert "脚本" in warning
 
 
 def test_scene_quote_accepts_exact_edit_snapshot():

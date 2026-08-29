@@ -11,10 +11,12 @@ export const useModelConfigStore = defineStore('model-configs', {
     activeConfigIds: { text: null, vision: null, video: null } as Record<ModelCategory, string | null>,
   }),
   getters: {
-    activeConfig: state => state.configs.find(item => item.model_category === 'text' && item.is_active)
-      || state.configs.find(item => item.model_category === 'text') || null,
+    activeConfig: state => state.configs.find(item => !item.is_archived && item.model_category === 'text' && item.is_active)
+      || state.configs.find(item => !item.is_archived && item.model_category === 'text') || null,
     activeConfigFor: state => (category: ModelCategory) => (
-      state.configs.find(item => item.model_category === category && item.is_active) || null
+      state.configs.find(item => !item.is_archived && item.is_active && (
+        category === 'video' ? item.capabilities.includes('video_generation') : item.model_category === category
+      )) || null
     ),
   },
   actions: {
@@ -22,7 +24,7 @@ export const useModelConfigStore = defineStore('model-configs', {
       this.configs = configs;
       for (const category of ['text', 'vision', 'video'] as ModelCategory[]) {
         this.activeConfigIds[category] = activeConfigIds?.[category]
-          || configs.find(item => item.model_category === category && item.is_active)?.id
+          || configs.find(item => !item.is_archived && item.model_category === category && item.is_active)?.id
           || null;
       }
       this.loaded = true;

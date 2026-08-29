@@ -23,3 +23,17 @@ class AgentError(RuntimeError):
         self.user_message = message
         self.retryable = retryable
         self.details = details or {}
+
+
+class ToolConfirmationRequired(ValueError):
+    """工具命中需要教师确认的高风险操作。
+
+    这类异常不是普通工具故障：Agent 应暂停当前运行并展示确认请求，
+    而不是继续重复调用同一个工具直到耗尽轮次。
+    """
+
+    error_code = "confirmation_required"
+
+    def __init__(self, message: str, *, operation: str = ""):
+        super().__init__(message)
+        self.operation = operation

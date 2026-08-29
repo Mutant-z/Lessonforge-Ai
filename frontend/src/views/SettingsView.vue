@@ -147,8 +147,8 @@
           <button class="mini-preset-btn chip-claude" @click="handleOpenCreateDialog('claude')">
             <span class="btn-dot bg-purple-500"></span> Claude 3.5
           </button>
-          <button class="mini-preset-btn chip-openai" @click="handleOpenCreateDialog('gemini-video')">
-            <span class="btn-dot bg-emerald-500"></span> Gemini 有声视频
+          <button class="mini-preset-btn chip-openai" @click="handleOpenCreateDialog(undefined, 'video')">
+            <span class="btn-dot bg-emerald-500"></span> 添加视频模型
           </button>
         </div>
       </div>
@@ -158,7 +158,7 @@
         <!-- TAB 1: 模型配置管理 -->
         <div v-if="activeTab === 'models'" class="tab-pane animate-fade-in">
           <!-- 空状态 -->
-          <div v-if="modelConfigs.length === 0" class="empty-onboarding-card">
+          <div v-if="activeModelConfigs.length === 0" class="empty-onboarding-card">
             <div class="empty-header">
               <div class="empty-icon-glow">
                 <el-icon><Cpu /></el-icon>
@@ -236,7 +236,10 @@
                     <span class="provider-badge" :class="getProviderBadgeClass(config.provider)">
                       {{ getProviderLabel(config.provider) }}
                     </span>
-                    <span class="purpose-tag">{{ getPurposeLabel(config.model_purpose) }}</span>
+                    <span v-if="config.model_category !== 'video'" class="purpose-tag">{{ getPurposeLabel(config.model_purpose) }}</span>
+                    <span v-else class="purpose-tag" :class="`verification-${config.video_capability_status || 'unverified'}`">
+                      {{ getVideoVerificationLabel(config.video_capability_status) }}
+                    </span>
                     <span v-if="config.is_active" class="active-tag">
                       <span class="pulse-dot"></span> 本列默认
                     </span>
@@ -249,11 +252,10 @@
                     <template #dropdown>
                       <el-dropdown-menu>
                         <el-dropdown-item command="edit"><el-icon><Edit /></el-icon> 编辑配置</el-dropdown-item>
-                        <el-dropdown-item command="test"><el-icon><Connection /></el-icon> 测试连通性</el-dropdown-item>
-                        <el-dropdown-item v-if="!config.is_active && canBeDefault(config)" command="activate"><el-icon><Check /></el-icon> 设为本列默认</el-dropdown-item>
+                        <el-dropdown-item command="test"><el-icon><Connection /></el-icon> 测试连接</el-dropdown-item>
+                        <el-dropdown-item v-if="!config.is_active && canBeDefault(config)" command="activate"><el-icon><Check /></el-icon> {{ config.model_category === 'video' ? '设为默认视频模型' : '设为本列默认' }}</el-dropdown-item>
                         <el-dropdown-item v-if="config.model_category !== 'text'" command="duplicate-text"><el-icon><CopyDocument /></el-icon> 复制为文本模型</el-dropdown-item>
                         <el-dropdown-item v-if="config.model_category !== 'vision'" command="duplicate-vision"><el-icon><CopyDocument /></el-icon> 复制为视觉模型</el-dropdown-item>
-                        <el-dropdown-item v-if="config.model_category !== 'video'" command="duplicate-video"><el-icon><CopyDocument /></el-icon> 复制为视频模型</el-dropdown-item>
                         <el-dropdown-item command="delete" divided class="text-danger"><el-icon><Delete /></el-icon> 删除配置</el-dropdown-item>
                       </el-dropdown-menu>
                     </template>
@@ -286,14 +288,14 @@
                     <span class="lbl">超时:</span>
                     <span class="val">{{ config.timeout_seconds }}s</span>
                   </div>
-                  <div class="detail-item">
+                  <div v-if="config.model_category !== 'video'" class="detail-item">
                     <span class="lbl">上下文:</span>
                     <span class="val">{{ formatContextWindow(config.context_window_tokens) }}</span>
                   </div>
                   <div class="detail-item">
-                    <span class="lbl">能力:</span>
-                    <span class="val" :class="config.supports_multimodal ? 'text-violet' : ''">
-                      {{ config.supports_multimodal ? '多模态' : '纯文本' }}
+                    <span class="lbl">{{ config.model_category === 'video' ? '状态:' : '能力:' }}</span>
+                    <span class="val" :class="config.supports_multimodal || config.model_category === 'video' ? 'text-violet' : ''" :title="config.video_capability_error || ''">
+                      {{ config.model_category === 'video' ? getVideoVerificationDescription(config) : config.supports_multimodal ? '多模态' : '纯文本' }}
                     </span>
                   </div>
                 </div>
@@ -307,7 +309,7 @@
                   :loading="testingConfigId === config.id"
                   @click="handleTestCard(config)"
                 >
-                  <el-icon class="mr-1"><Connection /></el-icon> 测试链接
+                  <el-icon class="mr-1"><Connection /></el-icon> 测试连接
                 </el-button>
 
                 <el-button
@@ -337,6 +339,20 @@
               </div>
             </section>
           </div>
+          <el-collapse v-if="archivedConfigs.length" class="legacy-configs">
+            <el-collapse-item :title="`历史媒体配置（${archivedConfigs.length}）`" name="legacy-media">
+              <p class="legacy-configs-note">这些配置已停用，不再参与视频生成。配置和密钥仍保留，可按需删除。</p>
+              <div class="legacy-config-list">
+                <div v-for="config in archivedConfigs" :key="config.id" class="legacy-config-row">
+                  <div>
+                    <strong>{{ config.name || config.model_name }}</strong>
+                    <span>{{ config.model_name }} · {{ getPurposeLabel(config.model_purpose) }}</span>
+                  </div>
+                  <el-button size="small" plain type="danger" @click="handleDeleteConfig(config)">删除</el-button>
+                </div>
+              </div>
+            </el-collapse-item>
+          </el-collapse>
         </div>
 
         <!-- TAB 2: 默认生成偏好 (精致化配对，单屏饱满无错位) -->
@@ -534,14 +550,14 @@
             <el-icon><Cpu v-if="!editingConfigId" /><Edit v-else /></el-icon>
           </div>
           <div>
-            <h3 class="modal-header-title">{{ editingConfigId ? '修改 AI 模型配置' : '添加 AI 模型配置' }}</h3>
-            <p class="modal-header-sub">配置端点、模型能力、上下文窗口与请求参数</p>
+            <h3 class="modal-header-title">{{ editingConfigId ? (configForm.model_category === 'video' ? '修改视频模型' : '修改 AI 模型配置') : (configForm.model_category === 'video' ? '添加视频模型' : '添加 AI 模型配置') }}</h3>
+            <p class="modal-header-sub">{{ configForm.model_category === 'video' ? '通过 OpenAI 或 Anthropic 协议接入视频生成模型' : '配置端点、模型能力、上下文窗口与请求参数' }}</p>
           </div>
         </div>
       </template>
 
       <!-- 快捷预设条 -->
-      <div v-if="!editingConfigId" class="preset-dialog-bar">
+      <div v-if="!editingConfigId && configForm.model_category !== 'video'" class="preset-dialog-bar">
         <span class="preset-bar-title">
           <el-icon class="ic-indigo"><Lightning /></el-icon> 快捷填入:
         </span>
@@ -564,8 +580,8 @@
           <el-input v-model="configForm.name" placeholder="如：DeepSeek-V3 生产环境 / Claude 3.5 Sonnet" />
         </el-form-item>
 
-        <div class="dialog-form-row">
-          <el-form-item label="模型类别" class="form-col">
+        <div v-if="configForm.model_category !== 'video'" class="dialog-form-row">
+          <el-form-item label="主要用途" class="form-col">
             <el-select v-model="configForm.model_category" class="w-full" :disabled="Boolean(editingConfigId)" @change="handleCategoryChange">
               <el-option v-for="category in modelCategories" :key="category.key" :label="category.label" :value="category.key" />
             </el-select>
@@ -582,8 +598,8 @@
             <el-select v-model="configForm.provider" class="w-full" @change="handleProviderChange">
               <el-option label="OpenAI 兼容协议" value="openai_compatible" />
               <el-option label="Anthropic 协议" value="anthropic" />
-              <el-option label="火山方舟（官方）" value="volcengine_ark" />
-              <el-option label="Mock 模拟服务" value="mock" />
+              <el-option v-if="configForm.model_category !== 'video'" label="火山方舟（官方）" value="volcengine_ark" />
+              <el-option v-if="configForm.model_category !== 'video'" label="Mock 模拟服务" value="mock" />
             </el-select>
           </el-form-item>
 
@@ -594,7 +610,7 @@
 
         <el-form-item label="接口 Base URL (API 端点)" prop="base_url">
           <el-input v-model="configForm.base_url" placeholder="如：https://api.openai.com/v1" />
-          <div class="url-hint-row">
+          <div v-if="configForm.model_category !== 'video'" class="url-hint-row">
             <span>基础 URL，结尾请勿添加 `/chat/completions`</span>
             <span v-if="configForm.base_url.includes('/chat/completions')" class="clean-link" @click="cleanBaseUrl">[自动清理]</span>
           </div>
@@ -612,18 +628,18 @@
             <el-input-number v-model="configForm.timeout_seconds" :min="10" :max="600" class="w-full" />
           </el-form-item>
 
-          <el-form-item label="上下文窗口 (tokens)" prop="context_window_tokens" class="form-col">
+          <el-form-item v-if="configForm.model_category !== 'video'" label="上下文窗口 (tokens)" prop="context_window_tokens" class="form-col">
             <el-input-number v-model="configForm.context_window_tokens" :min="1" :step="1000" class="w-full" />
+          </el-form-item>
+          <el-form-item v-else label="激活状态" class="form-col">
+            <div class="pt-1"><el-switch v-model="configForm.is_active" active-text="设为默认视频模型" /></div>
           </el-form-item>
         </div>
 
-        <div class="dialog-form-row capability-switch-row">
-          <el-form-item label="模型能力（由用途确定）" class="form-col">
+        <div v-if="configForm.model_category !== 'video'" class="dialog-form-row capability-switch-row">
+          <el-form-item label="模型能力" class="form-col">
             <div class="capability-summary">
               <span v-for="capability in configForm.capabilities" :key="capability">{{ getCapabilityLabel(capability) }}</span>
-            </div>
-            <div v-if="configForm.model_purpose === 'vision_chat'" class="url-hint-row">
-              通用多模态聊天模型：支持文本、结构化输出和图片输入；图片生成是另一种用途。
             </div>
           </el-form-item>
 
@@ -632,7 +648,7 @@
           </el-form-item>
         </div>
 
-        <el-form-item v-if="hasSpecializedTransport" label="媒体接口模式">
+        <el-form-item v-if="hasSpecializedTransport && configForm.model_category !== 'video'" label="媒体接口模式">
           <el-select v-model="configForm.api_mode" class="w-full">
             <el-option v-if="hasImageCapability" label="OpenAI Images" value="openai_images" />
             <el-option v-if="hasImageCapability" label="Google Gemini Image" value="google_gemini_image" />
@@ -646,29 +662,12 @@
             <el-option v-if="hasMediaCapability" label="Mock 媒体服务" value="mock_media" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="isCustomMediaTransport" label="自定义接口映射（JSON）">
+        <el-form-item v-if="isCustomMediaTransport && configForm.model_category !== 'video'" label="自定义接口映射（JSON）">
           <el-input v-model="configForm.adapter_config_json_text" type="textarea" :rows="7" :placeholder="adapterConfigPlaceholder" />
           <div class="url-hint-row">
             仅支持安全字段映射，不执行脚本。视频接口可配置创建、轮询、取消、状态、进度与结果路径；远程媒体 URL 必须为 HTTPS 且不能指向内网。
           </div>
         </el-form-item>
-        <div v-if="configForm.capabilities.includes('video_generation')" class="dialog-form-row">
-          <el-form-item label="视频并发数" class="form-col">
-            <el-input-number v-model="configForm.media_max_concurrency" :min="1" :max="16" class="w-full" />
-          </el-form-item>
-          <el-form-item label="轮询间隔（秒）" class="form-col">
-            <el-input-number v-model="configForm.media_poll_interval_seconds" :min="0.5" :max="60" :step="0.5" class="w-full" />
-          </el-form-item>
-        </div>
-        <div v-if="configForm.capabilities.includes('video_generation')" class="dialog-form-row">
-          <el-form-item label="最大视频时长（秒）" class="form-col">
-            <el-input-number v-model="configForm.media_max_duration_seconds" :min="1" :max="7200" class="w-full" />
-          </el-form-item>
-          <el-form-item label="最大媒体文件（MB）" class="form-col">
-            <el-input-number v-model="configForm.media_max_file_mb" :min="1" :max="4096" class="w-full" />
-          </el-form-item>
-        </div>
-
         <div v-if="testResult" class="test-result-banner" :class="testResult.success ? 'bg-success' : 'bg-danger'">
           <div class="banner-content">
             <el-icon :class="testResult.success ? 'ic-success' : 'ic-danger'"><CircleCheckFilled v-if="testResult.success" /><CircleCloseFilled v-else /></el-icon>
@@ -680,7 +679,7 @@
       <template #footer>
         <div class="dialog-footer">
           <el-button plain :loading="testingConnection" @click="handleTestInDialog">
-            <el-icon class="mr-1"><Connection /></el-icon> 测试连通性
+            <el-icon class="mr-1"><Connection /></el-icon> 测试连接
           </el-button>
           <div class="dialog-footer-actions">
             <el-button @click="dialogVisible = false">取消</el-button>
@@ -748,9 +747,12 @@ const preferenceForm = reactive<UserPreferencesPayload>({
 
 // 计算属性
 const activeConfig = computed(() => {
-  return modelConfigs.value.find(c => c.model_category === 'text' && c.is_active)
-    || modelConfigs.value.find(c => c.model_category === 'text') || null;
+  return modelConfigs.value.find(c => !c.is_archived && c.model_category === 'text' && c.is_active)
+    || modelConfigs.value.find(c => !c.is_archived && c.model_category === 'text') || null;
 });
+
+const activeModelConfigs = computed(() => modelConfigs.value.filter(item => !item.is_archived));
+const archivedConfigs = computed(() => modelConfigs.value.filter(item => item.is_archived));
 
 const modelCategories: Array<{ key: ModelCategory; label: string; description: string }> = [
   { key: 'text', label: '文本模型', description: '文本生成与结构化输出' },
@@ -764,7 +766,11 @@ const activeDefaultsSummary = computed(() => modelCategories.map(({ key, label }
 }).join(' · '));
 
 function configsForCategory(category: ModelCategory) {
-  return modelConfigs.value.filter(item => (item.model_category || 'text') === category);
+  return modelConfigs.value.filter(item => !item.is_archived && (
+    category === 'video'
+      ? item.capabilities.includes('video_generation')
+      : (item.model_category || 'text') === category
+  ));
 }
 
 const providerStats = computed(() => {
@@ -818,14 +824,15 @@ const purposeDefinitions: Record<ModelPurpose, { category: ModelCategory; label:
   text_chat: { category: 'text', label: '文本 / 结构化输出', capabilities: ['text_generation', 'structured_output'], apiMode: 'text_chat' },
   vision_chat: { category: 'vision', label: '多模态视觉理解', capabilities: ['text_generation', 'structured_output', 'vision_review'], apiMode: 'text_chat' },
   image_generation: { category: 'vision', label: '图片生成服务', capabilities: ['image_generation'], apiMode: 'openai_images' },
-  video_generation: { category: 'video', label: '视频生成服务', capabilities: ['video_generation'], apiMode: 'custom_video_async_http' },
+  video_generation: { category: 'video', label: '视频生成', capabilities: ['video_generation', 'native_audio_video_generation'], apiMode: 'protocol_video' },
   native_audio_video_generation: { category: 'video', label: '原生有声视频', capabilities: ['video_generation', 'native_audio_video_generation'], apiMode: 'gemini_interactions_video' },
   speech_generation: { category: 'video', label: 'TTS 语音配套', capabilities: ['speech_generation'], apiMode: 'custom_speech_http' },
   speech_recognition: { category: 'video', label: 'ASR 字幕配套', capabilities: ['speech_recognition'], apiMode: 'volcengine_asr' },
   media_composition: { category: 'video', label: '媒体合成服务', capabilities: ['media_composition'], apiMode: 'local_ffmpeg' },
 };
 const purposeOptionsForCategory = computed(() => Object.entries(purposeDefinitions)
-  .filter(([, definition]) => definition.category === configForm.model_category)
+  .filter(([value, definition]) => definition.category === configForm.model_category
+    && !['native_audio_video_generation', 'speech_generation', 'speech_recognition', 'media_composition'].includes(value))
   .map(([value, definition]) => ({ value: value as ModelPurpose, label: definition.label })));
 
 function handlePurposeChange() {
@@ -833,7 +840,7 @@ function handlePurposeChange() {
   configForm.model_category = definition.category;
   configForm.capabilities = [...definition.capabilities];
   configForm.api_mode = definition.apiMode;
-  configForm.is_active = ['text_chat', 'vision_chat', 'video_generation', 'native_audio_video_generation'].includes(configForm.model_purpose);
+  configForm.is_active = ['text_chat', 'vision_chat', 'video_generation'].includes(configForm.model_purpose);
 }
 
 function handleCategoryChange() {
@@ -856,8 +863,20 @@ function getCapabilityLabel(capability: ModelCapability) {
   } as Record<ModelCapability, string>)[capability];
 }
 
+function getVideoVerificationLabel(status?: ModelConfigItem['video_capability_status']) {
+  if (status === 'verified') return '已验证';
+  if (status === 'failed') return '上次生成失败';
+  return '待验证';
+}
+
+function getVideoVerificationDescription(config: ModelConfigItem) {
+  if (config.video_capability_status === 'verified') return '已验证可生成视频';
+  if (config.video_capability_status === 'failed') return config.video_capability_error || '上次生成未返回有效视频';
+  return '首次生成时验证';
+}
+
 function canBeDefault(config: Pick<ModelConfigItem, 'model_purpose'>) {
-  return ['text_chat', 'vision_chat', 'video_generation', 'native_audio_video_generation'].includes(config.model_purpose);
+  return ['text_chat', 'vision_chat', 'video_generation'].includes(config.model_purpose);
 }
 
 const hasImageCapability = computed(() => configForm.model_purpose === 'image_generation');
@@ -880,6 +899,9 @@ const isCustomMediaTransport = computed(() => [
 const adapterConfigPlaceholder = computed(() => {
   if (configForm.api_mode === 'gemini_interactions_video') {
     return '{"interactions_path":"/v1beta/interactions","interaction_status_path":"/v1beta/interactions/{id}","file_status_path":"/v1beta/files/{file_id}","file_download_path":"/v1beta/files/{file_id}:download?alt=media","delivery":"uri","auth_mode":"bearer","max_concurrency":2,"max_file_mb":500}';
+  }
+  if (configForm.api_mode === 'openai_chat_video') {
+    return '{"resolutions":["1280x720"],"min_duration_seconds":3,"max_duration_seconds":15}';
   }
   if (configForm.api_mode === 'volcengine_ark_video') {
     return '{"model_family":"doubao-seedance-2.5","endpoint_path":"/contents/generations/tasks","poll_endpoint_path":"/contents/generations/tasks/{job_id}","cancel_endpoint_path":"/contents/generations/tasks/{job_id}","result_url_path":"content.video_url","usage_path":"usage","price_per_million_tokens_cny":0,"tokens_per_second_720p":0,"max_concurrency":2}';
@@ -962,26 +984,17 @@ function applyPreset(presetType: 'deepseek' | 'openai' | 'ollama' | 'claude' | '
   configForm.media_max_duration_seconds = 1800;
   configForm.media_max_file_mb = 500;
   if (presetType === 'gemini-video') {
-    configForm.name = '本地 Gemini Omni 原生有声视频';
+    configForm.name = '本地通用多模态视频模型';
     configForm.provider = 'openai_compatible';
     configForm.base_url = 'http://127.0.0.1:8045';
-    configForm.model_name = 'gemini-omni-flash-preview';
+    configForm.model_name = 'gemini-3.7-flash-high';
     configForm.timeout_seconds = 600;
     configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
     configForm.model_category = 'video';
-    configForm.model_purpose = 'native_audio_video_generation';
-    configForm.api_mode = 'gemini_interactions_video';
-    configForm.adapter_config_json_text = JSON.stringify({
-      interactions_path: '/v1beta/interactions',
-      interaction_status_path: '/v1beta/interactions/{id}',
-      file_status_path: '/v1beta/files/{file_id}',
-      file_download_path: '/v1beta/files/{file_id}:download?alt=media',
-      delivery: 'uri',
-      auth_mode: 'bearer',
-      max_concurrency: 2,
-      max_file_mb: 500,
-    }, null, 2);
-    configForm.media_max_duration_seconds = 10;
+    configForm.model_purpose = 'video_generation';
+    configForm.api_mode = 'protocol_video';
+    configForm.adapter_config_json_text = JSON.stringify({ resolutions: ['1280x720'] }, null, 2);
+    configForm.media_max_duration_seconds = 15;
   } else if (presetType === 'deepseek') {
     configForm.name = 'DeepSeek V3 官方';
     configForm.provider = 'openai_compatible';
@@ -1023,6 +1036,14 @@ function getTemplateName(id: string) {
 }
 
 function handleProviderChange(val: string) {
+  if (configForm.model_category === 'video') {
+    configForm.provider = val === 'anthropic' ? 'anthropic' : 'openai_compatible';
+    configForm.api_mode = 'protocol_video';
+    configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+    if (configForm.provider === 'anthropic' && !configForm.base_url) configForm.base_url = 'https://api.anthropic.com';
+    if (configForm.provider === 'openai_compatible' && !configForm.base_url) configForm.base_url = 'https://api.openai.com/v1';
+    return;
+  }
   if (val === 'openai_compatible' && !configForm.base_url) {
     configForm.base_url = 'https://api.openai.com/v1';
     configForm.model_name = 'gpt-4o';
@@ -1034,13 +1055,14 @@ function handleProviderChange(val: string) {
     configForm.model_name = '';
     configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
     configForm.model_category = 'video';
-    configForm.model_purpose = 'native_audio_video_generation';
+    configForm.model_purpose = 'video_generation';
     configForm.api_mode = 'volcengine_ark_video';
     configForm.media_max_duration_seconds = 15;
   } else if (val === 'mock') {
     configForm.base_url = 'mock://local';
     configForm.model_name = 'mock-model';
   }
+  if (['openai_compatible', 'anthropic'].includes(val) && configForm.model_category === 'video') configForm.api_mode = 'protocol_video';
 }
 
 async function loadSettings() {
@@ -1098,7 +1120,7 @@ async function handleCardCommand(command: string, config: ModelConfigItem) {
 
 async function handleDuplicateConfig(config: ModelConfigItem, targetCategory: ModelCategory) {
   const targetPurpose: ModelPurpose = targetCategory === 'vision' ? 'vision_chat'
-    : targetCategory === 'video' ? 'native_audio_video_generation' : 'text_chat';
+    : targetCategory === 'video' ? 'video_generation' : 'text_chat';
   const targetLabel = targetCategory === 'vision' ? '视觉模型' : targetCategory === 'video' ? '视频模型' : '文本模型';
   try {
     await ElMessageBox.confirm(
@@ -1135,8 +1157,17 @@ function handleOpenCreateDialog(preset?: 'deepseek' | 'openai' | 'ollama' | 'cla
     configForm.capabilities = ['text_generation', 'structured_output'];
     configForm.api_mode = 'text_chat';
     configForm.model_category = category;
-    configForm.model_purpose = category === 'vision' ? 'vision_chat' : category === 'video' ? 'native_audio_video_generation' : 'text_chat';
+    configForm.model_purpose = category === 'vision' ? 'vision_chat' : category === 'video' ? 'video_generation' : 'text_chat';
     handlePurposeChange();
+    if (category === 'video') {
+      configForm.name = '';
+      configForm.model_name = '';
+      configForm.provider = 'openai_compatible';
+      configForm.base_url = 'https://api.openai.com/v1';
+      configForm.api_mode = 'protocol_video';
+      configForm.capabilities = ['video_generation', 'native_audio_video_generation'];
+      configForm.timeout_seconds = 600;
+    }
     configForm.adapter_config_json_text = '{}';
     configForm.media_max_concurrency = 2;
     configForm.media_poll_interval_seconds = 2;
@@ -1161,7 +1192,9 @@ function handleEditConfig(config: ModelConfigItem) {
   configForm.context_window_tokens = config.context_window_tokens;
   configForm.supports_multimodal = config.supports_multimodal;
   configForm.capabilities = [...(config.capabilities || ['text_generation', 'structured_output'])];
-  configForm.api_mode = config.api_mode || 'text_chat';
+  configForm.api_mode = config.model_category === 'video'
+    ? 'protocol_video'
+    : (config.api_mode || 'text_chat');
   configForm.model_category = config.model_category || 'text';
   configForm.model_purpose = config.model_purpose || 'text_chat';
   configForm.adapter_config_json_text = JSON.stringify(config.adapter_config || {}, null, 2);
@@ -1200,8 +1233,8 @@ async function handleTestCard(config: ModelConfigItem) {
       model_name: config.model_name,
       timeout_seconds: 15,
       test_capability: preferredTestCapability(config.capabilities),
-      api_mode: config.api_mode,
-      adapter_config: config.adapter_config,
+      api_mode: config.model_category === 'video' ? 'protocol_video' : config.api_mode,
+      adapter_config: config.model_category === 'video' ? {} : config.adapter_config,
     });
     if (res.success) {
       ElMessage.success({ message: `[${config.name}] ${res.message}`, duration: 4000 });
@@ -1236,14 +1269,14 @@ async function handleTestInDialog() {
       api_key: configForm.api_key.trim(),
       timeout_seconds: 15,
       test_capability: preferredTestCapability(configForm.capabilities),
-      api_mode: configForm.api_mode,
-      adapter_config: adapterWithMediaLimits(JSON.parse(configForm.adapter_config_json_text || '{}')),
+      api_mode: configForm.model_category === 'video' ? 'protocol_video' : configForm.api_mode,
+      adapter_config: configForm.model_category === 'video' ? {} : adapterWithMediaLimits(JSON.parse(configForm.adapter_config_json_text || '{}')),
     });
     testResult.value = { success: res.success, message: res.message };
   } catch (err: any) {
     testResult.value = {
       success: false,
-      message: err.response?.data?.detail || err.message || '测试连通性出错',
+      message: err.response?.data?.detail || err.message || '测试连接出错',
     };
   } finally {
     testingConnection.value = false;
@@ -1263,11 +1296,13 @@ async function handleSubmitConfig() {
     }
 
     let adapterConfig: Record<string, unknown> = {};
-    try {
-      adapterConfig = JSON.parse(configForm.adapter_config_json_text || '{}');
-    } catch {
-      ElMessage.error('自定义接口映射必须是有效 JSON');
-      return;
+    if (configForm.model_category !== 'video') {
+      try {
+        adapterConfig = JSON.parse(configForm.adapter_config_json_text || '{}');
+      } catch {
+        ElMessage.error('自定义接口映射必须是有效 JSON');
+        return;
+      }
     }
     const payload = {
       name: configForm.name.trim() || undefined,
@@ -1278,9 +1313,9 @@ async function handleSubmitConfig() {
       timeout_seconds: configForm.timeout_seconds,
       context_window_tokens: configForm.context_window_tokens,
       supports_multimodal: configForm.capabilities.includes('vision_review'),
-      capabilities: configForm.capabilities,
-      api_mode: configForm.api_mode,
-      adapter_config: adapterWithMediaLimits(adapterConfig),
+      capabilities: configForm.model_category === 'video' ? ['video_generation', 'native_audio_video_generation'] as ModelCapability[] : configForm.capabilities,
+      api_mode: configForm.model_category === 'video' ? 'protocol_video' : configForm.api_mode,
+      adapter_config: configForm.model_category === 'video' ? {} : adapterWithMediaLimits(adapterConfig),
       is_active: configForm.is_active,
       model_category: configForm.model_category,
       model_purpose: configForm.model_purpose,
@@ -1770,7 +1805,17 @@ onMounted(() => {
 .model-category-kicker { font-size: 15px; font-weight: 900; color: var(--text-primary); }
 .model-column-cards { display: flex; flex-direction: column; gap: 12px; }
 .category-empty { padding: 32px 10px; border: 1px dashed #cbd5e1; border-radius: 12px; text-align: center; color: #94a3b8; font-size: 12px; }
+.legacy-configs { margin-top: 14px; border: 1px solid #c7cad0; background: #fff; }
+.legacy-configs-note { margin: 0 0 10px; color: #676d76; font-size: 12px; }
+.legacy-config-list { display: grid; gap: 1px; background: #d9dbe0; border: 1px solid #d9dbe0; }
+.legacy-config-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; background: #fff; }
+.legacy-config-row div { display: grid; gap: 3px; }
+.legacy-config-row strong { color: #111318; font-size: 13px; }
+.legacy-config-row span { color: #676d76; font-size: 11px; }
 .purpose-tag { padding: 2px 6px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-size: 10px; font-weight: 800; }
+.purpose-tag.verification-unverified { background: #eef2ff; color: #4338ca; }
+.purpose-tag.verification-verified { background: #ecfdf5; color: #047857; }
+.purpose-tag.verification-failed { background: #fef2f2; color: #b91c1c; }
 .capability-summary { display: flex; flex-wrap: wrap; gap: 6px; }
 .capability-summary span { padding: 5px 8px; border-radius: 8px; background: #eef2ff; color: #4338ca; font-size: 12px; font-weight: 700; }
 

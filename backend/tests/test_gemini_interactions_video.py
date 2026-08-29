@@ -153,3 +153,41 @@ async def test_duration_range_is_enforced_before_request():
             prompt="prompt", duration_seconds=11, resolution="1280x720", idempotency_key="idem-4",
         )
     assert caught.value.code == "video_scene_duration_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_gateway_wide_options_false_positive(monkeypatch):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        # This mirrors the local gateway: generic CORS OPTIONS succeeds even
+        # though the authenticated route lookup proves the endpoint is absent.
+        if request.method == "OPTIONS":
+            return httpx.Response(200)
+        assert request.headers["authorization"] == "Bearer test-secret"
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        gemini,
+        "build_async_client",
+        lambda *args, **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(MediaProviderError) as caught:
+        await gemini.GeminiInteractionsVideoAdapter(_config()).probe_capabilities()
+    assert caught.value.code == "video_interactions_endpoint_unavailable"
+    assert calls == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_probe_accepts_existing_post_only_route(monkeypatch):
+    monkeypatch.setattr(
+        gemini,
+        "build_async_client",
+        lambda *args, **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(405, headers={"allow": "POST"}))
+        ),
+    )
+    result = await gemini.GeminiInteractionsVideoAdapter(_config()).probe_capabilities()
+    assert result["native_audio"] is True
+    assert result["source"] == "gateway_endpoint_probe"

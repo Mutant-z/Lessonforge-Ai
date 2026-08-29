@@ -509,7 +509,16 @@ def test_intent_fallback_routing():
     assert agent_chain_for_intent("RESTRUCTURE", "message")[-1] == "finalizer"
     assert "outline_architect" in agent_chain_for_intent("RESTRUCTURE", "message")
     assert "script_director" in agent_chain_for_intent("NARRATION_EDIT", "message")
-    assert agent_chain_for_intent("QA_ONLY", "message") == ["validation", "answer_finalizer"]
+    assert agent_chain_for_intent("QA_ONLY", "message") == ["context_researcher", "answer_finalizer"]
+
+
+def test_video_script_finalizers_cannot_call_content_validation():
+    """视频脚本内容由 Agent 直接发布；终稿与答复角色不得重新触发内容门禁。"""
+    from app.agent.agents.video_script.agents import ANSWER_FINALIZER, FINALIZER, FINALIZER_TOOLS
+
+    assert "vs_validate_draft" not in FINALIZER_TOOLS
+    assert "vs_validate_draft" not in FINALIZER.allowed_tools
+    assert "vs_validate_draft" not in ANSWER_FINALIZER.allowed_tools
 
 
 def test_intent_scope_ordinal_unknown_id_and_destructive_confirmation():

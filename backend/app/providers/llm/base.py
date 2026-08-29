@@ -41,6 +41,29 @@ class LLMProvider(ABC):
                                     image_media_type: str, schema: type[T]) -> T:
         raise NotImplementedError("该 provider 不支持图像输入")
 
+    async def structured_with_attachments(
+        self,
+        system: str,
+        prompt: str,
+        attachments: list[dict[str, str]],
+        schema: type[T],
+    ) -> T:
+        """Structured request with native image/PDF inputs.
+
+        Providers that understand a multimodal wire protocol override this
+        method.  The default keeps older custom providers compatible by using
+        the single-image implementation when possible.
+        """
+        if len(attachments) == 1 and attachments[0].get("mime_type", "").startswith("image/"):
+            return await self.structured_with_image(
+                system,
+                prompt,
+                attachments[0].get("data_b64", ""),
+                attachments[0].get("mime_type", "image/png"),
+                schema,
+            )
+        raise NotImplementedError("该 provider 不支持多模态附件输入")
+
     @abstractmethod
     async def stream_decision(self, system: str, prompt: str, schema: type[T]) -> AsyncIterator[DecisionStreamEvent]:
         """流式返回结构化决策。
@@ -65,6 +88,31 @@ class LLMProvider(ABC):
         事件与发布语义。
         """
         raise NotImplementedError("该 provider 不支持原生 tool calling")
+
+    async def native_agent_decision_with_attachments(
+        self,
+        system: str,
+        prompt: str,
+        attachments: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+    ) -> "AgentDecision | None":
+        """Native tool call with attachments; default falls back to text-only."""
+        return await self.native_agent_decision(system, prompt, tools)
+
+    async def stream_decision_with_attachments(
+        self,
+        system: str,
+        prompt: str,
+        attachments: list[dict[str, str]],
+        schema: type[T],
+    ) -> AsyncIterator[DecisionStreamEvent]:
+        """Stream a structured decision with native attachments.
+
+        The default is deliberately finite but valid, allowing older provider
+        implementations to keep working while concrete providers add native
+        streaming support.
+        """
+        yield ("decision_ready", await self.structured_with_attachments(system, prompt, attachments, schema))
 
     @abstractmethod
     async def stream_text(self, system: str, prompt: str) -> AsyncIterator[str]:

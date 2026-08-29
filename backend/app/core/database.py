@@ -62,6 +62,14 @@ async def create_schema() -> None:
                     sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN model_category VARCHAR(20) NOT NULL DEFAULT 'text'"))
                 if "model_purpose" not in columns:
                     sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN model_purpose VARCHAR(40) NOT NULL DEFAULT 'text_chat'"))
+                if "is_archived" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN is_archived BOOLEAN NOT NULL DEFAULT 0"))
+                if "video_capability_status" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN video_capability_status VARCHAR(20) NOT NULL DEFAULT 'unverified'"))
+                if "video_capability_error" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN video_capability_error TEXT NOT NULL DEFAULT ''"))
+                if "video_capability_verified_at" not in columns:
+                    sync_conn.execute(text("ALTER TABLE model_configs ADD COLUMN video_capability_verified_at DATETIME"))
 
             for table_name in ("course_projects", "course_intake_sessions"):
                 if table_name in inspector.get_table_names():
